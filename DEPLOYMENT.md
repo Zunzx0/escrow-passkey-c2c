@@ -7,7 +7,7 @@ Dự án được đóng gói thành một dịch vụ Web duy nhất: Express p
 1. Đưa thư mục này lên một repository GitHub riêng tư.
 2. Trong Render, chọn **New → Blueprint** và kết nối repository.
 3. Render đọc `render.yaml`, tạo Web Service và PostgreSQL ở Singapore.
-4. Khi triển khai xong, mở URL dạng `https://<ten-dich-vu>.onrender.com`.
+4. Khi triển khai xong, mở URL `https://cho-lon.onrender.com` (hoặc biến thể có hậu tố nếu tên này đã được sử dụng trên Render).
 
 Backend tự lấy `RENDER_EXTERNAL_HOSTNAME` để cấu hình:
 

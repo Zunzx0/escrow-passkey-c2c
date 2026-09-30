@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: escrow-passkey-c2c
+    name: cho-lon
     runtime: docker
     region: singapore
     plan: free
