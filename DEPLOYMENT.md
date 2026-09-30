@@ -1,4 +1,4 @@
-# Triển khai công khai
+# Triển khai công khai miễn phí
 
 Dự án được đóng gói thành một dịch vụ Web duy nhất: Express phục vụ API và bản dựng React trên cùng miền HTTPS. Cách này giúp cookie phiên và WebAuthn/Passkey dùng chung origin, không cần cấu hình CORS giữa hai dịch vụ.
 
@@ -7,16 +7,14 @@ Dự án được đóng gói thành một dịch vụ Web duy nhất: Express p
 1. Đưa thư mục này lên một repository GitHub riêng tư.
 2. Trong Render, chọn **New → Blueprint** và kết nối repository.
 3. Render đọc `render.yaml`, tạo Web Service và PostgreSQL ở Singapore.
-4. Khi triển khai xong, Render cung cấp URL tạm `https://cho-lon.onrender.com` và liên kết tên miền chính `https://chohanhthien.com` sau khi DNS được xác minh.
+4. Khi triển khai xong, website có địa chỉ công khai dự kiến là `https://chohanhthien.onrender.com`.
 
 Backend tự lấy `RENDER_EXTERNAL_HOSTNAME` để cấu hình:
 
-- `RP_ID=<ten-dich-vu>.onrender.com`
-- `ORIGIN=https://<ten-dich-vu>.onrender.com`
-- `CORS_ORIGIN=https://<ten-dich-vu>.onrender.com`
+- `RP_ID=chohanhthien.onrender.com`
+- `ORIGIN=https://chohanhthien.onrender.com`
+- `CORS_ORIGIN=https://chohanhthien.onrender.com`
 - cookie phiên có cờ `Secure`
-
-Khi `PUBLIC_HOSTNAME=chohanhthien.com` được cấu hình, giá trị này được ưu tiên cho RP ID, origin và CORS để Passkey hoạt động đúng trên tên miền riêng.
 
 Container tự chạy migration và dữ liệu chợ mẫu trước khi khởi động ứng dụng. Không đưa `.env`, mật khẩu hoặc chuỗi kết nối cơ sở dữ liệu lên GitHub.
 

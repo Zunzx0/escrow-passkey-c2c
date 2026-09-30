@@ -1,13 +1,11 @@
 services:
   - type: web
-    name: cho-lon
+    name: chohanhthien
     runtime: docker
     region: singapore
     plan: free
     dockerfilePath: ./Dockerfile
     healthCheckPath: /api/health
-    domains:
-      - chohanhthien.com
     envVars:
       - key: DATABASE_URL
         fromDatabase:
@@ -15,8 +13,6 @@ services:
           property: connectionString
       - key: RP_NAME
         value: Escrow Passkey Marketplace
-      - key: PUBLIC_HOSTNAME
-        value: chohanhthien.com
       - key: SESSION_COOKIE_SECURE
         value: "true"
       - key: MOCK_PAYMENT_HMAC_SECRET
