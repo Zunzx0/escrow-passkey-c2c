@@ -1,0 +1,87 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600&display=swap");
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-tech: "JetBrains Mono", ui-monospace, monospace;
+
+  /* "Light Premium Technology Marketplace" palette (redesign spec §2). */
+  --color-bg: #ffffff;
+  --color-surface-subtle: #f7f9fc;
+  --color-surface-secondary: #f3f6fa;
+  --color-surface-card: #ffffff;
+  --color-surface-input: #f5f7fa;
+
+  --color-text: #172033;
+  --color-text-secondary: #536176;
+  --color-text-muted: #8491a5;
+  --color-text-light: #aab4c3;
+
+  --color-brand: #0ea5e9;
+  --color-brand-hover: #0284c7;
+  --color-brand-blue: #2563eb;
+  --color-brand-violet: #7c3aed;
+  --color-success: #10b981;
+  --color-warning: #f59e0b;
+  --color-danger: #ef4444;
+
+  --color-border: #e5eaf0;
+  --color-border-hover: #cbd5e1;
+  --color-border-accent: rgba(14, 165, 233, 0.45);
+
+  /* Radius scale — tightened after review: large radii were making a desktop
+     marketplace read like a soft mobile app. */
+  --radius-button: 8px;
+  --radius-input: 8px;
+  --radius-card: 10px;
+  --radius-banner: 14px;
+  --radius-hero: 16px;
+
+  /* §31 shadows — very restrained, never neon glow. */
+  --shadow-card: 0 2px 8px rgba(15, 23, 42, 0.04);
+  --shadow-card-hover: 0 12px 28px rgba(15, 23, 42, 0.09);
+}
+
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: rgba(14, 165, 233, 0.18);
+}
+
+/* Reserved for transaction IDs and timestamps only — never for prices (§3). */
+.font-tech {
+  font-family: var(--font-tech);
+}
+
+.brand-gradient {
+  background-image: linear-gradient(120deg, #0ea5e9 0%, #2563eb 50%, #7c3aed 100%);
+}
+
+/* Horizontal scrollers (category bar, discovery strip) without a visible bar. */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}

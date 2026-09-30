@@ -1,0 +1,11 @@
+.git
+.gitignore
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+backend/deploy_patch
+sport-store-backend-SIEM
+sport-store-main-SIEM
+store.db
+*.docx
