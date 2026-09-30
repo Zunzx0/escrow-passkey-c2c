@@ -4,7 +4,7 @@ import { z } from "zod";
 // Render exposes the final public hostname at runtime. Deriving WebAuthn
 // settings from it keeps RP ID, origin, CORS and the browser URL aligned even
 // when the service name receives a suffix because the preferred name is busy.
-const hostedHostname = process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
+const hostedHostname = process.env.PUBLIC_HOSTNAME?.trim() || process.env.RENDER_EXTERNAL_HOSTNAME?.trim();
 const hostedOrigin = hostedHostname ? `https://${hostedHostname}` : undefined;
 
 const booleanFromEnvironment = z.preprocess((value) => {
