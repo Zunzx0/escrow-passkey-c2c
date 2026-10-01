@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chợ An Tâm — Mua bán đồ cũ an toàn giữa cá nhân</title>
+<meta name="description" content="Sàn mua bán đồ cũ giữa cá nhân: tiền chỉ chuyển cho người bán sau khi bạn xác nhận đã nhận đúng hàng." />
+<meta name="theme-color" content="#EE5A24" />
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23EE5A24'/><path d='M9 12h14l-1.2 11a2 2 0 0 1-2 1.8h-7.6a2 2 0 0 1-2-1.8z' fill='white'/><path d='M12.5 12V10a3.5 3.5 0 0 1 7 0v2' fill='none' stroke='white' stroke-width='2'/></svg>" />
+<link href="css/style.css" rel="stylesheet">
+</head>
+<body>
+
+<div class="app" id="app" data-sidebar="off">
+
+  <header class="topbar">
+    <div class="wrap topbar-inner">
+      <a class="brand" href="#/" aria-label="Chợ An Tâm — về trang chủ">
+        <span class="brand-mark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4Z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+        </span>
+        <span class="brand-name">Chợ An Tâm</span>
+      </a>
+
+      <form class="topbar-search" id="topSearch" role="search">
+        <input id="topSearchInput" type="search" placeholder="Tìm điện thoại, laptop, sách, đồ gia dụng..." aria-label="Tìm sản phẩm">
+        <button type="submit" class="topbar-search-btn" aria-label="Tìm kiếm">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+        </button>
+      </form>
+
+      <div class="topbar-actions" id="topbarActions"></div>
+    </div>
+  </header>
+
+  <div class="shell">
+    <aside class="sidebar" id="sidebar" aria-label="Tài khoản của tôi"></aside>
+    <main class="content" role="main"><div id="view"></div></main>
+  </div>
+
+  <footer class="footer">
+    <div class="wrap footer-inner">
+      <div>
+        <h3>Chợ An Tâm</h3>
+        <p>Sàn mua bán giữa các cá nhân: đồ đã qua sử dụng, hàng sưu tầm, vật dụng cá nhân. Tiền của người
+           mua được giữ an toàn và chỉ chuyển cho người bán khi người mua xác nhận đã nhận đúng hàng.</p>
+      </div>
+      <div>
+        <h3>Mua bán an toàn</h3>
+        <ul>
+          <li>Không mất tiền oan — tiền chỉ chuyển khi bạn xác nhận</li>
+          <li>Xác thực bằng vân tay hoặc khuôn mặt khi chuyển tiền</li>
+          <li>Tranh chấp có quản trị viên phân xử</li>
+          <li>Mọi bước giao dịch đều được lưu vết, không sửa được</li>
+        </ul>
+      </div>
+      <div>
+        <h3>Dành cho bạn</h3>
+        <ul>
+          <li><a href="#/">Khám phá sản phẩm</a></li>
+          <li><a href="#/orders">Giao dịch của tôi</a></li>
+          <li><a href="#/wallet">Ví &amp; nạp tiền</a></li>
+          <li><a href="#/security">Bảo mật tài khoản</a></li>
+        </ul>
+      </div>
+    </div>
+    <div class="wrap footer-bottom">
+      Đồ án tốt nghiệp — mô phỏng hệ thống thanh toán trung gian và xác thực sinh trắc học. Số dư và cổng thanh toán là mô phỏng.
+    </div>
+  </footer>
+
+</div>
+
+<div id="toasts" aria-live="polite"></div>
+<div id="modalRoot"></div>
+
+<script src="js/icons.js"></script>
+<script src="js/simplewebauthn-browser.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

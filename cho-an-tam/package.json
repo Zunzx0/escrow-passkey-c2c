@@ -1,0 +1,49 @@
+{
+  "name": "escrow-app",
+  "version": "2.0.0",
+  "description": "Cho An Tam - san mua ban C2C voi vi trung gian Escrow va xac thuc Passkeys (WebAuthn)",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "start:test": "node --env-file=.env.test src/server.js",
+    "start:experiment": "node --env-file=.env.experiment src/server.js",
+    "test:suite": "node --env-file=.env.test scripts/run-suite.js",
+    "dev": "node --watch src/server.js",
+    "test:core": "node test/e2e.js",
+    "test:market": "node test/market-e2e.js",
+    "test:security": "node test/security-e2e.js",
+    "test:hybrid": "node test/hybrid-e2e.js",
+    "test:rollback": "node test/rollback-e2e.js",
+    "test:hardening": "node test/hardening-e2e.js",
+    "test:payment": "node test/payment-e2e.js",
+    "test:reconcile": "node test/reconcile-e2e.js",
+    "test:counter": "node test/counter-e2e.js",
+    "test:cleanup": "node test/cleanup-e2e.js",
+    "test:invariants": "node test/invariants-unit.js",
+    "test:notifications": "node test/notification-e2e.js",
+    "test:checkout": "node test/checkout-e2e.js",
+    "test:all": "node test/e2e.js && node test/market-e2e.js && node test/security-e2e.js && node test/hybrid-e2e.js && node test/payment-e2e.js && node test/reconcile-e2e.js",
+    "reconcile": "node scripts/reconcile.js",
+    "cleanup:challenges": "node scripts/cleanup-challenges.js",
+    "seed:admin": "node scripts/seed-admin.js",
+    "seed:experiment": "node scripts/seed-experiment.js",
+    "check:invariants": "node scripts/check-invariants.js",
+    "reset-db": "node scripts/reset-db.js",
+    "freeze:experiment": "node scripts/freeze-experiment.js",
+    "freeze:verify": "node scripts/freeze-experiment.js --verify"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "engines": {
+    "node": ">=23.4.0"
+  },
+  "dependencies": {
+    "@simplewebauthn/browser": "^13.3.0",
+    "@simplewebauthn/server": "^13.3.2",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "uuid": "^14.0.1"
+  }
+}
