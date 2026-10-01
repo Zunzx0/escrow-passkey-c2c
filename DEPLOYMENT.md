@@ -1,28 +1,18 @@
-# Triển khai công khai miễn phí
+# Hướng dẫn triển khai lên Render
 
-Dự án được đóng gói thành một dịch vụ Web duy nhất: Express phục vụ API và bản dựng React trên cùng miền HTTPS. Cách này giúp cookie phiên và WebAuthn/Passkey dùng chung origin, không cần cấu hình CORS giữa hai dịch vụ.
+Hệ thống chỉ gồm một dịch vụ Node.js/Express duy nhất (thư mục `cho-an-tam/`), dùng SQLite làm cơ sở dữ liệu, phục vụ cả API và giao diện web trên cùng một domain. Nhờ dùng chung origin, cookie phiên và WebAuthn/Passkey hoạt động trực tiếp mà không cần cấu hình CORS.
 
-## Render + GitHub
+## Quy trình Render + GitHub
 
-1. Đưa thư mục này lên một repository GitHub riêng tư.
-2. Trong Render, chọn **New → Blueprint** và kết nối repository.
-3. Render đọc `render.yaml`, tạo Web Service và PostgreSQL ở Singapore.
-4. Khi triển khai xong, website có địa chỉ công khai dự kiến là `https://choden.onrender.com`.
+1. Đẩy code lên repository GitHub (có thể để public hoặc private).
+2. Trên Render, tạo Blueprint từ repository này — Render sẽ tự đọc `render.yaml` ở gốc và dựng dịch vụ web `choden` theo `Dockerfile` (build từ thư mục `cho-an-tam/`).
+3. Các biến môi trường nhạy cảm (`JWT_SECRET`, `PAYMENT_WEBHOOK_SECRET`) được Render tự sinh giá trị ngẫu nhiên, không cần nhập tay.
+4. Domain công khai do Render cấp theo dạng `https://<tên-dịch-vụ>-<hậu-tố-ngẫu-nhiên>.onrender.com` (ví dụ domain đang dùng: `https://choden-dsky.onrender.com`).
 
-Backend tự lấy `RENDER_EXTERNAL_HOSTNAME` để cấu hình:
+## Kiểm tra sau khi triển khai
 
-- `RP_ID=choden.onrender.com`
-- `ORIGIN=https://choden.onrender.com`
-- `CORS_ORIGIN=https://choden.onrender.com`
-- cookie phiên có cờ `Secure`
+- Gọi `GET /health` — kỳ vọng trả về `{"status":"OK", ...}`.
+- Mở trang chủ, kiểm tra danh sách tin đăng demo hiển thị đúng.
+- Tạo tài khoản mới và đăng ký Passkey trực tiếp trên domain đã triển khai.
 
-Container tự chạy migration và dữ liệu chợ mẫu trước khi khởi động ứng dụng. Không đưa `.env`, mật khẩu hoặc chuỗi kết nối cơ sở dữ liệu lên GitHub.
-
-## Kiểm tra sau triển khai
-
-- `/api/health` trả về `{ "status": "ok" }`.
-- Trang chủ hiển thị các sản phẩm mẫu.
-- Đăng ký tài khoản mới và tạo Passkey trên đúng tên miền triển khai.
-- Mở lại trang bằng máy hoặc điện thoại khác qua URL HTTPS công khai.
-
-Passkey được ràng buộc với RP ID. Passkey đã tạo ở `localhost` không dùng được trên miền Render; mỗi tài khoản phải đăng ký Passkey mới trên miền công khai.
+**Lưu ý:** Passkey tạo trên `localhost` khi phát triển sẽ không dùng được trên domain Render, vì Passkey bị ràng buộc theo RP ID cụ thể — cần tạo lại Passkey trên domain thật sau khi triển khai.
