@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: chohanhthien
+    name: choden
     runtime: docker
     region: singapore
     plan: free

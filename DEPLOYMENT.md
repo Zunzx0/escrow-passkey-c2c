@@ -7,13 +7,13 @@ Dự án được đóng gói thành một dịch vụ Web duy nhất: Express p
 1. Đưa thư mục này lên một repository GitHub riêng tư.
 2. Trong Render, chọn **New → Blueprint** và kết nối repository.
 3. Render đọc `render.yaml`, tạo Web Service và PostgreSQL ở Singapore.
-4. Khi triển khai xong, website có địa chỉ công khai dự kiến là `https://chohanhthien.onrender.com`.
+4. Khi triển khai xong, website có địa chỉ công khai dự kiến là `https://choden.onrender.com`.
 
 Backend tự lấy `RENDER_EXTERNAL_HOSTNAME` để cấu hình:
 
-- `RP_ID=chohanhthien.onrender.com`
-- `ORIGIN=https://chohanhthien.onrender.com`
-- `CORS_ORIGIN=https://chohanhthien.onrender.com`
+- `RP_ID=choden.onrender.com`
+- `ORIGIN=https://choden.onrender.com`
+- `CORS_ORIGIN=https://choden.onrender.com`
 - cookie phiên có cờ `Secure`
 
 Container tự chạy migration và dữ liệu chợ mẫu trước khi khởi động ứng dụng. Không đưa `.env`, mật khẩu hoặc chuỗi kết nối cơ sở dữ liệu lên GitHub.
