@@ -96,11 +96,11 @@ async function main() {
   assert((await notes(buyer, 'ORDER_ACKNOWLEDGED', { transactionId: t1 })).length === 1, 'Người mua nhận ORDER_ACKNOWLEDGED');
   assert(hasTodo(await todo(seller), 'SHIP_ORDER', t1) && !hasTodo(await todo(seller), 'ACK_ORDER', t1),
     'Việc của người bán chuyển từ "Xác nhận đơn" sang "Giao hàng"');
-  const ackLog = db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE transaction_id = ? AND action = 'SELLER_ACKNOWLEDGED'`).get(t1).n;
+  const ackLog = (await db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE transaction_id = ? AND action = 'SELLER_ACKNOWLEDGED'`).get(t1)).n;
   assert(ackLog === 1, 'Xác nhận đơn được ghi đúng một bản ghi vào chuỗi nhật ký');
 
   section('N02: "Việc cần xử lý" bám trạng thái thật, không bám bảng thông báo');
-  db.prepare('DELETE FROM notifications WHERE user_id = ?').run(seller.user.id);
+  await db.prepare('DELETE FROM notifications WHERE user_id = ?').run(seller.user.id);
   assert((await notes(seller, 'ORDER_PAID', { transactionId: t1 })).length === 0, 'Đã xoá hết thông báo của người bán');
   assert(hasTodo(await todo(seller), 'SHIP_ORDER', t1), 'Việc "Giao hàng" VẪN còn — mất thông báo không làm mất việc cần làm');
 
@@ -149,20 +149,20 @@ async function main() {
   section('N05: Nạp tiền — thành công/thất bại đều báo, webhook lặp không sinh thông báo thừa');
   {
     const ok = await api('/api/payments/topup', { method: 'POST', token: buyer.token, body: { amount: 100000 } });
-    const cb = provider.settlePayment(ok.data.providerRef, 'SUCCEEDED');
+    const cb = await provider.settlePayment(ok.data.providerRef, 'SUCCEEDED');
     await api('/api/payments/webhook', { method: 'POST', body: cb });
     await api('/api/payments/webhook', { method: 'POST', body: cb }); // lặp
     assert((await notes(buyer, 'TOPUP_SUCCEEDED', { paymentRequestId: ok.data.id })).length === 1,
       'Đúng MỘT thông báo TOPUP_SUCCEEDED dù webhook gửi hai lần');
 
     const bad = await api('/api/payments/topup', { method: 'POST', token: buyer.token, body: { amount: 100000 } });
-    const cbBad = provider.settlePayment(bad.data.providerRef, 'FAILED');
+    const cbBad = await provider.settlePayment(bad.data.providerRef, 'FAILED');
     await api('/api/payments/webhook', { method: 'POST', body: cbBad });
     assert((await notes(buyer, 'TOPUP_FAILED', { paymentRequestId: bad.data.id })).length === 1, 'Nạp tiền thất bại: người dùng nhận TOPUP_FAILED');
 
     const pending = await api('/api/payments/topup', { method: 'POST', token: buyer.token, body: { amount: 100000 } });
     assert(hasTodo(await todo(buyer), 'TOPUP_PENDING'), 'Còn yêu cầu nạp tiền PENDING thì có việc "Nạp tiền đang chờ xác nhận"');
-    provider.settlePayment(pending.data.providerRef, 'FAILED'); // dọn cho các lần chạy sau
+    await provider.settlePayment(pending.data.providerRef, 'FAILED'); // dọn cho các lần chạy sau
     await api('/api/payments/webhook', { method: 'POST', body: provider.buildProviderCallback({
       paymentRequestId: pending.data.id, providerRef: pending.data.providerRef, status: 'FAILED', amount: 100000,
     }) });
@@ -196,12 +196,12 @@ async function main() {
   {
     const t3 = await newOrder(`Đơn khi bảng thông báo hỏng ${rand}`, 200000);
     await step(`${t3}/secure`, buyer, { requestId: crypto.randomUUID() });
-    db.exec('ALTER TABLE notifications RENAME TO notifications_broken');
+    await db.exec('ALTER TABLE notifications RENAME TO notifications_broken');
     let ship;
     try {
       ship = await step(`${t3}/ship`, seller);
     } finally {
-      db.exec('ALTER TABLE notifications_broken RENAME TO notifications');
+      await db.exec('ALTER TABLE notifications_broken RENAME TO notifications');
     }
     assert(ship.status === 200 && ship.data.status === 'SHIPPING', `Gửi hàng VẪN thành công khi không ghi được thông báo (nhận ${ship.status})`);
     assert((await notes(buyer, 'ORDER_SHIPPED', { transactionId: t3 })).length === 0, 'Thông báo cho bước đó không có (ghi hỏng đã bị nuốt)');

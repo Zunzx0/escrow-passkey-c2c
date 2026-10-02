@@ -25,9 +25,36 @@ function fail(msg) {
 }
 
 if (process.env.APP_ENV !== 'test') fail('Chỉ chạy với môi trường test: npm run test:suite (nạp .env.test).');
-const dbPath = path.resolve(ROOT, process.env.DB_PATH || '');
-const testDir = path.join(ROOT, 'data', 'test') + path.sep;
-if (!dbPath.startsWith(testDir)) fail(`DB_PATH=${dbPath} không nằm trong data/test/ — từ chối chạy.`);
+
+// Hai nền lưu trữ. Với PostgreSQL, hàng rào an toàn là TÊN cơ sở dữ liệu: chỉ chấp nhận tên kết
+// thúc bằng _test, nên một DATABASE_URL trỏ nhầm sang Supabase thật (tên `postgres`) bị từ chối
+// trước khi bất kỳ bảng nào bị xoá.
+const PG_URL = process.env.DATABASE_URL || '';
+let dbPath = null;
+let dbLabel;
+if (PG_URL) {
+  let dbName = '';
+  try { dbName = decodeURIComponent(new URL(PG_URL).pathname.replace(/^\//, '')); } catch (_) {}
+  if (!/_test$/.test(dbName)) fail(`DATABASE_URL trỏ tới cơ sở dữ liệu "${dbName}" — chỉ chạy trên cơ sở dữ liệu có tên kết thúc bằng _test.`);
+  dbLabel = `PostgreSQL ${dbName}`;
+} else {
+  dbPath = path.resolve(ROOT, process.env.DB_PATH || '');
+  const testDir = path.join(ROOT, 'data', 'test') + path.sep;
+  if (!dbPath.startsWith(testDir)) fail(`DB_PATH=${dbPath} không nằm trong data/test/ — từ chối chạy.`);
+  dbLabel = dbPath;
+}
+
+async function resetPostgres() {
+  const { Client } = require('pg');
+  const sslOff = process.env.PGSSL === 'disable' || /sslmode=disable/.test(PG_URL);
+  const client = new Client({ connectionString: PG_URL, ssl: sslOff ? false : { rejectUnauthorized: false } });
+  await client.connect();
+  try {
+    await client.query('DROP SCHEMA IF EXISTS app CASCADE; DROP SCHEMA IF EXISTS mock_provider CASCADE;');
+  } finally {
+    await client.end();
+  }
+}
 
 const BASE = process.env.BASE_URL || `http://localhost:${process.env.PORT}`;
 const args = process.argv.slice(2);
@@ -105,14 +132,18 @@ function countMarks(out) {
 
 async function main() {
   console.log(`\n=== VÒNG KIỂM THỬ ĐẦY ĐỦ — môi trường test (${BASE}) ===`);
-  console.log(`  Cơ sở dữ liệu: ${dbPath}`);
+  console.log(`  Cơ sở dữ liệu: ${dbLabel}`);
   console.log(`  Báo cáo:       ${reportDir}\n`);
 
   if (!keepDb) {
-    const base = dbPath.replace(/\.db$/i, '');
-    for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`,
-      `${base}.mock-provider.db`, `${base}.mock-provider.db-wal`, `${base}.mock-provider.db-shm`]) {
-      if (fs.existsSync(f)) fs.unlinkSync(f);
+    if (PG_URL) {
+      await resetPostgres();
+    } else {
+      const base = dbPath.replace(/\.db$/i, '');
+      for (const f of [dbPath, `${dbPath}-wal`, `${dbPath}-shm`,
+        `${base}.mock-provider.db`, `${base}.mock-provider.db-wal`, `${base}.mock-provider.db-shm`]) {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+      }
     }
     console.log('  Đã xoá cơ sở dữ liệu test — mọi bộ chạy từ trạng thái trống.\n');
   }
@@ -165,7 +196,7 @@ async function main() {
     startedAtIso,
     environment: 'test',
     baseUrl: BASE,
-    database: path.relative(ROOT, dbPath),
+    database: dbPath ? path.relative(ROOT, dbPath) : dbLabel,
     freshDatabase: !keepDb,
     node: process.version,
     platform: `${process.platform} ${process.arch}`,

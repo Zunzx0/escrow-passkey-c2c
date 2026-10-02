@@ -37,20 +37,20 @@ function serializeSellerRequest(r) {
 // Dùng requireEnrollAuth: tài khoản chưa hoàn tất thiết lập cũng phải xem được hồ sơ của
 // chính mình, nếu không giao diện sẽ không biết phải dẫn người dùng tới bước nào tiếp theo.
 // Đây là một trong số rất ít tuyến mở cho phiên chưa đầy đủ, và nó chỉ ĐỌC.
-router.get('/me', requireEnrollAuth, (req, res, next) => {
+router.get('/me', requireEnrollAuth, async (req, res, next) => {
   try {
-    const user = db
+    const user = await db
       .prepare('SELECT id, username, display_name, role, account_status, is_active, created_at FROM users WHERE id = ?')
       .get(req.user.id);
     if (!user || !user.is_active) throw new AppError(401, 'USER_INACTIVE', 'Tài khoản không khả dụng');
 
-    const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(user.id);
-    const credential = db
+    const wallet = await db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(user.id);
+    const credential = await db
       .prepare('SELECT created_at, last_used_at FROM passkey_credentials WHERE user_id = ?')
       .get(user.id);
-    const credentialCount = db
+    const credentialCount = (await db
       .prepare('SELECT COUNT(*) AS n FROM passkey_credentials WHERE user_id = ?')
-      .get(user.id).n;
+      .get(user.id)).n;
 
     res.json({
       user: {
@@ -96,12 +96,12 @@ router.get('/me', requireEnrollAuth, (req, res, next) => {
 // tấn công đang cầm — lập tức mất hiệu lực. Người gọi nhận lại một mã phiên mới.
 // ---------------------------------------------------------------------------
 
-router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
+router.post('/me/password', requireAuth, sensitiveLimiter, async (req, res, next) => {
   try {
     const { newPassword, reauthGrant } = req.body || {};
     if (!newPassword) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu newPassword');
 
-    const grant = requireGrant({
+    const grant = await requireGrant({
       userId: req.user.id,
       sessionId: req.user.sessionId,
       action: ACTIONS.CHANGE_PASSWORD,
@@ -111,7 +111,7 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
 
     assertPasswordPolicy(newPassword);
 
-    const user = db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
     if (verifyPassword(newPassword, user.password_hash)) {
       throw new AppError(400, 'SAME_PASSWORD', 'Mật khẩu mới phải khác mật khẩu hiện tại');
     }
@@ -120,17 +120,17 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
     const now = nowIso();
 
     // Đổi mật khẩu, thu hồi phiên cũ và tiêu thụ phiếu trong CÙNG một giao dịch cơ sở dữ liệu.
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.prepare(
         'UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?'
       ).run(hashed, now, user.id);
-      revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
-      markGrantUsed(grant.id);
+      await revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
+      await markGrantUsed(grant.id);
     })();
 
-    logSecurityEvent(req, { type: EVENTS.PASSWORD_CHANGED, outcome: 'ALLOWED', statusCode: 200 });
+    await logSecurityEvent(req, { type: EVENTS.PASSWORD_CHANGED, outcome: 'ALLOWED', statusCode: 200 });
 
-    const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
+    const fresh = await db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     res.json({
       token: signAccessToken(fresh, null, req.user.sessionId),
       changedAt: now,
@@ -150,9 +150,9 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
 
 // Yêu cầu MỚI NHẤT của chính mình. Giao diện dùng nó để quyết định hiện nút "Đăng ký
 // bán hàng", thẻ "đang chờ duyệt" hay lý do bị từ chối.
-router.get('/me/seller-request', requireAuth, (req, res, next) => {
+router.get('/me/seller-request', requireAuth, async (req, res, next) => {
   try {
-    const row = db
+    const row = await db
       .prepare(
         `SELECT sr.*, rv.display_name AS reviewed_by_name
          FROM seller_requests sr
@@ -168,7 +168,7 @@ router.get('/me/seller-request', requireAuth, (req, res, next) => {
   }
 });
 
-router.post('/me/seller-request', requireAuth, (req, res, next) => {
+router.post('/me/seller-request', requireAuth, async (req, res, next) => {
   try {
     if (req.user.role !== 'BUYER') {
       throw new AppError(
@@ -191,7 +191,7 @@ router.post('/me/seller-request', requireAuth, (req, res, next) => {
 
     // Chặn ở tầng ứng dụng cho thông báo dễ hiểu; partial unique index trong schema.sql
     // mới là chốt chặn thật khi hai request bay lên cùng lúc.
-    const pending = db
+    const pending = await db
       .prepare(`SELECT 1 FROM seller_requests WHERE user_id = ? AND status = 'PENDING'`)
       .get(req.user.id);
     if (pending) {
@@ -201,18 +201,18 @@ router.post('/me/seller-request', requireAuth, (req, res, next) => {
     const id = uuid();
     const now = nowIso();
     try {
-      db.prepare(
+      await db.prepare(
         `INSERT INTO seller_requests (id, user_id, shop_name, pitch, status, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
       ).run(id, req.user.id, shopName, pitch || null, now, now);
     } catch (e) {
-      if (/UNIQUE constraint failed/.test(e.message || '')) {
+      if (db.isUniqueViolation(e)) {
         throw new AppError(409, 'REQUEST_ALREADY_PENDING', 'Bạn đang có một yêu cầu chờ duyệt');
       }
       throw e;
     }
 
-    const row = db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(id);
+    const row = await db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(id);
     res.status(201).json({ request: serializeSellerRequest(row) });
   } catch (e) {
     next(e);
@@ -220,19 +220,19 @@ router.post('/me/seller-request', requireAuth, (req, res, next) => {
 });
 
 // Hồ sơ công khai của một người bán — chỉ lộ thông tin cần cho trang cửa hàng.
-router.get('/:id', optionalAuth, (req, res, next) => {
+router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
-    const user = db
+    const user = await db
       .prepare('SELECT id, username, display_name, role, created_at FROM users WHERE id = ? AND is_active = 1')
       .get(req.params.id);
     if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'Không tìm thấy người dùng');
 
-    const listingCount = db
+    const listingCount = (await db
       .prepare(`SELECT COUNT(*) AS n FROM listings WHERE seller_id = ? AND visibility = 'PUBLIC'`)
-      .get(user.id).n;
-    const completedSales = db
+      .get(user.id)).n;
+    const completedSales = (await db
       .prepare(`SELECT COUNT(*) AS n FROM transactions WHERE seller_id = ? AND status IN ('COMPLETED','RELEASED')`)
-      .get(user.id).n;
+      .get(user.id)).n;
 
     res.json({
       id: user.id,

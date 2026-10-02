@@ -25,11 +25,11 @@ function newRefreshToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
 
-function createSession(userId) {
+async function createSession(userId) {
   const id = uuid();
   const refreshToken = newRefreshToken();
   const now = new Date();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO sessions (id, user_id, refresh_hash, created_at, last_seen_at, expires_at)
      VALUES (?, ?, ?, ?, ?, ?)`
   ).run(
@@ -52,49 +52,49 @@ function sessionProblem(row, now = Date.now()) {
   return null;
 }
 
-function getSession(sessionId) {
+async function getSession(sessionId) {
   if (!sessionId) return null;
-  return db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId) || null;
+  return (await db.prepare('SELECT * FROM sessions WHERE id = ?').get(sessionId)) || null;
 }
 
 /** Ghi nhận phiên vừa được dùng; ghi tối đa một lần mỗi phút để không ghi DB ở mọi request. */
-function touchSession(row) {
+async function touchSession(row) {
   if (Date.now() - new Date(row.last_seen_at).getTime() < TOUCH_EVERY_MS) return;
-  db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL').run(nowIso(), row.id);
+  await db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL').run(nowIso(), row.id);
 }
 
-function revokeSession(sessionId, reason) {
-  db.prepare('UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL')
+async function revokeSession(sessionId, reason) {
+  await db.prepare('UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE id = ? AND revoked_at IS NULL')
     .run(nowIso(), reason, sessionId);
 }
 
-function revokeAllSessions(userId, reason, exceptSessionId = null) {
-  db.prepare(
+async function revokeAllSessions(userId, reason, exceptSessionId = null) {
+  await db.prepare(
     `UPDATE sessions SET revoked_at = ?, revoked_reason = ?
-     WHERE user_id = ? AND revoked_at IS NULL AND id IS NOT ?`
+     WHERE user_id = ? AND revoked_at IS NULL AND id IS DISTINCT FROM ?`
   ).run(nowIso(), reason, userId, exceptSessionId);
 }
 
 /** Đổi mã làm mới lấy mã làm mới mới. Trả { problem } nếu phiên không còn làm mới được. */
-function rotateRefreshToken(refreshToken) {
+async function rotateRefreshToken(refreshToken) {
   if (!refreshToken) return { problem: 'MISSING' };
-  const row = db.prepare('SELECT * FROM sessions WHERE refresh_hash = ?').get(sha256(refreshToken));
+  const row = await db.prepare('SELECT * FROM sessions WHERE refresh_hash = ?').get(sha256(refreshToken));
   const problem = sessionProblem(row);
   if (problem) return { problem };
 
   const next = newRefreshToken();
   const now = nowIso();
-  const changed = db
+  const changed = (await db
     .prepare('UPDATE sessions SET refresh_hash = ?, last_seen_at = ? WHERE id = ? AND refresh_hash = ? AND revoked_at IS NULL')
-    .run(sha256(next), now, row.id, sha256(refreshToken)).changes;
+    .run(sha256(next), now, row.id, sha256(refreshToken))).changes;
   // Hai lần làm mới đồng thời bằng cùng một mã: chỉ một lần thắng, lần kia coi như mã đã cũ.
   if (changed !== 1) return { problem: 'REUSED' };
   return { session: { ...row, last_seen_at: now }, refreshToken: next };
 }
 
-function revokeByRefreshToken(refreshToken, reason) {
+async function revokeByRefreshToken(refreshToken, reason) {
   if (!refreshToken) return;
-  db.prepare('UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE refresh_hash = ? AND revoked_at IS NULL')
+  await db.prepare('UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE refresh_hash = ? AND revoked_at IS NULL')
     .run(nowIso(), reason, sha256(refreshToken));
 }
 

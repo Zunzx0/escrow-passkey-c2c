@@ -12,6 +12,8 @@ const { RP_ID, ORIGIN } = require('./lib/webauthnConfig');
 assertSecretsConfigured();
 assertEnvironmentSafe();
 
+const { db, describeDatabase } = require('./db');
+
 const healthRouter = require('./routes/health');
 const passkeysRouter = require('./routes/passkeys');
 const usersRouter = require('./routes/users');
@@ -26,6 +28,47 @@ const { logFromError } = require('./lib/securityEvents');
 const { AppError } = require('./lib/errors');
 const { InjectedFault } = require('./lib/faultInjection');
 
+// ---------------------------------------------------------------------------
+// CORS — chỉ cần khi giao diện và API nằm ở hai origin khác nhau (Vercel enclave.id.vn gọi
+// Railway api.enclave.id.vn). Không đặt CORS_ORIGIN thì không phát header CORS nào: trình duyệt
+// chỉ cho chính origin của máy chủ gọi API, đúng như khi Express tự phục vụ giao diện.
+//
+// So khớp CHÍNH XÁC từng origin trong danh sách, không wildcard, không so chuỗi con: một origin
+// như https://enclave.id.vn.attacker.example phải bị từ chối.
+//
+// Allow-Credentials bật vì mã làm mới phiên nằm trong cookie HttpOnly của chính API (xem
+// lib/session.js); mọi API khác vẫn xác thực bằng header Authorization chứ không bằng cookie.
+// Cookie đó là SameSite=Strict và enclave.id.vn với api.enclave.id.vn cùng site, nên trang của
+// site khác vẫn không gửi kèm được nó.
+// ---------------------------------------------------------------------------
+function corsAllowlist() {
+  const allowed = new Set(
+    String(process.env.CORS_ORIGIN || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+  );
+  return (req, res, next) => {
+    const origin = req.headers.origin;
+    if (!origin || allowed.size === 0) return next();
+    res.append('Vary', 'Origin');
+    if (!allowed.has(origin)) {
+      // Preflight từ origin lạ: từ chối hẳn. Request thường thì để trình duyệt tự chặn đọc phản hồi.
+      if (req.method === 'OPTIONS') return res.status(403).end();
+      return next();
+    }
+    res.setHeader('Access-Control-Allow-Origin', origin);
+    res.setHeader('Access-Control-Allow-Credentials', 'true');
+    if (req.method === 'OPTIONS') {
+      res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+      res.setHeader('Access-Control-Max-Age', '600');
+      return res.status(204).end();
+    }
+    next();
+  };
+}
+
 const app = express();
 
 // Địa chỉ IP dùng làm khoá của bộ giới hạn tần suất. Chỉ tin X-Forwarded-For khi thực sự
@@ -34,6 +77,7 @@ if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 
 app.disable('x-powered-by');
 app.use(securityHeaders({ enableHsts: process.env.ENABLE_HSTS === '1' }));
+app.use(corsAllowlist());
 app.use(express.json({ limit: '1mb' }));
 
 app.use('/', healthRouter);
@@ -57,8 +101,12 @@ app.use(['/api', '/mock-provider'], (req, res) => {
   res.status(404).json({ error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
 });
 
-// Frontend tĩnh (HTML/CSS/JS thuần, không cần build)
-app.use(express.static(path.join(__dirname, '..', 'public')));
+// Frontend tĩnh (HTML/CSS/JS thuần, không cần build). Khi giao diện đã chuyển sang Vercel thì đặt
+// SERVE_FRONTEND=0 ở máy chủ API: mở giao diện ngay trên api.enclave.id.vn sẽ chạy WebAuthn với
+// sai origin và chỉ gây nhầm lẫn.
+if (process.env.SERVE_FRONTEND !== '0') {
+  app.use(express.static(path.join(__dirname, '..', 'public')));
+}
 
 app.use((req, res) => {
   res.status(404).json({ error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
@@ -71,10 +119,10 @@ app.use((req, res) => {
 // trung thay vì rải lời gọi ở từng route là có chủ ý: thêm một nhánh từ chối mới ở bất kỳ
 // đâu thì nó tự động được ghi lại, không phụ thuộc vào việc người viết có nhớ hay không.
 // ---------------------------------------------------------------------------
-app.use((err, req, res, next) => {
+app.use(async (err, req, res, next) => {
   if (res.headersSent) return next(err);
 
-  if (err && (err.code === 'SQLITE_CONSTRAINT_CHECK' || /CHECK constraint failed/.test(err.message || ''))) {
+  if (db.isCheckViolation(err)) {
     console.error('[constraint]', err.message);
     return res.status(400).json({ error: 'CONSTRAINT_VIOLATION', message: 'Vi phạm ràng buộc dữ liệu (ví dụ số dư không đủ)' });
   }
@@ -92,7 +140,7 @@ app.use((err, req, res, next) => {
   // (lỗi lập trình, lỗi SQL...) có thể chứa chi tiết nội bộ nên chỉ ghi ở log máy chủ.
   const intentional = err instanceof AppError || err instanceof InjectedFault;
 
-  logFromError(req, err, status);
+  await logFromError(req, err, status);
 
   if (status >= 500) {
     const requestId = crypto.randomUUID();
@@ -119,13 +167,12 @@ app.use((err, req, res, next) => {
 // Sau khi dùng xong, NÊN xoá hai biến này khỏi Render (Settings → Environment) để tránh
 // vô tình tạo lại tài khoản trùng tên nếu DB bị mất và server khởi động lại — script vẫn
 // tự chặn việc này (xem bootstrapAdminFromEnv), nhưng dọn sạch vẫn là thói quen tốt hơn.
-function bootstrapAdminFromEnv() {
+async function bootstrapAdminFromEnv() {
   const username = process.env.ADMIN_BOOTSTRAP_USERNAME;
   const password = process.env.ADMIN_BOOTSTRAP_PASSWORD;
   if (!username || !password) return;
 
-  const { db } = require('./db');
-  const alreadyHasAdmin = db.prepare(`SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1`).get();
+  const alreadyHasAdmin = await db.prepare(`SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1`).get();
   if (alreadyHasAdmin) {
     console.log('[admin-bootstrap] Đã có ít nhất một ADMIN trong cơ sở dữ liệu — bỏ qua.');
     return;
@@ -133,7 +180,7 @@ function bootstrapAdminFromEnv() {
 
   const { createBootstrapAdmin, BootstrapError } = require('./lib/adminBootstrap');
   try {
-    const { user } = createBootstrapAdmin({
+    const { user } = await createBootstrapAdmin({
       username,
       displayName: process.env.ADMIN_BOOTSTRAP_DISPLAY_NAME || 'Quản trị viên',
       temporaryPassword: password,
@@ -153,13 +200,29 @@ function bootstrapAdminFromEnv() {
 const { startBackgroundJobs } = require('./lib/backgroundJobs');
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  bootstrapAdminFromEnv();
+
+async function start() {
+  // Với PostgreSQL, kết nối và migration chạy bất đồng bộ. Chỉ mở cổng khi cơ sở dữ liệu đã
+  // sẵn sàng; kết nối hỏng thì dừng hẳn để nền tảng triển khai báo lỗi và giữ bản cũ đang chạy,
+  // thay vì mở một máy chủ trả 500 cho mọi request.
+  try {
+    await db.ready;
+  } catch (e) {
+    console.error(`\n  Không kết nối/khởi tạo được cơ sở dữ liệu (${describeDatabase()}): ${e.message}\n`);
+    process.exit(1);
+  }
+  await bootstrapAdminFromEnv();
+  app.listen(PORT, onListening);
+}
+
+function onListening() {
   const jobs = startBackgroundJobs();
-  console.log(`\nChợ An Tâm — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:${PORT}`);
+  console.log(`\nEnclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:${PORT}`);
   console.log(`   WEBAUTHN_RP_ID=${RP_ID}  WEBAUTHN_ORIGIN=${ORIGIN}`);
   console.log('   Mở trình duyệt tại đúng địa chỉ trên (không dùng 127.0.0.1) để Passkeys hoạt động.');
-  console.log(`   Môi trường: ${process.env.APP_ENV || 'dev'} · Cơ sở dữ liệu: ${require('./db').DB_PATH}`);
+  console.log(`   Môi trường: ${process.env.APP_ENV || 'dev'} · Cơ sở dữ liệu: ${describeDatabase()}`);
+  console.log(`   CORS: ${process.env.CORS_ORIGIN ? process.env.CORS_ORIGIN : 'tắt (chỉ cùng origin)'}`
+    + ` · Giao diện tĩnh: ${process.env.SERVE_FRONTEND === '0' ? 'tắt' : 'bật'}`);
   console.log(`   Đối soát thanh toán: ${jobs.reconcileIntervalSeconds > 0
     ? `mỗi ${jobs.reconcileIntervalSeconds}s, bỏ qua yêu cầu mới hơn ${jobs.reconcileMinAgeSeconds}s`
     : 'TẮT'}`);
@@ -185,4 +248,6 @@ app.listen(PORT, () => {
   } else {
     console.log('');
   }
-});
+}
+
+start();

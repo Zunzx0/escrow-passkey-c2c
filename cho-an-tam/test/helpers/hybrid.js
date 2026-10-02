@@ -142,7 +142,7 @@ function makeAuthFlows({ api, rpId, origin }) {
    * thường: làm vậy thì luồng bootstrap không bao giờ được kiểm thử.
    */
   async function createAdmin({ username, displayName }) {
-    const { temporaryPassword } = createBootstrapAdmin({ username, displayName });
+    const { temporaryPassword } = await createBootstrapAdmin({ username, displayName });
 
     const login = ok(await loginPassword(username, temporaryPassword), 'Đăng nhập bằng mật khẩu tạm');
     if (login.data.nextStep !== 'CHANGE_TEMPORARY_PASSWORD') {

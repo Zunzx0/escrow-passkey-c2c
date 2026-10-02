@@ -36,9 +36,9 @@ function parseAmount(raw) {
   return raw;
 }
 
-function assertTopupLimits(userId, wallet, amount) {
+async function assertTopupLimits(userId, wallet, amount) {
   const since = new Date(Date.now() - DAY_MS).toISOString();
-  const s = db.prepare(
+  const s = await db.prepare(
     `SELECT
        COALESCE(SUM(CASE WHEN status = 'PENDING' AND created_at > ? THEN 1 ELSE 0 END), 0) AS pending_recent,
        COALESCE(SUM(CASE WHEN status IN ('PENDING','SUCCEEDED') AND created_at > ? THEN amount ELSE 0 END), 0) AS day_total,
@@ -75,24 +75,25 @@ function serializePaymentRequest(p) {
 //
 // Chỉ tạo bản ghi PENDING rồi gửi yêu cầu sang provider. KHÔNG chạm tới ví ở đây — ví chỉ đổi
 // khi có kết quả SUCCEEDED từ provider, qua lib/paymentService.js#applyProviderResult.
-router.post('/topup', requireAuth, (req, res, next) => {
+router.post('/topup', requireAuth, async (req, res, next) => {
   try {
     const amount = parseAmount((req.body || {}).amount);
-
-    // Quản trị viên không phải một bên giao dịch nên không có ví — không có gì để nạp vào.
-    const wallet = getUserWallet(req.user.id);
-    if (!wallet) throw new AppError(400, 'WALLET_NOT_FOUND', 'Tài khoản này không có ví để nạp tiền');
 
     const id = uuid();
     // provider_ref mô phỏng mã do PHÍA PROVIDER cấp — độc lập với id nội bộ, đúng như một
     // provider thật sẽ làm. Ở đây tự sinh vì đang đóng luôn vai provider.
     const providerRef = uuid();
     const now = nowIso();
-    // Kiểm hạn mức và ghi yêu cầu trong CÙNG một giao dịch ghi của SQLite, nên hai request đồng
-    // thời không cùng lọt qua phép đếm rồi cùng ghi.
-    db.transaction(() => {
-      assertTopupLimits(req.user.id, wallet, amount);
-      db.prepare(
+    // Kiểm hạn mức và ghi yêu cầu trong CÙNG một giao dịch ghi của cơ sở dữ liệu, nên hai request
+    // đồng thời không cùng lọt qua phép đếm rồi cùng ghi.
+    await db.transaction(async () => {
+      // Đọc ví BÊN TRONG giao dịch: đọc ở ngoài thì một webhook tất toán chen vào giữa sẽ làm số
+      // dư cũ đi trong khi pending_total đã giảm, khiến phép chiếu số dư đếm thiếu.
+      // Quản trị viên không phải một bên giao dịch nên không có ví — không có gì để nạp vào.
+      const wallet = await getUserWallet(req.user.id);
+      if (!wallet) throw new AppError(400, 'WALLET_NOT_FOUND', 'Tài khoản này không có ví để nạp tiền');
+      await assertTopupLimits(req.user.id, wallet, amount);
+      await db.prepare(
         `INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, version, created_at, updated_at)
          VALUES (?, ?, ?, 'PENDING', ?, 0, ?, ?)`
       ).run(id, req.user.id, amount, providerRef, now, now);
@@ -100,7 +101,7 @@ router.post('/topup', requireAuth, (req, res, next) => {
 
     // Ghi yêu cầu ở phía ta TRƯỚC rồi mới gửi sang provider: nếu bước gửi hỏng, yêu cầu vẫn
     // nằm ở PENDING và worker đối soát là nơi xử lý tiếp, không có tiền nào bị cộng sai.
-    submitPayment({ providerRef, merchantRef: id, amount });
+    await submitPayment({ providerRef, merchantRef: id, amount });
 
     res.status(201).json(serializePaymentRequest({
       id, amount, status: 'PENDING', provider_ref: providerRef, created_at: now, resolved_at: null,
@@ -112,8 +113,8 @@ router.post('/topup', requireAuth, (req, res, next) => {
 
 // ---------- Danh sách yêu cầu nạp tiền của chính mình ----------
 
-router.get('/me', requireAuth, (req, res) => {
-  const rows = db
+router.get('/me', requireAuth, async (req, res) => {
+  const rows = await db
     .prepare('SELECT * FROM payment_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 200')
     .all(req.user.id);
   res.json({ paymentRequests: rows.map(serializePaymentRequest) });
@@ -131,7 +132,7 @@ router.get('/me', requireAuth, (req, res) => {
 //                để nó thôi gửi lại; không chạm ví lần hai)
 //   CONFLICT  -> 409 WEBHOOK_CONFLICT (kết quả trái với kết quả đã tất toán; không ghi đè)
 // ---------------------------------------------------------------------------
-router.post('/webhook', (req, res, next) => {
+router.post('/webhook', async (req, res, next) => {
   try {
     const { payload, signature } = req.body || {};
     if (!payload || typeof payload !== 'object') {
@@ -149,7 +150,7 @@ router.post('/webhook', (req, res, next) => {
       throw new AppError(401, 'INVALID_SIGNATURE', 'Chữ ký webhook không hợp lệ — callback bị từ chối');
     }
 
-    const result = applyProviderResult(
+    const result = await applyProviderResult(
       { paymentRequestId, providerRef, status, amount, source: 'WEBHOOK' },
       { req }
     );
@@ -165,9 +166,9 @@ router.post('/webhook', (req, res, next) => {
 
 // ---------- Chi tiết một yêu cầu (đặt SAU /me và /webhook vì đây là route dạng :id) ----------
 
-router.get('/:id', requireAuth, (req, res, next) => {
+router.get('/:id', requireAuth, async (req, res, next) => {
   try {
-    const row = db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(req.params.id);
+    const row = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(req.params.id);
     if (!row) throw new AppError(404, 'PAYMENT_REQUEST_NOT_FOUND', 'Không tìm thấy yêu cầu nạp tiền');
     if (row.user_id !== req.user.id) throw new AppError(403, 'FORBIDDEN', 'Bạn không có quyền xem yêu cầu nạp tiền này');
     res.json(serializePaymentRequest(row));

@@ -112,9 +112,9 @@ function sanitize(detail) {
  * Hàm này KHÔNG BAO GIỜ được phép làm hỏng luồng nghiệp vụ đang chạy: nếu ghi log thất bại
  * thì nuốt lỗi. Một lần giải ngân hợp lệ không nên thất bại chỉ vì bảng nhật ký gặp sự cố.
  */
-function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = null, username = null, actorId = null, detail = {} }) {
+async function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = null, username = null, actorId = null, detail = {} }) {
   try {
-    db.prepare(
+    await db.prepare(
       `INSERT INTO security_events (event_type, outcome, actor_id, username, ip, method, route, status_code, detail)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
@@ -136,10 +136,10 @@ function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = null, us
 }
 
 /** Dùng trong middleware lỗi tập trung: đổi mã lỗi thành sự kiện tương ứng, nếu có. */
-function logFromError(req, err, statusCode) {
+async function logFromError(req, err, statusCode) {
   const type = ERROR_TO_EVENT[err && err.code];
   if (!type) return;
-  logSecurityEvent(req, {
+  await logSecurityEvent(req, {
     type,
     outcome: 'DENIED',
     statusCode,
@@ -153,12 +153,12 @@ function logFromError(req, err, statusCode) {
 }
 
 /** Đọc nhật ký sự kiện cho màn hình quản trị. */
-function listSecurityEvents({ limit = 100, type = null } = {}) {
+async function listSecurityEvents({ limit = 100, type = null } = {}) {
   const rows = type
-    ? db.prepare(
+    ? await db.prepare(
         `SELECT * FROM security_events WHERE event_type = ? ORDER BY id DESC LIMIT ?`
       ).all(type, Math.min(limit, 500))
-    : db.prepare(`SELECT * FROM security_events ORDER BY id DESC LIMIT ?`).all(Math.min(limit, 500));
+    : await db.prepare(`SELECT * FROM security_events ORDER BY id DESC LIMIT ?`).all(Math.min(limit, 500));
 
   return rows.map((r) => ({
     id: r.id,

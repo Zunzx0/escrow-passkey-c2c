@@ -29,8 +29,9 @@ function placeholders(list) {
   return list.map(() => '?').join(',');
 }
 
-function violations(code, rows, detail) {
-  return rows.map((r) => ({ invariant: code, detail: detail(r) }));
+// rows có thể là mảng hoặc Promise của mảng (truy vấn bất đồng bộ).
+async function violations(code, rows, detail) {
+  return (await rows).map((r) => ({ invariant: code, detail: detail(r) }));
 }
 
 // --- 1. Số dư không âm ------------------------------------------------------------------
@@ -55,7 +56,7 @@ function zeroSumPerTransfer(db) {
        FROM wallet_entries
        WHERE entry_type NOT IN (${placeholders(EXTERNAL_INFLOW_ENTRY_TYPES)})
        GROUP BY request_id
-       HAVING net <> 0`
+       HAVING SUM(available_delta + locked_delta) <> 0`
     ).all(...EXTERNAL_INFLOW_ENTRY_TYPES),
     (r) => `Nghiệp vụ request_id=${r.request_id} có tổng biến động ${r.net} trên ${r.legs} bút toán, đáng lẽ phải bằng 0`
   );
@@ -71,7 +72,7 @@ function settleAtMostOnce(db) {
        FROM wallet_entries
        WHERE entry_type IN ('ESCROW_RELEASE_DEBIT','ESCROW_REFUND_DEBIT') AND transaction_id IS NOT NULL
        GROUP BY transaction_id
-       HAVING n > 1`
+       HAVING COUNT(*) > 1`
     ).all(),
     (r) => `Giao dịch ${r.transaction_id} có ${r.n} lần tiền rời ký quỹ, đáng lẽ nhiều nhất 1`
   );
@@ -82,8 +83,8 @@ function settleAtMostOnce(db) {
 //     đổi mật khẩu không gắn đối tượng nào;
 // (b) không giao dịch nào tiêu thụ nhiều hơn một phiếu cho cùng một hành động.
 // Phạm vi của phiếu PHÂN XỬ tách riêng thành bất biến số 5.
-function grantUsedOnceInScope(db) {
-  const badScope = violations(
+async function grantUsedOnceInScope(db) {
+  const badScope = await violations(
     'GRANT_SCOPE',
     db.prepare(
       `SELECT id, action, transaction_id, dispute_id, decision FROM reauth_grants
@@ -93,13 +94,13 @@ function grantUsedOnceInScope(db) {
     ).all(),
     (g) => `Phiếu ${g.id} hành động ${g.action} có phạm vi sai (txn=${g.transaction_id}, dispute=${g.dispute_id}, decision=${g.decision})`
   );
-  const doubleUse = violations(
+  const doubleUse = await violations(
     'GRANT_SCOPE',
     db.prepare(
       `SELECT transaction_id, action, COUNT(*) AS n FROM reauth_grants
        WHERE used_at IS NOT NULL AND transaction_id IS NOT NULL
        GROUP BY transaction_id, action
-       HAVING n > 1`
+       HAVING COUNT(*) > 1`
     ).all(),
     (g) => `Giao dịch ${g.transaction_id} đã tiêu thụ ${g.n} phiếu cho hành động ${g.action}, đáng lẽ nhiều nhất 1`
   );
@@ -113,8 +114,8 @@ function grantUsedOnceInScope(db) {
 // (d) hồ sơ đã giải quyết thì phải có một phiếu phân xử đã tiêu thụ mang đúng quyết định đó.
 // (c) và (d) là hai chiều của cùng một ràng buộc: không quyết định nào được thi hành nếu quản
 // trị viên chưa ký cho chính quyết định đó.
-function adjudicationGrantMatchesDecision(db) {
-  const missing = violations(
+async function adjudicationGrantMatchesDecision(db) {
+  const missing = await violations(
     'ADJUDICATION_GRANT',
     db.prepare(
       `SELECT id FROM reauth_grants
@@ -122,7 +123,7 @@ function adjudicationGrantMatchesDecision(db) {
     ).all(),
     (g) => `Phiếu phân xử ${g.id} thiếu giao dịch, hồ sơ tranh chấp hoặc quyết định`
   );
-  const wrongDispute = violations(
+  const wrongDispute = await violations(
     'ADJUDICATION_GRANT',
     db.prepare(
       `SELECT g.id, g.transaction_id, d.transaction_id AS dispute_txn
@@ -131,7 +132,7 @@ function adjudicationGrantMatchesDecision(db) {
     ).all(),
     (g) => `Phiếu phân xử ${g.id} gắn giao dịch ${g.transaction_id} nhưng hồ sơ tranh chấp thuộc giao dịch ${g.dispute_txn}`
   );
-  const usedButNotExecuted = violations(
+  const usedButNotExecuted = await violations(
     'ADJUDICATION_GRANT',
     db.prepare(
       `SELECT g.id, g.decision, d.id AS dispute_id, d.status
@@ -142,7 +143,7 @@ function adjudicationGrantMatchesDecision(db) {
     ).all(),
     (g) => `Phiếu phân xử ${g.id} (quyết định ${g.decision}) đã tiêu thụ nhưng hồ sơ ${g.dispute_id} đang ở ${g.status}`
   );
-  const executedWithoutGrant = violations(
+  const executedWithoutGrant = await violations(
     'ADJUDICATION_GRANT',
     db.prepare(
       `SELECT d.id, d.status FROM disputes d
@@ -162,18 +163,18 @@ function adjudicationGrantMatchesDecision(db) {
 // (a) không tin đăng nào có hơn một giao dịch đang giữ chỗ/đã bán;
 // (b) tin đăng còn AVAILABLE thì không được có giao dịch nào đã khoá tiền trên nó — nếu có,
 //     hàng rào listings.status + version đã bị vượt qua.
-function singleLockPerListing(db) {
-  const multiple = violations(
+async function singleLockPerListing(db) {
+  const multiple = await violations(
     'ONE_LOCK_PER_LISTING',
     db.prepare(
       `SELECT listing_id, COUNT(*) AS n FROM transactions
        WHERE listing_id IS NOT NULL AND status IN (${placeholders(RESERVING_STATUSES)})
        GROUP BY listing_id
-       HAVING n > 1`
+       HAVING COUNT(*) > 1`
     ).all(...RESERVING_STATUSES),
     (r) => `Tin đăng ${r.listing_id} có ${r.n} giao dịch đã khoá tiền, đáng lẽ nhiều nhất 1`
   );
-  const availableButLocked = violations(
+  const availableButLocked = await violations(
     'ONE_LOCK_PER_LISTING',
     db.prepare(
       `SELECT l.id FROM listings l
@@ -187,12 +188,12 @@ function singleLockPerListing(db) {
 }
 
 // --- 7. Cân đối số tiền đang giữ trong ký quỹ ---------------------------------------------
-function escrowBalanceMatchesObligations(db) {
-  const wallet = db.prepare("SELECT id, locked_balance FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'").get();
+async function escrowBalanceMatchesObligations(db) {
+  const wallet = await db.prepare("SELECT id, locked_balance FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'").get();
   if (!wallet) return [{ invariant: 'ESCROW_BALANCE', detail: 'Không tìm thấy ví ký quỹ hệ thống' }];
-  const obligation = db
+  const obligation = (await db
     .prepare(`SELECT COALESCE(SUM(amount), 0) AS total FROM transactions WHERE escrow_status IN (${placeholders(HOLDING_ESCROW_STATUSES)})`)
-    .get(...HOLDING_ESCROW_STATUSES).total || 0;
+    .get(...HOLDING_ESCROW_STATUSES)).total || 0;
   if (wallet.locked_balance === obligation) return [];
   return [{
     invariant: 'ESCROW_BALANCE',
@@ -221,7 +222,7 @@ function atMostOneDisputePerTransaction(db) {
   return violations(
     'ONE_DISPUTE_PER_TRANSACTION',
     db.prepare(
-      `SELECT transaction_id, COUNT(*) AS n FROM disputes GROUP BY transaction_id HAVING n > 1`
+      `SELECT transaction_id, COUNT(*) AS n FROM disputes GROUP BY transaction_id HAVING COUNT(*) > 1`
     ).all(),
     (r) => `Giao dịch ${r.transaction_id} có ${r.n} hồ sơ tranh chấp, đáng lẽ nhiều nhất 1`
   );
@@ -257,20 +258,27 @@ const CHECKS = [
  * @returns {{ ok: boolean, checked: number, violations: Array<{invariant, detail}>,
  *             checks: Array<{no, code, name, statement, ok, violations: number}> }}
  */
-function checkInvariants(dbInstance) {
+async function checkInvariants(dbInstance) {
   const database = dbInstance || require('../db').db;
-  const allViolations = [];
-  const checks = CHECKS.map(({ no, code, name, statement, fn }) => {
-    const found = fn(database);
-    allViolations.push(...found);
-    return { no, code, name, statement, ok: found.length === 0, violations: found.length };
-  });
-  return { ok: allViolations.length === 0, checked: CHECKS.length, violations: allViolations, checks };
+  // Chạy cả chín phép kiểm trong MỘT giao dịch: giao dịch được tuần tự hoá với mọi giao dịch ghi
+  // (xem lib/asyncDb.js), nên các phép kiểm cùng nhìn một trạng thái nhất quán. Không làm vậy thì
+  // một lần khoá tiền chen vào giữa lúc đọc ví ký quỹ và lúc cộng nghĩa vụ (bất biến 7) sẽ bị báo
+  // nhầm là vi phạm.
+  return database.transaction(async () => {
+    const allViolations = [];
+    const checks = [];
+    for (const { no, code, name, statement, fn } of CHECKS) {
+      const found = await fn(database);
+      allViolations.push(...found);
+      checks.push({ no, code, name, statement, ok: found.length === 0, violations: found.length });
+    }
+    return { ok: allViolations.length === 0, checked: CHECKS.length, violations: allViolations, checks };
+  })();
 }
 
 /** Dùng trong bộ kiểm thử: ném lỗi kèm mô tả đầy đủ nếu có bất biến bị vi phạm. */
-function assertInvariants(label, dbInstance) {
-  const result = checkInvariants(dbInstance);
+async function assertInvariants(label, dbInstance) {
+  const result = await checkInvariants(dbInstance);
   if (!result.ok) {
     const lines = result.violations.map((v) => `  - [${v.invariant}] ${v.detail}`).join('\n');
     throw new Error(`Vi phạm bất biến sau "${label}":\n${lines}`);

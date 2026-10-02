@@ -19,14 +19,19 @@
 //                      callback hợp lệ lẫn callback trái thứ tự)
 const crypto = require('crypto');
 const path = require('path');
-const Database = require('./sqlite');
-const { DB_PATH } = require('../db');
+const { DB_PATH, DIALECT, db: mainDb } = require('../db');
+const { SqliteAsyncDatabase, PgAsyncDatabase } = require('./asyncDb');
 
 const SECRET = process.env.PAYMENT_WEBHOOK_SECRET || '';
 
-const PROVIDER_DB_PATH = process.env.MOCK_PROVIDER_DB_PATH
-  ? path.resolve(path.join(__dirname, '..', '..'), process.env.MOCK_PROVIDER_DB_PATH)
-  : `${DB_PATH.replace(/\.db$/i, '')}.mock-provider.db`;
+// Trên PostgreSQL, kho của provider là schema riêng `mock_provider` trong cùng cơ sở dữ liệu
+// (Railway không có ổ đĩa bền vững để giữ một file SQLite thứ hai).
+const PROVIDER_DB_PATH = DIALECT === 'sqlite'
+  ? (process.env.MOCK_PROVIDER_DB_PATH
+    ? path.resolve(path.join(__dirname, '..', '..'), process.env.MOCK_PROVIDER_DB_PATH)
+    : `${DB_PATH.replace(/\.db$/i, '')}.mock-provider.db`)
+  : null;
+const T = DIALECT === 'pg' ? 'mock_provider.provider_payments' : 'provider_payments';
 
 // Độ trễ mạng mô phỏng của API truy vấn trạng thái. Đọc ở mỗi lần gọi để bài kiểm thử đổi
 // được theo từng process mà không phải sửa mã.
@@ -41,13 +46,22 @@ class ProviderError extends Error {
   }
 }
 
+// Kho của provider là một instance truy cập RIÊNG, kể cả khi dùng chung pool PostgreSQL: nó không
+// bao giờ "nhập" vào giao dịch cơ sở dữ liệu đang mở của backend nghiệp vụ. Đúng như provider thật
+// — ghi nhận phía provider không rollback theo giao dịch của merchant.
 let providerDb = null;
 function store() {
   if (providerDb) return providerDb;
-  providerDb = new Database(PROVIDER_DB_PATH);
-  providerDb.pragma('journal_mode = WAL');
-  providerDb.pragma('busy_timeout = 5000');
-  providerDb.exec(`
+  if (DIALECT === 'pg') {
+    // Bảng đã được tạo trong migration PostgreSQL (schema.pg.sql).
+    providerDb = new PgAsyncDatabase(mainDb.pool, { ready: mainDb.ready });
+    return providerDb;
+  }
+  const Database = require('./sqlite');
+  const raw = new Database(PROVIDER_DB_PATH);
+  raw.pragma('journal_mode = WAL');
+  raw.pragma('busy_timeout = 5000');
+  raw.exec(`
     CREATE TABLE IF NOT EXISTS provider_payments (
       provider_ref TEXT PRIMARY KEY,
       merchant_ref TEXT NOT NULL,
@@ -59,6 +73,7 @@ function store() {
       updated_at TEXT NOT NULL
     )
   `);
+  providerDb = new SqliteAsyncDatabase(raw);
   return providerDb;
 }
 
@@ -110,18 +125,18 @@ function verifyProviderSignature(payload, signature) {
 // ---------------------------------------------------------------------------------------
 
 /** Phía BACKEND: gửi một yêu cầu thanh toán mới sang provider. Provider ghi nhận ở PENDING. */
-function submitPayment({ providerRef, merchantRef, amount }) {
+async function submitPayment({ providerRef, merchantRef, amount }) {
   const now = new Date().toISOString();
-  store()
+  await store()
     .prepare(
-      `INSERT INTO provider_payments (provider_ref, merchant_ref, amount, status, created_at, updated_at)
+      `INSERT INTO ${T} (provider_ref, merchant_ref, amount, status, created_at, updated_at)
        VALUES (?, ?, ?, 'PENDING', ?, ?)`
     )
     .run(providerRef, merchantRef, amount, now, now);
 }
 
-function findPayment(providerRef) {
-  return store().prepare('SELECT * FROM provider_payments WHERE provider_ref = ?').get(providerRef);
+async function findPayment(providerRef) {
+  return store().prepare(`SELECT * FROM ${T} WHERE provider_ref = ?`).get(providerRef);
 }
 
 /**
@@ -129,23 +144,29 @@ function findPayment(providerRef) {
  * SẼ gửi. Việc có gửi webhook đó đi hay không (hay để nó "thất lạc") là lựa chọn của người gọi
  * — chính là cách mô phỏng webhook bị mất để worker đối soát phải tự phát hiện.
  */
-function settlePayment(providerRef, status) {
+async function settlePayment(providerRef, status, { onlyFromPending = false } = {}) {
   if (status !== 'SUCCEEDED' && status !== 'FAILED' && status !== 'PENDING') {
     throw new ProviderError('INVALID_STATUS', `Trạng thái provider không hợp lệ: ${status}`);
   }
-  const row = findPayment(providerRef);
+  const row = await findPayment(providerRef);
   if (!row) throw new ProviderError('UNKNOWN_PAYMENT', `Provider không biết khoản thanh toán ${providerRef}`);
-  store()
-    .prepare('UPDATE provider_payments SET status = ?, updated_at = ? WHERE provider_ref = ?')
+  // onlyFromPending: trang thanh toán của người dùng chỉ được chốt một khoản ĐANG chờ. Điều kiện nằm
+  // ngay trong câu UPDATE nên hai lần bấm "thanh toán" đồng thời chỉ một lần thắng. Bộ kiểm thử vẫn
+  // gọi không kèm cờ này để chủ động dựng kịch bản provider đổi kết quả.
+  const r = await store()
+    .prepare(`UPDATE ${T} SET status = ?, updated_at = ? WHERE provider_ref = ?${onlyFromPending ? " AND status = 'PENDING'" : ''}`)
     .run(status, new Date().toISOString(), providerRef);
+  if (onlyFromPending && r.changes !== 1) {
+    throw new ProviderError('ALREADY_SETTLED', 'Giao dịch đã có kết quả ở cổng thanh toán');
+  }
   return buildProviderCallback({ paymentRequestId: row.merchant_ref, providerRef, status, amount: row.amount });
 }
 
 /** Phía PROVIDER: bật/tắt sự cố ở API truy vấn trạng thái cho một khoản thanh toán. */
-function setQueryMode(providerRef, mode) {
+async function setQueryMode(providerRef, mode) {
   if (mode !== 'NORMAL' && mode !== 'ERROR') throw new ProviderError('INVALID_MODE', `query_mode không hợp lệ: ${mode}`);
-  store()
-    .prepare('UPDATE provider_payments SET query_mode = ?, updated_at = ? WHERE provider_ref = ?')
+  await store()
+    .prepare(`UPDATE ${T} SET query_mode = ?, updated_at = ? WHERE provider_ref = ?`)
     .run(mode, new Date().toISOString(), providerRef);
 }
 
@@ -160,13 +181,13 @@ async function queryStatus(providerRef) {
   const wait = latencyMs();
   if (wait > 0) await new Promise((r) => setTimeout(r, wait));
 
-  const row = findPayment(providerRef);
+  const row = await findPayment(providerRef);
   if (!row) throw new ProviderError('UNKNOWN_PAYMENT', `Provider không biết khoản thanh toán ${providerRef}`);
   if (row.query_mode === 'ERROR') {
     throw new ProviderError('PROVIDER_UNAVAILABLE', 'API truy vấn trạng thái của provider đang lỗi');
   }
-  store()
-    .prepare('UPDATE provider_payments SET query_count = query_count + 1 WHERE provider_ref = ?')
+  await store()
+    .prepare(`UPDATE ${T} SET query_count = query_count + 1 WHERE provider_ref = ?`)
     .run(providerRef);
   return { providerRef, merchantRef: row.merchant_ref, status: row.status, amount: row.amount };
 }

@@ -11,10 +11,12 @@ const { cleanupChallenges } = require('../src/lib/maintenance');
 const hit = process.argv.find((a) => a.startsWith('--grace='));
 const opts = hit ? { graceSeconds: Number(hit.slice('--grace='.length)) } : {};
 
-try {
-  process.stdout.write(`${JSON.stringify(cleanupChallenges(opts))}\n`);
-  process.exit(0);
-} catch (e) {
-  console.error('[cleanup] lỗi:', e);
-  process.exit(1);
-}
+cleanupChallenges(opts)
+  .then((summary) => {
+    process.stdout.write(`${JSON.stringify(summary)}\n`);
+    process.exit(0);
+  })
+  .catch((e) => {
+    console.error('[cleanup] lỗi:', e);
+    process.exit(1);
+  });

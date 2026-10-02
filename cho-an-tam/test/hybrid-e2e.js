@@ -232,7 +232,7 @@ async function main() {
 
   const { createBootstrapAdmin } = require('../src/lib/adminBootstrap');
   const bootUsername = `hboot_${rand}`;
-  const { temporaryPassword } = createBootstrapAdmin({ username: bootUsername, displayName: 'Quan Tri Moi' });
+  const { temporaryPassword } = await createBootstrapAdmin({ username: bootUsername, displayName: 'Quan Tri Moi' });
 
   const bootLogin = await flows.loginPassword(bootUsername, temporaryPassword);
   assert(bootLogin.status === 200 && bootLogin.data.scope === 'enroll', 'Đăng nhập bằng mật khẩu tạm cho phiên hạn chế');

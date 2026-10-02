@@ -38,15 +38,15 @@ const UNKNOWN = { error: 'UNKNOWN_PAYMENT', message: 'Cổng thanh toán không 
  * Tìm khoản thanh toán của CHÍNH người gọi. Không phải của họ thì trả như không tồn tại, để
  * trang này không thành công cụ dò xem providerRef nào có thật.
  */
-function findOwnPayment(req, res) {
-  const row = provider.findPayment(req.params.providerRef);
+async function findOwnPayment(req, res) {
+  const row = await provider.findPayment(req.params.providerRef);
   if (!row) {
     res.status(404).json(UNKNOWN);
     return null;
   }
-  const owner = db.prepare('SELECT user_id FROM payment_requests WHERE id = ?').get(row.merchant_ref);
+  const owner = await db.prepare('SELECT user_id FROM payment_requests WHERE id = ?').get(row.merchant_ref);
   if (!owner || owner.user_id !== req.user.id) {
-    logSecurityEvent(req, {
+    await logSecurityEvent(req, {
       type: EVENTS.MOCK_CHECKOUT_DENIED, outcome: 'DENIED', statusCode: 404,
       detail: { reason: 'NOT_PAYMENT_OWNER' },
     });
@@ -56,8 +56,8 @@ function findOwnPayment(req, res) {
   return row;
 }
 
-router.get('/checkout/:providerRef', requireAuth, (req, res) => {
-  const row = findOwnPayment(req, res);
+router.get('/checkout/:providerRef', requireAuth, async (req, res) => {
+  const row = await findOwnPayment(req, res);
   if (row) res.json(publicView(row));
 });
 
@@ -67,14 +67,20 @@ router.post('/checkout/:providerRef/pay', requireAuth, async (req, res, next) =>
     if (outcome !== 'SUCCEEDED' && outcome !== 'FAILED') {
       return res.status(400).json({ error: 'VALIDATION_ERROR', message: 'outcome phải là SUCCEEDED hoặc FAILED' });
     }
-    const row = findOwnPayment(req, res);
+    const row = await findOwnPayment(req, res);
     if (!row) return;
     // Một khoản đã chốt kết quả ở provider thì không "thanh toán lại" được.
     if (row.status !== 'PENDING') {
       return res.status(409).json({ error: 'ALREADY_SETTLED', message: `Giao dịch đã có kết quả ${row.status} ở cổng thanh toán` });
     }
 
-    const callback = provider.settlePayment(row.provider_ref, outcome);
+    let callback;
+    try {
+      callback = await provider.settlePayment(row.provider_ref, outcome, { onlyFromPending: true });
+    } catch (e) {
+      if (e.code !== 'ALREADY_SETTLED') throw e;
+      return res.status(409).json({ error: 'ALREADY_SETTLED', message: e.message });
+    }
     const webhook = deliverWebhook ? await provider.deliverWebhook(callback) : { delivered: false, skipped: true };
     res.json({ providerStatus: outcome, webhook: { delivered: webhook.delivered, skipped: !!webhook.skipped, status: webhook.status || null } });
   } catch (e) {

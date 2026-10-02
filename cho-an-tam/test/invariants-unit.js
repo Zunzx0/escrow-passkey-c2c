@@ -21,6 +21,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const Database = require('../src/lib/sqlite');
+const { SqliteAsyncDatabase } = require('../src/lib/asyncDb');
 const { checkInvariants, CHECKS } = require('../src/lib/invariants');
 
 let failures = 0;
@@ -32,6 +33,9 @@ function assert(cond, label) {
 const tmp = path.join(os.tmpdir(), `invariants-unit-${process.pid}-${Date.now()}.db`);
 const db = new Database(tmp);
 db.pragma('foreign_keys = ON');
+// checkInvariants nhận API bất đồng bộ (lib/asyncDb.js). Dữ liệu nền và các phép gây vi phạm vẫn ghi
+// thẳng bằng handle đồng bộ db — bộ này chỉ chạy trên SQLite vì cần PRAGMA ignore_check_constraints.
+const adb = new SqliteAsyncDatabase(db);
 
 // Lược đồ thật của dự án, chỉ gỡ UNIQUE ở disputes.transaction_id (xem chú thích đầu tệp).
 const schema = fs.readFileSync(path.join(__dirname, '..', 'src', 'schema.sql'), 'utf8');
@@ -97,86 +101,95 @@ db.prepare(`INSERT INTO reauth_grants (id, user_id, transaction_id, dispute_id, 
 
 const TOTAL = CHECKS.length;
 
+// Ném ra để buộc giao dịch của adb ROLLBACK sau khi đã kiểm xong.
+const ROLLBACK = Symbol('rollback');
+
 /** Gây vi phạm trong một giao dịch, kiểm, rồi ROLLBACK để trả lại dữ liệu sạch. */
-function expectViolation(no, label, mutate) {
+async function expectViolation(no, label, mutate) {
   const code = CHECKS.find((c) => c.no === no).code;
   console.log(`\nI${no}: ${CHECKS.find((c) => c.no === no).name} — ${label}`);
-  db.exec('BEGIN');
+  // Giao dịch mở qua adb (không BEGIN tay trên handle đồng bộ): checkInvariants tự mở giao dịch
+  // của nó, nằm lồng bên trong thì thành SAVEPOINT và vẫn nhìn thấy dữ liệu vừa bị làm hỏng.
   let result;
   try {
-    db.pragma('ignore_check_constraints = ON');
-    mutate();
-    result = checkInvariants(db);
+    await adb.transaction(async () => {
+      db.pragma('ignore_check_constraints = ON');
+      mutate();
+      result = await checkInvariants(adb);
+      throw ROLLBACK;
+    })();
+  } catch (err) {
+    if (err !== ROLLBACK) throw err;
   } finally {
-    db.exec('ROLLBACK');
     db.pragma('ignore_check_constraints = OFF');
   }
   const flagged = result.checks.filter((c) => !c.ok).map((c) => c.code);
   assert(flagged.includes(code), `Bất biến số ${no} (${code}) báo vi phạm`);
   assert(flagged.length === 1, `Chỉ đúng bất biến đó báo sai, ${TOTAL - 1} bất biến còn lại vẫn đúng (báo sai: ${flagged.join(', ') || 'không có'})`);
-  assert(checkInvariants(db).ok, 'Hoàn tác xong thì checker trở lại sạch');
+  assert((await checkInvariants(adb)).ok, 'Hoàn tác xong thì checker trở lại sạch');
 }
 
+async function main() {
 console.log('\n=== KIỂM THỬ BỘ KIỂM BẤT BIẾN ===');
 console.log('\nI0: Dữ liệu nền hợp lệ');
 {
-  const r = checkInvariants(db);
+  const r = await checkInvariants(adb);
   assert(r.checked === 9, `Checker chạy đúng 9 phép kiểm (thực tế ${r.checked})`);
   assert(r.checks.map((c) => c.no).join(',') === '1,2,3,4,5,6,7,8,9', 'Đánh số liên tục 1..9');
   assert(r.ok, `Dữ liệu nền không vi phạm bất biến nào${r.ok ? '' : ': ' + JSON.stringify(r.violations)}`);
 }
 
-expectViolation(1, 'ví người mua có số dư âm', () => {
+await expectViolation(1, 'ví người mua có số dư âm', () => {
   db.prepare('UPDATE wallets SET available_balance = -1 WHERE id = ?').run(WB);
 });
 
-expectViolation(2, 'một nghiệp vụ chuyển tiền nội bộ chỉ có một chân', () => {
+await expectViolation(2, 'một nghiệp vụ chuyển tiền nội bộ chỉ có một chân', () => {
   entry(WB, T1, 'orphan-leg', 'ESCROW_LOCK_DEBIT', -10, 0);
 });
 
-expectViolation(3, 'tiền rời ký quỹ lần thứ hai cho cùng giao dịch', () => {
+await expectViolation(3, 'tiền rời ký quỹ lần thứ hai cho cùng giao dịch', () => {
   entry(ESC, T2, 'refund-2-again', 'ESCROW_REFUND_DEBIT', 0, -50);
   entry(WB, T2, 'refund-2-again', 'ESCROW_REFUND_CREDIT', 50, 0);
 });
 
-expectViolation(4, 'phiếu giải ngân mang quyết định (sai phạm vi)', () => {
+await expectViolation(4, 'phiếu giải ngân mang quyết định (sai phạm vi)', () => {
   db.prepare(`INSERT INTO reauth_grants (id, user_id, transaction_id, action, decision, token_hash, expires_at)
               VALUES (?, ?, ?, 'RELEASE_ESCROW', 'REFUND', ?, ?)`).run(id(), B, T1, id(), now);
 });
 
-expectViolation(4, 'một giao dịch tiêu thụ hai phiếu giải ngân', () => {
+await expectViolation(4, 'một giao dịch tiêu thụ hai phiếu giải ngân', () => {
   for (let i = 0; i < 2; i++) {
     db.prepare(`INSERT INTO reauth_grants (id, user_id, transaction_id, action, token_hash, expires_at, used_at)
                 VALUES (?, ?, ?, 'RELEASE_ESCROW', ?, ?, ?)`).run(id(), B, T1, id(), now, now);
   }
 });
 
-expectViolation(5, 'phiếu phân xử ký REFUND nhưng hồ sơ được thi hành RELEASE', () => {
+await expectViolation(5, 'phiếu phân xử ký REFUND nhưng hồ sơ được thi hành RELEASE', () => {
   db.prepare(`UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_decision = 'RELEASE' WHERE id = ?`).run(D2);
 });
 
-expectViolation(5, 'hồ sơ đã giải quyết nhưng không có phiếu phân xử nào', () => {
+await expectViolation(5, 'hồ sơ đã giải quyết nhưng không có phiếu phân xử nào', () => {
   db.prepare('DELETE FROM reauth_grants WHERE id = ?').run(G2);
 });
 
-expectViolation(6, 'tin đăng đã có giao dịch khoá tiền nhưng status vẫn AVAILABLE', () => {
+await expectViolation(6, 'tin đăng đã có giao dịch khoá tiền nhưng status vẫn AVAILABLE', () => {
   db.prepare(`UPDATE listings SET status = 'AVAILABLE' WHERE id = ?`).run(L1);
 });
 
-expectViolation(6, 'hai giao dịch cùng khoá tiền trên một tin đăng', () => {
+await expectViolation(6, 'hai giao dịch cùng khoá tiền trên một tin đăng', () => {
   db.prepare(`INSERT INTO transactions (id, buyer_id, seller_id, item_name, amount, status, escrow_status, listing_id)
               VALUES (?, ?, ?, 'Món 1 lần hai', 100, 'COMPLETED', 'RELEASED', ?)`).run(id(), B, S, L1);
 });
 
-expectViolation(7, 'ví ký quỹ khoá lệch với tổng nghĩa vụ đang giữ', () => {
+await expectViolation(7, 'ví ký quỹ khoá lệch với tổng nghĩa vụ đang giữ', () => {
   db.prepare('UPDATE wallets SET locked_balance = 999 WHERE id = ?').run(ESC);
 });
 
-expectViolation(8, 'tài khoản ACTIVE mất hết Passkey', () => {
+await expectViolation(8, 'tài khoản ACTIVE mất hết Passkey', () => {
   db.prepare('DELETE FROM passkey_credentials WHERE user_id = ?').run(B);
 });
 
-expectViolation(9, 'một giao dịch có hai hồ sơ tranh chấp', () => {
+await expectViolation(9, 'một giao dịch có hai hồ sơ tranh chấp', () => {
   db.prepare(`INSERT INTO disputes (id, transaction_id, created_by, reason, status) VALUES (?, ?, ?, 'Mở lần hai', 'OPEN')`)
     .run(id(), T2, S);
 });
@@ -188,3 +201,9 @@ for (const suffix of ['', '-wal', '-shm']) {
 
 console.log(failures === 0 ? '\n=== KẾT QUẢ: TẤT CẢ PASS ✅ ===\n' : `\n=== KẾT QUẢ: ${failures} KIỂM THỬ THẤT BẠI ❌ ===\n`);
 process.exit(failures === 0 ? 0 : 1);
+}
+
+main().catch((e) => {
+  console.error('LỖI KHÔNG MONG ĐỢI:', e);
+  process.exit(1);
+});

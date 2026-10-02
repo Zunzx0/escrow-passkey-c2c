@@ -45,8 +45,8 @@ function signAccessToken(user, scope, sessionId) {
 }
 
 /** Mở một phiên mới: ghi phiên phía máy chủ, đặt cookie làm mới, trả access token. */
-function startSession(req, res, user, scope) {
-  const { sessionId, refreshToken } = createSession(user.id);
+async function startSession(req, res, user, scope) {
+  const { sessionId, refreshToken } = await createSession(user.id);
   setRefreshCookie(req, res, refreshToken);
   return { token: signAccessToken(user, scope, sessionId), sessionId };
 }
@@ -66,18 +66,18 @@ function startSession(req, res, user, scope) {
  * Trả về null nếu token hợp lệ nhưng tài khoản đã bị xoá, bị khoá, hoặc mật khẩu đã đổi
  * sau khi token này được cấp.
  */
-function loadUserFromToken(token) {
+async function loadUserFromToken(token) {
   const payload = jwt.verify(token, JWT_SECRET);
-  const row = db
+  const row = await db
     .prepare('SELECT id, username, display_name, role, account_status, token_version, is_active FROM users WHERE id = ?')
     .get(payload.sub);
   if (!row || !row.is_active) return null;
   if ((payload.tv || 0) !== row.token_version) return null; // mật khẩu đã đổi -> phiên cũ hết hiệu lực
 
   // Phiên phía máy chủ: đã đăng xuất, quá hạn hay nhàn rỗi quá lâu thì JWT còn hạn cũng vô hiệu.
-  const session = getSession(payload.sid);
+  const session = await getSession(payload.sid);
   if (sessionProblem(session) || session.user_id !== row.id) return null;
-  touchSession(session);
+  await touchSession(session);
 
   // Phạm vi thực tế là giao của phạm vi ghi trong token và phạm vi mà trạng thái tài khoản
   // hiện tại cho phép. Token cũ mang scope 'full' của một tài khoản vừa bị đưa về trạng thái
@@ -103,7 +103,7 @@ function readBearer(req) {
   return header.startsWith('Bearer ') ? header.slice(7) : null;
 }
 
-function authenticate(req, res, requiredScope) {
+async function authenticate(req, res, requiredScope) {
   const token = readBearer(req);
   if (!token) {
     res.status(401).json({ error: 'UNAUTHENTICATED', message: 'Thiếu access token' });
@@ -111,8 +111,12 @@ function authenticate(req, res, requiredScope) {
   }
   let user;
   try {
-    user = loadUserFromToken(token);
+    user = await loadUserFromToken(token);
   } catch (e) {
+    // Chỉ lỗi của chính JWT (sai chữ ký, hết hạn, sai định dạng) mới là "token không hợp lệ".
+    // Lỗi cơ sở dữ liệu phải đi tiếp tới middleware lỗi thành 500 — trả 401 cho nó sẽ khiến
+    // trình duyệt tưởng phiên đã hết và tự đăng xuất người dùng chỉ vì máy chủ trục trặc.
+    if (!(e instanceof jwt.JsonWebTokenError)) throw e;
     res.status(401).json({ error: 'UNAUTHENTICATED', message: 'Token không hợp lệ hoặc đã hết hạn' });
     return null;
   }
@@ -141,16 +145,16 @@ function authenticate(req, res, requiredScope) {
  * tự động không mở cho phiên chưa hoàn tất thiết lập, thay vì mở nhầm rồi chờ ai đó phát
  * hiện. Chỉ đúng vài tuyến của luồng hoàn tất mới dùng requireEnrollAuth.
  */
-function requireAuth(req, res, next) {
-  const user = authenticate(req, res, SCOPE_FULL);
+async function requireAuth(req, res, next) {
+  const user = await authenticate(req, res, SCOPE_FULL);
   if (!user) return;
   req.user = user;
   next();
 }
 
 /** Cho phép cả phiên đầy đủ lẫn phiên hoàn tất thiết lập. Dùng cho đúng luồng enroll. */
-function requireEnrollAuth(req, res, next) {
-  const user = authenticate(req, res, SCOPE_ENROLL);
+async function requireEnrollAuth(req, res, next) {
+  const user = await authenticate(req, res, SCOPE_ENROLL);
   if (!user) return;
   req.user = user;
   next();
@@ -158,11 +162,11 @@ function requireEnrollAuth(req, res, next) {
 
 // Dùng cho các endpoint công khai nhưng muốn "biết thêm" nếu người dùng đã đăng nhập
 // (ví dụ storefront: khách vãng lai vẫn xem được, người bán thì thấy cả tin đang ẩn).
-function optionalAuth(req, res, next) {
+async function optionalAuth(req, res, next) {
   const token = readBearer(req);
   if (token) {
     try {
-      const user = loadUserFromToken(token);
+      const user = await loadUserFromToken(token);
       if (user && user.scope === SCOPE_FULL) req.user = user;
     } catch (e) {
       // Token hỏng/hết hạn trên endpoint công khai: coi như khách vãng lai.

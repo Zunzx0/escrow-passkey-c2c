@@ -46,7 +46,7 @@ async function http(p, opts = {}, retried = false) {
   return { status: res.status, data };
 }
 
-const balanceOf = (userId) => db.prepare('SELECT available_balance FROM wallets WHERE user_id = ?').get(userId).available_balance;
+const balanceOf = async (userId) => (await db.prepare('SELECT available_balance FROM wallets WHERE user_id = ?').get(userId)).available_balance;
 const prRow = (id) => db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id);
 
 async function main() {
@@ -61,49 +61,49 @@ async function main() {
 
   section('K01: Thanh toán thành công ở cổng -> webhook qua HTTP thật -> ví được cộng');
   {
-    const before = balanceOf(buyer.user.id);
+    const before = await balanceOf(buyer.user.id);
     const pr = await topup(200000);
     const page = await http(`/mock-provider/checkout/${pr.providerRef}`, { token: buyer.token });
     assert(page.status === 200 && page.data.amount === 200000 && page.data.status === 'PENDING', 'Trang của cổng thanh toán hiển thị đúng số tiền, trạng thái PENDING');
 
     const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
     assert(pay.status === 200 && pay.data.webhook.delivered && pay.data.webhook.status === 200, 'Cổng thanh toán gửi được webhook về máy chủ (HTTP 200)');
-    const row = prRow(pr.id);
+    const row = await prRow(pr.id);
     assert(row.status === 'SUCCEEDED' && row.resolved_by === 'WEBHOOK', 'Yêu cầu tất toán SUCCEEDED qua WEBHOOK');
-    assert(balanceOf(buyer.user.id) - before === 200000, 'Ví cộng đúng 200.000₫');
+    assert((await balanceOf(buyer.user.id)) - before === 200000, 'Ví cộng đúng 200.000₫');
   }
 
   section('K02: Thành công nhưng webhook thất lạc -> chỉ đối soát mới phát hiện');
   {
-    const before = balanceOf(buyer.user.id);
+    const before = await balanceOf(buyer.user.id);
     const pr = await topup(150000);
     const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: false } });
     assert(pay.status === 200 && pay.data.webhook.skipped, 'Cổng thanh toán ghi nhận thành công nhưng không gửi webhook');
-    assert(prRow(pr.id).status === 'PENDING', 'Phía sàn vẫn PENDING — trang của cổng thanh toán không tự cộng ví');
-    assert(balanceOf(buyer.user.id) === before, 'Ví CHƯA đổi');
+    assert((await prRow(pr.id)).status === 'PENDING', 'Phía sàn vẫn PENDING — trang của cổng thanh toán không tự cộng ví');
+    assert((await balanceOf(buyer.user.id)) === before, 'Ví CHƯA đổi');
 
     const run = spawnSync(process.execPath, ['scripts/reconcile.js', `--id=${pr.id}`, '--min-age=0'], {
       cwd: path.join(__dirname, '..'), env: process.env, encoding: 'utf8',
     });
     const summary = JSON.parse(run.stdout.trim().split('\n').pop());
     assert(summary.applied === 1, 'Worker đối soát phát hiện kết quả và tất toán');
-    const row = prRow(pr.id);
+    const row = await prRow(pr.id);
     assert(row.status === 'SUCCEEDED' && row.resolved_by === 'RECONCILER', 'Yêu cầu tất toán SUCCEEDED qua RECONCILER');
-    assert(balanceOf(buyer.user.id) - before === 150000, 'Ví cộng đúng 150.000₫');
+    assert((await balanceOf(buyer.user.id)) - before === 150000, 'Ví cộng đúng 150.000₫');
   }
 
   section('K03: Thanh toán thất bại -> ví không đổi');
   {
-    const before = balanceOf(buyer.user.id);
+    const before = await balanceOf(buyer.user.id);
     const pr = await topup(120000);
     await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'FAILED', deliverWebhook: true } });
-    assert(prRow(pr.id).status === 'FAILED', 'Yêu cầu tất toán FAILED');
-    assert(balanceOf(buyer.user.id) === before, 'Ví KHÔNG đổi');
+    assert((await prRow(pr.id)).status === 'FAILED', 'Yêu cầu tất toán FAILED');
+    assert((await balanceOf(buyer.user.id)) === before, 'Ví KHÔNG đổi');
 
     section('K04: Không "thanh toán lại" được khoản đã có kết quả ở cổng');
     const again = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
     assert(again.status === 409 && again.data.error === 'ALREADY_SETTLED', `Bị từ chối (nhận ${again.status} ${again.data.error})`);
-    assert(prRow(pr.id).status === 'FAILED' && balanceOf(buyer.user.id) === before, 'Trạng thái và ví giữ nguyên');
+    assert((await prRow(pr.id)).status === 'FAILED' && (await balanceOf(buyer.user.id)) === before, 'Trạng thái và ví giữ nguyên');
   }
 
   section('K05: Chi tiết giao dịch mang kèm hồ sơ tranh chấp cho cả hai bên');
@@ -128,7 +128,7 @@ async function main() {
     assert(asSeller.data.dispute && asSeller.data.dispute.reason === 'Thiếu phụ kiện', 'Người bán thấy đúng lý do tranh chấp');
   }
 
-  const inv = checkInvariants(db);
+  const inv = await checkInvariants(db);
   assert(inv.ok, `Chín bất biến vẫn đúng${inv.ok ? '' : ': ' + JSON.stringify(inv.violations)}`);
 
   console.log(failures === 0 ? '\n=== KẾT QUẢ: TẤT CẢ PASS ✅ ===\n' : `\n=== KẾT QUẢ: ${failures} KIỂM THỬ THẤT BẠI ❌ ===\n`);

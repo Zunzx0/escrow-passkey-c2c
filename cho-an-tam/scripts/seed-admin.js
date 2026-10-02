@@ -22,7 +22,7 @@ function readArgs(argv) {
   return args;
 }
 
-function main() {
+async function main() {
   const args = readArgs(process.argv);
   const username = args.username || args.u;
   if (!username || username === true) {
@@ -32,7 +32,7 @@ function main() {
   }
 
   try {
-    const { user, temporaryPassword } = createBootstrapAdmin({
+    const { user, temporaryPassword } = await createBootstrapAdmin({
       username,
       displayName: args.display || args.d,
       temporaryPassword: typeof args.password === 'string' ? args.password : undefined,
@@ -63,4 +63,7 @@ function main() {
   }
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

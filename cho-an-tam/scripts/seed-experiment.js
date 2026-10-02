@@ -45,22 +45,22 @@ const LISTINGS = [
     description: 'Dùng cho kịch bản hai người mua cùng khoá tiền một tin đăng.' },
 ];
 
-function findUser(username) {
+async function findUser(username) {
   return db.prepare('SELECT * FROM users WHERE username = ?').get(username);
 }
 
-function createPendingAccount({ username, displayName }) {
+async function createPendingAccount({ username, displayName }) {
   const id = uuid();
   const now = nowIso();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
      VALUES (?, ?, ?, 'BUYER', ?, 'PENDING_PASSKEY', 0, ?, ?)`
   ).run(id, username, displayName, hashPassword(PASSWORD), now, now);
   return findUser(username);
 }
 
-function ensureSellerRequest(seller) {
-  const existing = db
+async function ensureSellerRequest(seller) {
+  const existing = await db
     .prepare("SELECT * FROM seller_requests WHERE user_id = ? AND status = 'PENDING'")
     .get(seller.id);
   if (existing) return { created: false, request: existing };
@@ -68,20 +68,20 @@ function ensureSellerRequest(seller) {
 
   const now = nowIso();
   const id = uuid();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO seller_requests (id, user_id, shop_name, pitch, status, created_at, updated_at)
      VALUES (?, ?, ?, ?, 'PENDING', ?, ?)`
   ).run(id, seller.id, 'Cửa hàng Thực Nghiệm', 'Tài khoản phục vụ bộ dữ liệu thực nghiệm cố định.', now, now);
-  return { created: true, request: db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(id) };
+  return { created: true, request: await db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(id) };
 }
 
-function ensureListings(seller) {
+async function ensureListings(seller) {
   const created = [];
   for (const spec of LISTINGS) {
-    const existing = db.prepare('SELECT id FROM listings WHERE seller_id = ? AND title = ?').get(seller.id, spec.title);
+    const existing = await db.prepare('SELECT id FROM listings WHERE seller_id = ? AND title = ?').get(seller.id, spec.title);
     if (existing) continue;
     const now = nowIso();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO listings (id, seller_id, title, description, category, condition, location, price, visibility, version, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PUBLIC', 0, ?, ?)`
     ).run(uuid(), seller.id, spec.title, spec.description, spec.category, spec.condition, spec.location, spec.price, now, now);
@@ -90,19 +90,19 @@ function ensureListings(seller) {
   return created;
 }
 
-function main() {
+async function main() {
   console.log('\n  Bộ dữ liệu thực nghiệm cố định');
   console.log('  ' + '='.repeat(64));
 
   // --- quản trị viên: đi đúng thủ tục bootstrap, không tạo tay ---
-  let admin = findUser('admin01');
+  let admin = await findUser('admin01');
   if (!admin) {
-    createBootstrapAdmin({
+    await createBootstrapAdmin({
       username: 'admin01',
       displayName: 'Quản trị viên Thực Nghiệm',
       temporaryPassword: ADMIN_TEMP_PASSWORD,
     });
-    admin = findUser('admin01');
+    admin = await findUser('admin01');
     console.log(`   + admin01   đã tạo, mật khẩu tạm: ${ADMIN_TEMP_PASSWORD}`);
   } else {
     console.log(`   = admin01   đã có, trạng thái ${admin.account_status}`);
@@ -110,9 +110,9 @@ function main() {
 
   // --- ba tài khoản còn lại ---
   for (const spec of ACCOUNTS) {
-    const existing = findUser(spec.username);
+    const existing = await findUser(spec.username);
     if (!existing) {
-      createPendingAccount(spec);
+      await createPendingAccount(spec);
       console.log(`   + ${spec.username.padEnd(9)} đã tạo, mật khẩu: ${PASSWORD}   (${spec.note})`);
     } else {
       console.log(`   = ${spec.username.padEnd(9)} đã có, trạng thái ${existing.account_status}, vai trò ${existing.role}`);
@@ -120,14 +120,14 @@ function main() {
   }
 
   // --- yêu cầu quyền bán của seller01, để quản trị viên duyệt qua giao diện ---
-  const seller = findUser('seller01');
-  const sr = ensureSellerRequest(seller);
+  const seller = await findUser('seller01');
+  const sr = await ensureSellerRequest(seller);
   if (sr.created) console.log('   + yêu cầu cấp quyền bán của seller01 đang chờ quản trị viên duyệt');
 
   // --- tin đăng: chỉ tạo được khi seller01 đã là người bán ---
   const sellerReady = seller && seller.role === 'SELLER' && seller.account_status === 'ACTIVE';
   if (sellerReady) {
-    const made = ensureListings(seller);
+    const made = await ensureListings(seller);
     if (made.length) made.forEach((t) => console.log(`   + tin đăng: ${t}`));
     else console.log('   = ba tin đăng cố định đã có đủ');
   }
@@ -140,7 +140,7 @@ function main() {
     );
   }
   for (const spec of ACCOUNTS) {
-    const u = findUser(spec.username);
+    const u = await findUser(spec.username);
     if (u.account_status !== 'ACTIVE') {
       pending.push(`${spec.username}: đăng nhập bằng mật khẩu "${PASSWORD}" -> đăng ký Passkey`);
     }
@@ -157,10 +157,13 @@ function main() {
     pending.forEach((p, i) => console.log(`     ${i + 1}. ${p}`));
   }
 
-  const inv = checkInvariants(db);
+  const inv = await checkInvariants(db);
   console.log(`   Bất biến: ${inv.ok ? 'cả bảy đều đúng' : `${inv.violations.length} VI PHẠM`}`);
   if (!inv.ok) inv.violations.forEach((v) => console.log(`     - [${v.invariant}] ${v.detail}`));
   console.log('');
 }
 
-main();
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

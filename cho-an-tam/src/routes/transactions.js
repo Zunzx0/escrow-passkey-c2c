@@ -76,8 +76,8 @@ function serializeTxn(t) {
   };
 }
 
-function loadTxnOr404(id) {
-  const t = db.prepare(`${TXN_SELECT} WHERE t.id = ?`).get(id);
+async function loadTxnOr404(id) {
+  const t = await db.prepare(`${TXN_SELECT} WHERE t.id = ?`).get(id);
   if (!t) throw new AppError(404, 'TRANSACTION_NOT_FOUND', 'Không tìm thấy giao dịch');
   return t;
 }
@@ -111,7 +111,7 @@ function assertOwnership(txn, user, allowed) {
  * thời điểm LOCK do cập nhật có điều kiện trên `listings.status`/`version` bên trong
  * db.transaction() của route /secure quyết định (xem lockListingForOrder bên dưới).
  */
-function findReservingOrder(listingId, exceptTxnId) {
+async function findReservingOrder(listingId, exceptTxnId) {
   return db
     .prepare(
       `SELECT id FROM transactions
@@ -131,10 +131,10 @@ function findReservingOrder(listingId, exceptTxnId) {
  * công nhưng bước ví sau đó lỗi, cả hai phải cùng rollback — không để tin đăng kẹt ở
  * LOCKED mà không có tiền nào thực sự bị khoá.
  */
-function lockListingForOrder(listingId) {
-  const listing = db.prepare('SELECT status, version FROM listings WHERE id = ?').get(listingId);
+async function lockListingForOrder(listingId) {
+  const listing = await db.prepare('SELECT status, version FROM listings WHERE id = ?').get(listingId);
   if (!listing) throw new AppError(404, 'LISTING_NOT_FOUND', 'Tin đăng không còn tồn tại');
-  const result = db
+  const result = await db
     .prepare(
       `UPDATE listings SET status = 'LOCKED', version = version + 1, updated_at = ?
        WHERE id = ? AND status = 'AVAILABLE' AND version = ?`
@@ -148,7 +148,7 @@ function lockListingForOrder(listingId) {
 // ---------- Tạo giao dịch thủ công, không gắn tin đăng ----------
 // Giữ lại để các kịch bản kiểm thử lõi escrow chạy được mà không cần lớp marketplace.
 
-router.post('/', requireAuth, requireRole('BUYER'), (req, res, next) => {
+router.post('/', requireAuth, requireRole('BUYER'), async (req, res, next) => {
   try {
     const { sellerId, itemName, itemDescription, amount } = req.body || {};
     if (!sellerId || !itemName || !amount || amount <= 0) {
@@ -157,18 +157,18 @@ router.post('/', requireAuth, requireRole('BUYER'), (req, res, next) => {
     if (sellerId === req.user.id) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Buyer và Seller phải khác nhau');
     }
-    const seller = db.prepare(`SELECT * FROM users WHERE id = ? AND role = 'SELLER'`).get(sellerId);
+    const seller = await db.prepare(`SELECT * FROM users WHERE id = ? AND role = 'SELLER'`).get(sellerId);
     if (!seller) throw new AppError(400, 'SELLER_NOT_FOUND', 'Seller không tồn tại');
 
     const id = uuid();
     const now = nowIso();
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.prepare(
         `INSERT INTO transactions (id, buyer_id, seller_id, item_name, item_description, amount,
           status, escrow_status, version, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'CREATED', 'NONE', 0, ?, ?)`
       ).run(id, req.user.id, sellerId, itemName, itemDescription || null, amount, now, now);
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: id,
         actorId: req.user.id,
         action: 'TRANSACTION_CREATED',
@@ -178,7 +178,7 @@ router.post('/', requireAuth, requireRole('BUYER'), (req, res, next) => {
       });
     })();
 
-    res.status(201).json(serializeTxn(loadTxnOr404(id)));
+    res.status(201).json(serializeTxn(await loadTxnOr404(id)));
   } catch (e) {
     next(e);
   }
@@ -186,19 +186,19 @@ router.post('/', requireAuth, requireRole('BUYER'), (req, res, next) => {
 
 // ---------- Đặt mua một sản phẩm từ storefront ----------
 
-router.post('/orders', requireAuth, requireRole('BUYER'), (req, res, next) => {
+router.post('/orders', requireAuth, requireRole('BUYER'), async (req, res, next) => {
   try {
     const { listingId, note } = req.body || {};
     if (!listingId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu listingId');
 
-    const listing = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
+    const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
     if (!listing || listing.visibility !== 'PUBLIC') {
       throw new AppError(404, 'LISTING_NOT_FOUND', 'Sản phẩm không còn được bán');
     }
     if (listing.seller_id === req.user.id) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Không thể tự mua sản phẩm của chính mình');
     }
-    if (findReservingOrder(listing.id)) {
+    if (await findReservingOrder(listing.id)) {
       throw new AppError(409, 'LISTING_SOLD', 'Sản phẩm này đã có người mua, vui lòng chọn sản phẩm khác');
     }
 
@@ -209,8 +209,8 @@ router.post('/orders', requireAuth, requireRole('BUYER'), (req, res, next) => {
     const now = nowIso();
     const buyerNote = note ? String(note).trim().slice(0, 500) : null;
 
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.prepare(
         `INSERT INTO transactions (id, buyer_id, seller_id, item_name, item_description, amount,
           status, escrow_status, listing_id, buyer_note, version, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, 'CREATED', 'NONE', ?, ?, 0, ?, ?)`
@@ -227,7 +227,7 @@ router.post('/orders', requireAuth, requireRole('BUYER'), (req, res, next) => {
         now
       );
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: id,
         actorId: req.user.id,
         action: 'ORDER_CREATED',
@@ -237,7 +237,7 @@ router.post('/orders', requireAuth, requireRole('BUYER'), (req, res, next) => {
       });
     })();
 
-    res.status(201).json(serializeTxn(loadTxnOr404(id)));
+    res.status(201).json(serializeTxn(await loadTxnOr404(id)));
   } catch (e) {
     next(e);
   }
@@ -245,7 +245,7 @@ router.post('/orders', requireAuth, requireRole('BUYER'), (req, res, next) => {
 
 // ---------- Danh sách / chi tiết ----------
 
-router.get('/', requireAuth, (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const { status, as } = req.query;
   const where = [];
   const params = [];
@@ -273,17 +273,17 @@ router.get('/', requireAuth, (req, res) => {
   }
 
   const sql = `${TXN_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY t.created_at DESC LIMIT 200`;
-  const rows = db.prepare(sql).all(...params);
+  const rows = await db.prepare(sql).all(...params);
   res.json({ transactions: rows.map(serializeTxn) });
 });
 
-router.get('/:id', requireAuth, (req, res, next) => {
+router.get('/:id', requireAuth, async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER', 'SELLER', 'ADMIN']);
     // Hồ sơ tranh chấp (nếu có) đi kèm chi tiết giao dịch, để cả hai bên — không chỉ quản trị
     // viên — thấy được tiền đang bị đóng băng vì đâu và đã được phân xử ra sao.
-    const d = db.prepare('SELECT * FROM disputes WHERE transaction_id = ?').get(txn.id);
+    const d = await db.prepare('SELECT * FROM disputes WHERE transaction_id = ?').get(txn.id);
     res.json({
       ...serializeTxn(txn),
       dispute: d ? {
@@ -303,12 +303,12 @@ router.get('/:id', requireAuth, (req, res, next) => {
 
 // ---------- UC06: Khóa tiền vào Escrow ----------
 
-router.post('/:id/secure', requireAuth, (req, res, next) => {
+router.post('/:id/secure', requireAuth, async (req, res, next) => {
   try {
     const { requestId } = req.body || {};
     if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
 
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
 
     // Dấu vân tay gắn khoá chống lặp với đúng chủ thể, hành động, giao dịch và số tiền.
@@ -321,35 +321,35 @@ router.post('/:id/secure', requireAuth, (req, res, next) => {
       amount: txn.amount,
     });
     const buyerLegKey = `lock:${requestId}:buyer`;
-    if (checkIdempotency(buyerLegKey, fingerprint)) {
-      return res.json(serializeTxn(loadTxnOr404(txn.id)));
+    if (await checkIdempotency(buyerLegKey, fingerprint)) {
+      return res.json(serializeTxn(await loadTxnOr404(txn.id)));
     }
 
     if (txn.status !== 'CREATED' || txn.escrow_status !== 'NONE') {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch không ở trạng thái CREATED + NONE');
     }
     // Nhiều người có thể cùng tạo đơn cho một sản phẩm; ai khóa tiền trước thì giữ chỗ.
-    if (txn.listing_id && findReservingOrder(txn.listing_id, txn.id)) {
+    if (txn.listing_id && (await findReservingOrder(txn.listing_id, txn.id))) {
       throw new AppError(409, 'LISTING_SOLD', 'Sản phẩm vừa được người khác mua trước, đơn này không thể thanh toán');
     }
 
-    const buyerWallet = getUserWallet(req.user.id);
-    const escrowWallet = getEscrowWallet();
+    const buyerWallet = await getUserWallet(req.user.id);
+    const escrowWallet = await getEscrowWallet();
     if (buyerWallet.available_balance < txn.amount) {
       throw new AppError(400, 'INSUFFICIENT_FUNDS', 'Số dư khả dụng không đủ');
     }
 
-    db.transaction(() => {
+    await db.transaction(async () => {
       // Chiếm độc quyền tin đăng TRƯỚC khi chạm tới ví — đúng thứ tự bước 3-4 của quy trình
       // LOCK đã chốt. Thua ở bước này thì không có delta ví nào phát sinh để phải rollback.
-      if (txn.listing_id) lockListingForOrder(txn.listing_id);
+      if (txn.listing_id) await lockListingForOrder(txn.listing_id);
 
-      const updated = applyOrderedWalletUpdates([
+      const updated = await applyOrderedWalletUpdates([
         { wallet: buyerWallet, availableDelta: -txn.amount, lockedDelta: 0 },
         { wallet: escrowWallet, availableDelta: 0, lockedDelta: txn.amount },
       ], 'lock');
 
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: buyerWallet.id,
         transactionId: txn.id,
         requestId,
@@ -361,7 +361,7 @@ router.post('/:id/secure', requireAuth, (req, res, next) => {
         requestFingerprint: fingerprint,
         description: 'Khóa tiền mua hàng vào Escrow',
       });
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: escrowWallet.id,
         transactionId: txn.id,
         requestId,
@@ -374,9 +374,9 @@ router.post('/:id/secure', requireAuth, (req, res, next) => {
         description: 'Escrow giữ tiền của người mua',
       });
 
-      applyTransactionStatus(txn, { status: 'SECURED', escrowStatus: 'LOCKED' });
+      await applyTransactionStatus(txn, { status: 'SECURED', escrowStatus: 'LOCKED' });
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'ESCROW_LOCKED',
@@ -385,9 +385,9 @@ router.post('/:id/secure', requireAuth, (req, res, next) => {
         eventData: { amount: txn.amount, requestId },
       });
     })();
-    onOrderSecured(txn);
+    await onOrderSecured(txn);
 
-    res.json(serializeTxn(loadTxnOr404(txn.id)));
+    res.json(serializeTxn(await loadTxnOr404(txn.id)));
   } catch (e) {
     next(e);
   }
@@ -398,22 +398,22 @@ router.post('/:id/secure', requireAuth, (req, res, next) => {
 // Mốc sự kiện, không phải trạng thái: đơn vẫn SECURED + LOCKED, không có tiền nào di chuyển.
 // Cho người mua biết người bán đã thấy đơn và sẽ gửi hàng. Không bắt buộc trước khi gửi hàng —
 // thêm một điều kiện chặn chuyển trạng thái là đổi máy trạng thái đã chốt ở Chương 2.
-router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['SELLER']);
     if (txn.status !== 'SECURED' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Chỉ xác nhận được đơn đã thanh toán (SECURED + LOCKED)');
     }
     if (txn.seller_ack_at) throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'Đơn này đã được xác nhận');
 
-    db.transaction(() => {
+    await db.transaction(async () => {
       // Điều kiện nằm trong WHERE: hai lần bấm gần như đồng thời chỉ một lần ghi được.
-      const r = db
+      const r = await db
         .prepare(`UPDATE transactions SET seller_ack_at = ?, updated_at = ? WHERE id = ? AND seller_ack_at IS NULL AND status = 'SECURED'`)
         .run(nowIso(), nowIso(), txn.id);
       if (r.changes !== 1) throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'Đơn này vừa được xác nhận');
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'SELLER_ACKNOWLEDGED',
@@ -422,8 +422,8 @@ router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), (req, res, n
         eventData: {},
       });
     })();
-    onOrderAcknowledged(txn);
-    res.json(serializeTxn(loadTxnOr404(txn.id)));
+    await onOrderAcknowledged(txn);
+    res.json(serializeTxn(await loadTxnOr404(txn.id)));
   } catch (e) {
     next(e);
   }
@@ -431,16 +431,16 @@ router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), (req, res, n
 
 // ---------- UC07: Người bán giao hàng ----------
 
-router.post('/:id/ship', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['SELLER']);
     if (txn.status !== 'SECURED' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SECURED + LOCKED');
     }
-    db.transaction(() => {
-      applyTransactionStatus(txn, { status: 'SHIPPING', escrowStatus: 'LOCKED' });
-      appendAuditLog(db, {
+    await db.transaction(async () => {
+      await applyTransactionStatus(txn, { status: 'SHIPPING', escrowStatus: 'LOCKED' });
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'SELLER_SHIPPED',
@@ -449,8 +449,8 @@ router.post('/:id/ship', requireAuth, requireRole('SELLER'), (req, res, next) =>
         eventData: {},
       });
     })();
-    onOrderShipped(txn);
-    res.json(serializeTxn(loadTxnOr404(txn.id)));
+    await onOrderShipped(txn);
+    res.json(serializeTxn(await loadTxnOr404(txn.id)));
   } catch (e) {
     next(e);
   }
@@ -464,16 +464,16 @@ router.post('/:id/ship', requireAuth, requireRole('SELLER'), (req, res, next) =>
 //
 // Trạng thái WAIT_CONFIRM bắt đầu thời hạn kiểm tra hàng, nên nó phải khởi phát từ một sự
 // kiện mà chỉ người mua quan sát được: kiện hàng đã tới tay.
-router.post('/:id/wait-confirm', requireAuth, requireRole('BUYER'), (req, res, next) => {
+router.post('/:id/wait-confirm', requireAuth, requireRole('BUYER'), async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
     if (txn.status !== 'SHIPPING' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SHIPPING + LOCKED');
     }
-    db.transaction(() => {
-      applyTransactionStatus(txn, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
-      appendAuditLog(db, {
+    await db.transaction(async () => {
+      await applyTransactionStatus(txn, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'BUYER_RECEIVED_PACKAGE',
@@ -482,8 +482,8 @@ router.post('/:id/wait-confirm', requireAuth, requireRole('BUYER'), (req, res, n
         eventData: {},
       });
     })();
-    onOrderWaitConfirm(txn);
-    res.json(serializeTxn(loadTxnOr404(txn.id)));
+    await onOrderWaitConfirm(txn);
+    res.json(serializeTxn(await loadTxnOr404(txn.id)));
   } catch (e) {
     next(e);
   }
@@ -516,8 +516,8 @@ router.post('/:id/wait-confirm', requireAuth, requireRole('BUYER'), (req, res, n
 //
 // Thứ tự khoá trong object này là một phần của giao thức: JSON.stringify giữ nguyên thứ
 // tự chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
-function buildAuthorizationContext(txn) {
-  const seller = db.prepare('SELECT display_name FROM users WHERE id = ?').get(txn.seller_id);
+async function buildAuthorizationContext(txn) {
+  const seller = await db.prepare('SELECT display_name FROM users WHERE id = ?').get(txn.seller_id);
   return {
     v: 2,
     action: 'RELEASE_ESCROW',
@@ -536,22 +536,22 @@ function contextDigest(context) {
   return crypto.createHash('sha256').update(JSON.stringify(context), 'utf8').digest();
 }
 
-function userCredentials(userId) {
+async function userCredentials(userId) {
   return db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(userId);
 }
 
 router.post('/:id/reauth/options', requireAuth, sensitiveLimiter, async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
     if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở WAIT_CONFIRM + LOCKED');
     }
 
-    const credentials = userCredentials(req.user.id);
+    const credentials = await userCredentials(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản chưa có Passkey');
 
-    const context = buildAuthorizationContext(txn);
+    const context = await buildAuthorizationContext(txn);
 
     // KHÔNG truyền challenge: để thư viện tự sinh giá trị ngẫu nhiên bằng nguồn ngẫu
     // nhiên mật mã. Thao tác chạm tới tiền nên đòi mức xác minh người dùng (PIN hoặc
@@ -567,7 +567,7 @@ router.post('/:id/reauth/options', requireAuth, sensitiveLimiter, async (req, re
 
     const sessionId = uuid();
     const expiresAt = new Date(Date.now() + REAUTH_TTL_SECONDS * 1000).toISOString();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, ?, ?, ?, 'REAUTH', ?, ?)`
     ).run(sessionId, req.user.id, txn.id, options.challenge, JSON.stringify(context), expiresAt);
@@ -584,10 +584,10 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     const { reauthSessionId, response } = req.body || {};
     if (!reauthSessionId || !response) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
 
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
 
-    const challengeRow = db
+    const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REAUTH' AND transaction_id = ? AND user_id = ?`)
       .get(reauthSessionId, txn.id, req.user.id);
     if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên re-auth không hợp lệ');
@@ -597,7 +597,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     }
 
     // Người dùng có thể ký bằng BẤT KỲ thiết bị nào của họ — chọn đúng cái đã ký.
-    const credential = db
+    const credential = await db
       .prepare('SELECT * FROM passkey_credentials WHERE user_id = ? AND credential_id = ?')
       .get(req.user.id, response.id);
     if (!credential) throw new AppError(400, 'NO_CREDENTIAL', 'Passkey này không thuộc tài khoản của bạn');
@@ -605,7 +605,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     // Đối chiếu ngữ cảnh uỷ quyền lần 1: dựng lại nội dung giao dịch từ dữ liệu HIỆN TẠI
     // và so với bản đã lưu lúc phát challenge. Đơn bị sửa trong lúc chờ ký thì hai bản
     // lệch nhau và yêu cầu bị chặn ngay, trước khi cấp phiếu uỷ quyền.
-    const currentContext = buildAuthorizationContext(txn);
+    const currentContext = await buildAuthorizationContext(txn);
     if (challengeRow.context_data !== JSON.stringify(currentContext)) {
       throw new AppError(409, 'CONTEXT_MISMATCH', 'Nội dung giao dịch đã thay đổi kể từ lúc bắt đầu xác thực. Hãy thử lại.');
     }
@@ -629,14 +629,20 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     const counterCheck = assessCounter(credential, verification.authenticationInfo.newCounter);
 
     let issued;
-    db.transaction(() => {
-      db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
+    await db.transaction(async () => {
+      // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song (cùng
+      // qua được bước kiểm used_at ở trên vì phải chờ xác minh WebAuthn) thì chỉ một request
+      // đổi được used_at; request còn lại bị chặn và không được cấp phiếu uỷ quyền.
+      const consumed = await db
+        .prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL`)
+        .run(nowIso(), challengeRow.id);
+      if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã dùng');
+      await db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
         counterCheck.stored,
         nowIso(),
         credential.id
       );
-      db.prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ?`).run(nowIso(), challengeRow.id);
-      issued = issueGrant({
+      issued = await issueGrant({
         userId: req.user.id,
         sessionId: req.user.sessionId,
         transactionId: txn.id,
@@ -644,7 +650,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
         contextHash,
       });
     })();
-    reportCounterAnomaly(req, credential, counterCheck);
+    await reportCounterAnomaly(req, credential, counterCheck);
 
     res.json({ reauthGrant: issued.rawToken, expiresAt: issued.expiresAt, signedContext: currentContext });
   } catch (e) {
@@ -654,12 +660,12 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
 
 // ---------- UC09: Người mua xác nhận đã nhận hàng và giải ngân ----------
 
-router.post('/:id/release', requireAuth, (req, res, next) => {
+router.post('/:id/release', requireAuth, async (req, res, next) => {
   try {
     const { requestId, reauthGrant } = req.body || {};
     if (!requestId || !reauthGrant) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId hoặc reauthGrant');
 
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
 
     const fingerprint = fingerprintRequest({
@@ -669,8 +675,8 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
       amount: txn.amount,
     });
     const escrowLegKey = `release:${requestId}:escrow`;
-    if (checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json(serializeTxn(loadTxnOr404(txn.id)));
+    if (await checkIdempotency(escrowLegKey, fingerprint)) {
+      return res.json(serializeTxn(await loadTxnOr404(txn.id)));
     }
 
     if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
@@ -678,7 +684,7 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
     }
 
     // Phiếu phải đúng user, đúng giao dịch, đúng hành động, còn hạn và chưa dùng.
-    const grant = requireGrant({
+    const grant = await requireGrant({
       userId: req.user.id,
       sessionId: req.user.sessionId,
       transactionId: txn.id,
@@ -691,7 +697,7 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
     // "người này đã uỷ quyền MỘT nội dung nào đó". Ở đây kiểm nội dung ấy có đúng là nội
     // dung đang sắp thực thi không — chặn kịch bản giao dịch bị sửa số tiền trong khoảng
     // thời gian giữa lúc ký và lúc lệnh giải ngân thực sự chạy.
-    const currentContextHash = contextDigest(buildAuthorizationContext(txn)).toString('hex');
+    const currentContextHash = contextDigest(await buildAuthorizationContext(txn)).toString('hex');
     if (grant.context_hash && grant.context_hash !== currentContextHash) {
       throw new AppError(
         409,
@@ -701,16 +707,16 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
     }
 
     // Một dòng tiền duy nhất: toàn bộ số tiền đang bị khóa chuyển sang ví người bán.
-    const escrowWallet = getEscrowWallet();
-    const sellerWallet = getUserWallet(txn.seller_id);
+    const escrowWallet = await getEscrowWallet();
+    const sellerWallet = await getUserWallet(txn.seller_id);
 
-    db.transaction(() => {
-      const updated = applyOrderedWalletUpdates([
+    await db.transaction(async () => {
+      const updated = await applyOrderedWalletUpdates([
         { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
         { wallet: sellerWallet, availableDelta: txn.amount, lockedDelta: 0 },
       ], 'release');
 
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: escrowWallet.id,
         transactionId: txn.id,
         requestId,
@@ -722,7 +728,7 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
         requestFingerprint: fingerprint,
         description: 'Escrow giải ngân cho người bán',
       });
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: sellerWallet.id,
         transactionId: txn.id,
         requestId,
@@ -735,10 +741,10 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
         description: 'Nhận tiền bán hàng',
       });
 
-      applyTransactionStatus(txn, { status: 'COMPLETED', escrowStatus: 'RELEASED' });
-      markGrantUsed(grant.id);
+      await applyTransactionStatus(txn, { status: 'COMPLETED', escrowStatus: 'RELEASED' });
+      await markGrantUsed(grant.id);
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'ESCROW_RELEASED',
@@ -747,9 +753,9 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
         eventData: { amount: txn.amount, payoutToSeller: txn.amount, requestId },
       });
     })();
-    onOrderCompleted(txn);
+    await onOrderCompleted(txn);
 
-    res.json(serializeTxn(loadTxnOr404(txn.id)));
+    res.json(serializeTxn(await loadTxnOr404(txn.id)));
   } catch (e) {
     next(e);
   }
@@ -760,12 +766,12 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
 // tả. Người bán mở khi người mua đòi hoàn tiền không có căn cứ hoặc phủ nhận đã nhận
 // hàng. Nội dung phán quyết thuộc chính sách nghiệp vụ, không phải trọng tâm ở đây.
 
-router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensitiveLimiter, (req, res, next) => {
+router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensitiveLimiter, async (req, res, next) => {
   try {
     const { reason } = req.body || {};
     if (!reason || !String(reason).trim()) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu lý do tranh chấp');
 
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER', 'SELLER']);
     if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Chỉ mở tranh chấp khi WAIT_CONFIRM + LOCKED');
@@ -775,15 +781,15 @@ router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensiti
     const openedBy = txn.buyer_id === req.user.id ? 'BUYER' : 'SELLER';
     const trimmed = String(reason).trim().slice(0, 1000);
 
-    db.transaction(() => {
-      db.prepare(
+    await db.transaction(async () => {
+      await db.prepare(
         `INSERT INTO disputes (id, transaction_id, created_by, reason, status, created_at)
          VALUES (?, ?, ?, ?, 'OPEN', ?)`
       ).run(disputeId, txn.id, req.user.id, trimmed, nowIso());
 
-      applyTransactionStatus(txn, { status: 'DISPUTED', escrowStatus: 'FROZEN' });
+      await applyTransactionStatus(txn, { status: 'DISPUTED', escrowStatus: 'FROZEN' });
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'DISPUTE_OPENED',
@@ -792,11 +798,11 @@ router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensiti
         eventData: { reason: trimmed, openedBy },
       });
     })();
-    onDisputeOpened(txn, req.user.id);
+    await onDisputeOpened(txn, req.user.id);
 
     res.status(201).json({
       dispute: { id: disputeId, status: 'OPEN', openedBy },
-      transaction: serializeTxn(loadTxnOr404(txn.id)),
+      transaction: serializeTxn(await loadTxnOr404(txn.id)),
     });
   } catch (e) {
     next(e);
@@ -807,11 +813,11 @@ router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensiti
 // /api/admin/... vẫn giữ nguyên cho Admin; hai route dưới đây cho phép người mua và
 // người bán tự kiểm chứng nhật ký giao dịch của mình mà không cần quyền Admin.
 
-router.get('/:id/logs', requireAuth, (req, res, next) => {
+router.get('/:id/logs', requireAuth, async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER', 'SELLER', 'ADMIN']);
-    const logs = db.prepare('SELECT * FROM audit_logs WHERE transaction_id = ? ORDER BY id ASC').all(txn.id);
+    const logs = await db.prepare('SELECT * FROM audit_logs WHERE transaction_id = ? ORDER BY id ASC').all(txn.id);
     res.json({
       logs: logs.map((l) => ({
         id: l.id,
@@ -830,11 +836,11 @@ router.get('/:id/logs', requireAuth, (req, res, next) => {
   }
 });
 
-router.get('/:id/logs/verify', requireAuth, (req, res, next) => {
+router.get('/:id/logs/verify', requireAuth, async (req, res, next) => {
   try {
-    const txn = loadTxnOr404(req.params.id);
+    const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER', 'SELLER', 'ADMIN']);
-    res.json(verifyChain(db, txn.id));
+    res.json(await verifyChain(db, txn.id));
   } catch (e) {
     next(e);
   }

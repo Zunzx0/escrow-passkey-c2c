@@ -38,9 +38,9 @@ class BootstrapError extends Error {
 /**
  * Tạo một tài khoản quản trị viên ở trạng thái chờ thiết lập.
  *
- * @returns {{ user: object, temporaryPassword: string, created: boolean }}
+ * @returns {Promise<{ user: object, temporaryPassword: string, created: boolean }>}
  */
-function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPassword } = {}) {
+async function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPassword } = {}) {
   const username = String(usernameRaw || '').trim().toLowerCase();
   if (!username) throw new BootstrapError('MISSING_USERNAME', 'Thiếu tên đăng nhập.');
   if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
@@ -50,7 +50,7 @@ function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPas
     );
   }
 
-  const existing = db.prepare('SELECT id, username, role, account_status FROM users WHERE username = ?').get(username);
+  const existing = await db.prepare('SELECT id, username, role, account_status FROM users WHERE username = ?').get(username);
   if (existing) {
     throw new BootstrapError(
       'USERNAME_TAKEN',
@@ -68,12 +68,12 @@ function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPas
 
   // Quản trị viên không phải một bên của giao dịch nên KHÔNG có ví. Ví chỉ được mở ở bước
   // hoàn tất đăng ký Passkey, và bước đó bỏ qua việc mở ví với tài khoản role=ADMIN.
-  db.prepare(
+  await db.prepare(
     `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
      VALUES (?, ?, ?, 'ADMIN', ?, 'PENDING_BOOTSTRAP', 0, ?, ?)`
   ).run(id, username, name, hashPassword(tempPassword), now, now);
 
-  const user = db
+  const user = await db
     .prepare('SELECT id, username, display_name, role, account_status FROM users WHERE id = ?')
     .get(id);
 

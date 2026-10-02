@@ -18,14 +18,15 @@ const RESERVING_PLACEHOLDERS = RESERVING_STATUSES.map(() => '?').join(',');
 
 // is_sold: tin đăng đã có một đơn giữ chỗ hoặc đã bán hẳn. Mỗi tin là một sản phẩm đơn
 // chiếc nên chỉ cần tồn tại một đơn như vậy là tin đăng ngừng nhận đơn mới.
+// EXISTS bọc trong CASE để cả SQLite lẫn PostgreSQL đều trả về 0/1 (PostgreSQL trả boolean).
 const SELECT_LISTING = `
   SELECT l.*,
          u.display_name AS seller_name,
          u.username     AS seller_username,
-         EXISTS(
+         CASE WHEN EXISTS(
            SELECT 1 FROM transactions t
            WHERE t.listing_id = l.id AND t.status IN (${RESERVING_PLACEHOLDERS})
-         ) AS is_sold,
+         ) THEN 1 ELSE 0 END AS is_sold,
          (
            SELECT t2.status FROM transactions t2
            WHERE t2.listing_id = l.id AND t2.status IN (${RESERVING_PLACEHOLDERS})
@@ -58,9 +59,9 @@ function serializeListing(row) {
   };
 }
 
-function loadListingOr404(id) {
+async function loadListingOr404(id) {
   // Hai bộ tham số: một cho EXISTS(is_sold), một cho subquery sold_status.
-  const row = db
+  const row = await db
     .prepare(`${SELECT_LISTING} WHERE l.id = ?`)
     .get(...RESERVING_STATUSES, ...RESERVING_STATUSES, id);
   if (!row) throw new AppError(404, 'LISTING_NOT_FOUND', 'Không tìm thấy sản phẩm này');
@@ -135,7 +136,7 @@ router.get('/meta', (req, res) => {
 
 // ---------- Danh sách (công khai) ----------
 
-router.get('/', optionalAuth, (req, res, next) => {
+router.get('/', optionalAuth, async (req, res, next) => {
   try {
     const { q, category, condition, location, maxPrice, sellerId, sort } = req.query;
     const mine = req.query.mine === 'true' || req.query.mine === '1';
@@ -158,7 +159,8 @@ router.get('/', optionalAuth, (req, res, next) => {
     }
 
     if (q) {
-      where.push('(l.title LIKE ? OR l.description LIKE ?)');
+      // LOWER hai vế: LIKE của SQLite không phân biệt hoa thường, của PostgreSQL thì có.
+      where.push('(LOWER(l.title) LIKE LOWER(?) OR LOWER(l.description) LIKE LOWER(?))');
       const like = `%${String(q).trim()}%`;
       params.push(like, like);
     }
@@ -189,7 +191,7 @@ router.get('/', optionalAuth, (req, res, next) => {
 
     // Hàng đã bán chìm xuống cuối để trang chủ luôn ưu tiên thứ còn mua được.
     const sql = `${SELECT_LISTING} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY is_sold ASC, ${orderBy} LIMIT 200`;
-    const rows = db.prepare(sql).all(...params);
+    const rows = await db.prepare(sql).all(...params);
     res.json({ listings: rows.map(serializeListing) });
   } catch (e) {
     next(e);
@@ -218,22 +220,24 @@ const DEMO_ITEMS = [
     description: 'Khung nhôm size M, phanh đĩa cơ, 24 tốc độ. Mới bảo dưỡng, thay xích và má phanh.' },
 ];
 
-router.post('/demo-seed', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.post('/demo-seed', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const existing = db.prepare('SELECT COUNT(*) AS n FROM listings WHERE seller_id = ?').get(req.user.id);
-    if (existing.n > 0) {
-      throw new AppError(409, 'ALREADY_HAS_LISTINGS', 'Bạn đã có tin đăng — nút này chỉ dùng khi chưa đăng bán gì');
-    }
-
     const now = nowIso();
     const insert = db.prepare(
       `INSERT INTO listings (id, seller_id, title, description, category, location, condition,
         price, visibility, version, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'PUBLIC', 0, ?, ?)`
     );
-    db.transaction(() => {
+    // Phép đếm nằm CÙNG giao dịch với lệnh chèn: hai lần bấm đồng thời không cùng thấy "chưa có
+    // tin đăng" rồi cùng chèn bộ dữ liệu mẫu.
+    await db.transaction(async () => {
+      const existing = await db.prepare('SELECT COUNT(*) AS n FROM listings WHERE seller_id = ?').get(req.user.id);
+      if (existing.n > 0) {
+        throw new AppError(409, 'ALREADY_HAS_LISTINGS', 'Bạn đã có tin đăng — nút này chỉ dùng khi chưa đăng bán gì');
+      }
+
       for (const item of DEMO_ITEMS) {
-        insert.run(uuid(), req.user.id, item.title, item.description, item.category, item.location,
+        await insert.run(uuid(), req.user.id, item.title, item.description, item.category, item.location,
           item.condition, item.price, now, now);
       }
     })();
@@ -246,9 +250,9 @@ router.post('/demo-seed', requireAuth, requireRole('SELLER'), (req, res, next) =
 
 // ---------- Chi tiết ----------
 
-router.get('/:id', optionalAuth, (req, res, next) => {
+router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
-    const row = loadListingOr404(req.params.id);
+    const row = await loadListingOr404(req.params.id);
     if (row.visibility === 'HIDDEN' && (!req.user || req.user.id !== row.seller_id)) {
       throw new AppError(404, 'LISTING_NOT_FOUND', 'Không tìm thấy sản phẩm này');
     }
@@ -260,13 +264,13 @@ router.get('/:id', optionalAuth, (req, res, next) => {
 
 // ---------- Đăng bán sản phẩm mới ----------
 
-router.post('/', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.post('/', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
     const input = readListingInput(req.body || {});
 
     const id = uuid();
     const now = nowIso();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO listings (id, seller_id, title, description, category, location, condition, image,
         price, visibility, version, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
@@ -285,7 +289,7 @@ router.post('/', requireAuth, requireRole('SELLER'), (req, res, next) => {
       now
     );
 
-    res.status(201).json(serializeListing(loadListingOr404(id)));
+    res.status(201).json(serializeListing(await loadListingOr404(id)));
   } catch (e) {
     next(e);
   }
@@ -304,9 +308,9 @@ const FIELD_TO_COLUMN = {
   visibility: 'visibility',
 };
 
-router.patch('/:id', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.patch('/:id', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const current = loadListingOr404(req.params.id);
+    const current = await loadListingOr404(req.params.id);
     if (current.seller_id !== req.user.id) {
       throw new AppError(403, 'FORBIDDEN', 'Bạn không phải người đăng bán sản phẩm này');
     }
@@ -322,7 +326,7 @@ router.patch('/:id', requireAuth, requireRole('SELLER'), (req, res, next) => {
 
     const assignments = keys.map((k) => `${FIELD_TO_COLUMN[k]} = ?`);
     const values = keys.map((k) => input[k]);
-    const result = db
+    const result = await db
       .prepare(
         `UPDATE listings SET ${assignments.join(', ')}, version = version + 1, updated_at = ?
          WHERE id = ? AND version = ?`
@@ -332,7 +336,7 @@ router.patch('/:id', requireAuth, requireRole('SELLER'), (req, res, next) => {
       throw new AppError(409, 'LISTING_VERSION_CONFLICT', 'Tin đăng vừa được cập nhật ở nơi khác, hãy tải lại');
     }
 
-    res.json(serializeListing(loadListingOr404(current.id)));
+    res.json(serializeListing(await loadListingOr404(current.id)));
   } catch (e) {
     next(e);
   }
@@ -340,27 +344,32 @@ router.patch('/:id', requireAuth, requireRole('SELLER'), (req, res, next) => {
 
 // ---------- Gỡ tin đăng ----------
 
-router.delete('/:id', requireAuth, requireRole('SELLER'), (req, res, next) => {
+router.delete('/:id', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const current = loadListingOr404(req.params.id);
-    if (current.seller_id !== req.user.id) {
-      throw new AppError(403, 'FORBIDDEN', 'Bạn không phải người đăng bán sản phẩm này');
-    }
-    if (current.is_sold) {
-      throw new AppError(409, 'LISTING_SOLD', 'Không thể gỡ khi sản phẩm đang có đơn mua hiệu lực');
-    }
+    // Kiểm "chưa có đơn" và xoá trong CÙNG một giao dịch: một đơn mua chen vào giữa lúc kiểm và
+    // lúc xoá sẽ không làm mất tham chiếu tới tin đăng.
+    const outcome = await db.transaction(async () => {
+      const current = await loadListingOr404(req.params.id);
+      if (current.seller_id !== req.user.id) {
+        throw new AppError(403, 'FORBIDDEN', 'Bạn không phải người đăng bán sản phẩm này');
+      }
+      if (current.is_sold) {
+        throw new AppError(409, 'LISTING_SOLD', 'Không thể gỡ khi sản phẩm đang có đơn mua hiệu lực');
+      }
 
-    const usedByOrder = db.prepare('SELECT 1 FROM transactions WHERE listing_id = ? LIMIT 1').get(current.id);
-    if (usedByOrder) {
-      // Đã từng phát sinh đơn -> giữ lại bản ghi để lịch sử đơn không mất tham chiếu,
-      // chỉ ẩn khỏi storefront.
-      db.prepare(`UPDATE listings SET visibility = 'HIDDEN', version = version + 1, updated_at = ? WHERE id = ?`)
-        .run(nowIso(), current.id);
-      return res.json({ deleted: false, hidden: true });
-    }
+      const usedByOrder = await db.prepare('SELECT 1 FROM transactions WHERE listing_id = ? LIMIT 1').get(current.id);
+      if (usedByOrder) {
+        // Đã từng phát sinh đơn -> giữ lại bản ghi để lịch sử đơn không mất tham chiếu,
+        // chỉ ẩn khỏi storefront.
+        await db.prepare(`UPDATE listings SET visibility = 'HIDDEN', version = version + 1, updated_at = ? WHERE id = ?`)
+          .run(nowIso(), current.id);
+        return { deleted: false, hidden: true };
+      }
 
-    db.prepare('DELETE FROM listings WHERE id = ?').run(current.id);
-    res.json({ deleted: true, hidden: false });
+      await db.prepare('DELETE FROM listings WHERE id = ?').run(current.id);
+      return { deleted: true, hidden: false };
+    })();
+    res.json(outcome);
   } catch (e) {
     next(e);
   }

@@ -58,16 +58,16 @@ async function api(p, opts = {}, retried = false) {
 const iso = (msFromNow) => new Date(Date.now() + msFromNow).toISOString();
 const MIN = 60 * 1000;
 
-function insertChallenge({ expiresAt, usedAt = null }) {
+async function insertChallenge({ expiresAt, usedAt = null }) {
   const id = crypto.randomUUID();
-  db.prepare(
+  await db.prepare(
     `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at, used_at)
      VALUES (?, NULL, NULL, ?, 'AUTHENTICATION', '{}', ?, ?)`
   ).run(id, crypto.randomBytes(32).toString('base64url'), expiresAt, usedAt);
   return id;
 }
-const exists = (id) => !!db.prepare('SELECT 1 FROM auth_challenges WHERE id = ?').get(id);
-const count = (table) => db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n;
+const exists = async (id) => !!(await db.prepare('SELECT 1 FROM auth_challenges WHERE id = ?').get(id));
+const count = async (table) => (await db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get()).n;
 
 async function main() {
   console.log(`\n=== E2E DỌN CHALLENGE: ${BASE} ===`);
@@ -81,24 +81,24 @@ async function main() {
   const replayBody = { authenticationSessionId: replayOpt.data.authenticationSessionId, response: replayAssertion };
   const firstUse = await api('/api/passkeys/login/verify', { method: 'POST', body: replayBody });
   if (firstUse.status !== 200) throw new Error(`Không chuẩn bị được challenge đã dùng: ${JSON.stringify(firstUse.data)}`);
-  db.prepare('UPDATE auth_challenges SET used_at = ?, expires_at = ? WHERE id = ?')
+  await db.prepare('UPDATE auth_challenges SET used_at = ?, expires_at = ? WHERE id = ?')
     .run(iso(-120 * MIN), iso(-115 * MIN), replayOpt.data.authenticationSessionId);
 
-  const A = insertChallenge({ expiresAt: iso(-120 * MIN) });
-  const B = insertChallenge({ expiresAt: iso(-1 * MIN) });
-  const C = insertChallenge({ expiresAt: iso(5 * MIN) });
+  const A = await insertChallenge({ expiresAt: iso(-120 * MIN) });
+  const B = await insertChallenge({ expiresAt: iso(-1 * MIN) });
+  const C = await insertChallenge({ expiresAt: iso(5 * MIN) });
   const D = replayOpt.data.authenticationSessionId;
-  const E = insertChallenge({ expiresAt: iso(4 * MIN), usedAt: iso(-1 * MIN) });
+  const E = await insertChallenge({ expiresAt: iso(4 * MIN), usedAt: iso(-1 * MIN) });
   // G: đã dùng từ lâu nhưng expires_at vẫn ở tương lai (cấu hình TTL dài hơn ân hạn) — chỉ quy
   // tắc "đã dùng và cũ" bắt được, quy tắc "hết hạn" thì không.
-  const G = insertChallenge({ expiresAt: iso(10 * MIN), usedAt: iso(-120 * MIN) });
+  const G = await insertChallenge({ expiresAt: iso(10 * MIN), usedAt: iso(-120 * MIN) });
 
   // F: phát hành qua API thật ngay trước khi dọn, hoàn tất đăng nhập SAU khi dọn.
   const fOpt = await api('/api/passkeys/login/options', { method: 'POST' });
   const F = fOpt.data.authenticationSessionId;
 
-  const grantsBefore = count('reauth_grants');
-  const eventsBefore = count('security_events');
+  const grantsBefore = await count('reauth_grants');
+  const eventsBefore = await count('security_events');
 
   section('D01: Chạy script dọn như một process riêng');
   const run = spawnSync(process.execPath, ['scripts/cleanup-challenges.js', `--grace=${GRACE}`], {
@@ -110,13 +110,13 @@ async function main() {
   assert(summary && summary.deletedExpired >= 1 && summary.deletedUsed >= 1, `Cả hai quy tắc dọn đều chạy (${JSON.stringify(summary)})`);
 
   section('D02: Đúng loại bị dọn, đúng loại được giữ');
-  assert(!exists(A), 'A — hết hạn từ lâu: ĐÃ DỌN');
-  assert(exists(B), 'B — vừa hết hạn, còn trong ân hạn: GIỮ');
-  assert(exists(C), 'C — còn hiệu lực, chưa dùng: GIỮ');
-  assert(!exists(D), 'D — đã dùng từ lâu: ĐÃ DỌN');
-  assert(exists(E), 'E — vừa dùng, còn trong ân hạn: GIỮ');
-  assert(exists(F), 'F — vừa phát hành: GIỮ');
-  assert(!exists(G), 'G — đã dùng từ lâu dù chưa tới expires_at: ĐÃ DỌN (quy tắc "đã dùng và cũ")');
+  assert(!(await exists(A)), 'A — hết hạn từ lâu: ĐÃ DỌN');
+  assert((await exists(B)), 'B — vừa hết hạn, còn trong ân hạn: GIỮ');
+  assert((await exists(C)), 'C — còn hiệu lực, chưa dùng: GIỮ');
+  assert(!(await exists(D)), 'D — đã dùng từ lâu: ĐÃ DỌN');
+  assert((await exists(E)), 'E — vừa dùng, còn trong ân hạn: GIỮ');
+  assert((await exists(F)), 'F — vừa phát hành: GIỮ');
+  assert(!(await exists(G)), 'G — đã dùng từ lâu dù chưa tới expires_at: ĐÃ DỌN (quy tắc "đã dùng và cũ")');
 
   section('D03: Challenge vừa phát hành vẫn hoàn tất được sau khi dọn');
   {
@@ -132,8 +132,8 @@ async function main() {
     const replay = await api('/api/passkeys/login/verify', { method: 'POST', body: replayBody });
     assert(replay.status >= 400 && !replay.data.token,
       `Phát lại challenge đã dùng (đã bị dọn) vẫn bị từ chối (nhận ${replay.status} ${replay.data.error})`);
-    assert(count('reauth_grants') === grantsBefore, 'reauth_grants KHÔNG bị đụng tới (căn cứ của bất biến phiếu dùng một lần)');
-    assert(count('security_events') >= eventsBefore, 'security_events KHÔNG bị xoá');
+    assert((await count('reauth_grants')) === grantsBefore, 'reauth_grants KHÔNG bị đụng tới (căn cứ của bất biến phiếu dùng một lần)');
+    assert((await count('security_events')) >= eventsBefore, 'security_events KHÔNG bị xoá');
   }
 
   console.log(failures === 0 ? '\n=== KẾT QUẢ: TẤT CẢ PASS ✅ ===\n' : `\n=== KẾT QUẢ: ${failures} KIỂM THỬ THẤT BẠI ❌ ===\n`);

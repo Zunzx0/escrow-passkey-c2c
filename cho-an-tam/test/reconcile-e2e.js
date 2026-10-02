@@ -89,14 +89,14 @@ function runWorker(paymentRequestId, { env = {}, onQuery = null } = {}) {
 function prRow(id) {
   return db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id);
 }
-function balanceOf(userId) {
-  return db.prepare('SELECT available_balance FROM wallets WHERE user_id = ?').get(userId).available_balance;
+async function balanceOf(userId) {
+  return (await db.prepare('SELECT available_balance FROM wallets WHERE user_id = ?').get(userId)).available_balance;
 }
-function entryCount(id) {
-  return db.prepare('SELECT COUNT(*) AS n FROM wallet_entries WHERE request_id = ?').get(id).n;
+async function entryCount(id) {
+  return (await db.prepare('SELECT COUNT(*) AS n FROM wallet_entries WHERE request_id = ?').get(id)).n;
 }
-function assertInvariants(label) {
-  const r = checkInvariants(db);
+async function assertInvariants(label) {
+  const r = await checkInvariants(db);
   assert(r.ok, `Mọi bất biến vẫn đúng sau ${label}${r.ok ? '' : ': ' + JSON.stringify(r.violations)}`);
 }
 
@@ -126,9 +126,9 @@ async function main() {
   section('R01: Webhook thắng trước worker — webhook chen vào lúc worker đang chờ provider');
   {
     const AMOUNT = 100000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    const callback = provider.settlePayment(topup.providerRef, 'SUCCEEDED');
+    const callback = await provider.settlePayment(topup.providerRef, 'SUCCEEDED');
 
     let webhookPromise = null;
     const worker = await runWorker(topup.id, {
@@ -139,21 +139,21 @@ async function main() {
 
     assert(webhook && webhook.status === 200 && webhook.data.duplicate !== true, 'Webhook tới trong lúc worker chờ provider và tất toán trước');
     assert(worker.code === 0 && worker.outcome === 'DUPLICATE', `Worker tới sau nhận DUPLICATE, không tất toán lần hai (nhận ${worker.outcome})`);
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.resolved_by === 'WEBHOOK', `Tất toán bởi WEBHOOK (thực tế ${pr.resolved_by})`);
     assert(pr.version === 1, `version tăng đúng 1 lần (thực tế ${pr.version})`);
-    assert(balanceOf(userId) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
-    assert(entryCount(topup.id) === 1, 'Đúng 1 wallet_entry');
-    assertInvariants('R01');
+    assert((await balanceOf(userId)) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
+    assert((await entryCount(topup.id)) === 1, 'Đúng 1 wallet_entry');
+    await assertInvariants('R01');
   }
 
   // ---------------------------------------------------------------------- R02
   section('R02: Worker thắng trước webhook — webhook tới sau trở thành bản lặp');
   {
     const AMOUNT = 110000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    const callback = provider.settlePayment(topup.providerRef, 'SUCCEEDED'); // webhook "đang trên đường"
+    const callback = await provider.settlePayment(topup.providerRef, 'SUCCEEDED'); // webhook "đang trên đường"
 
     const worker = await runWorker(topup.id);
     assert(worker.code === 0 && worker.outcome === 'APPLIED', `Worker phát hiện kết quả và tất toán (nhận ${worker.outcome})`);
@@ -161,21 +161,21 @@ async function main() {
     const webhook = await postWebhook(callback);
     assert(webhook.status === 200 && webhook.data.duplicate === true, 'Webhook tới sau được nhận diện là bản lặp, trả 200');
 
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.resolved_by === 'RECONCILER', `Tất toán bởi RECONCILER (thực tế ${pr.resolved_by})`);
     assert(pr.version === 1, `version tăng đúng 1 lần (thực tế ${pr.version})`);
-    assert(balanceOf(userId) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
-    assert(entryCount(topup.id) === 1, 'Đúng 1 wallet_entry');
-    assertInvariants('R02');
+    assert((await balanceOf(userId)) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
+    assert((await entryCount(topup.id)) === 1, 'Đúng 1 wallet_entry');
+    await assertInvariants('R02');
   }
 
   // ---------------------------------------------------------------------- R03
   section('R03: Hai worker cùng đối soát một yêu cầu, chạy song song ở hai process');
   {
     const AMOUNT = 120000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'SUCCEEDED'); // webhook thất lạc
+    await provider.settlePayment(topup.providerRef, 'SUCCEEDED'); // webhook thất lạc
 
     const env = { MOCK_PROVIDER_LATENCY_MS: '1500' };
     const [a, b] = await Promise.all([runWorker(topup.id, { env }), runWorker(topup.id, { env })]);
@@ -184,20 +184,20 @@ async function main() {
     assert(a.code === 0 && b.code === 0, 'Cả hai process worker kết thúc bình thường');
     assert(appliedCount === 1, `Đúng MỘT worker tất toán (kết quả: ${outcomes.join(' / ')})`);
     assert(outcomes.includes('DUPLICATE'), 'Worker còn lại đã thật sự đua (đọc thấy PENDING) và nhận DUPLICATE');
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.version === 1, `SUCCEEDED, version = 1 (thực tế ${pr.version})`);
-    assert(balanceOf(userId) - before === AMOUNT, 'Ví cộng đúng MỘT lần dù hai worker cùng chạy');
-    assert(entryCount(topup.id) === 1, 'Đúng 1 wallet_entry');
-    assertInvariants('R03');
+    assert((await balanceOf(userId)) - before === AMOUNT, 'Ví cộng đúng MỘT lần dù hai worker cùng chạy');
+    assert((await entryCount(topup.id)) === 1, 'Đúng 1 wallet_entry');
+    await assertInvariants('R03');
   }
 
   // ---------------------------------------------------------------------- R04
   section('R04: Worker chạy lại nhiều lần và áp lại cùng một kết quả của provider');
   {
     const AMOUNT = 130000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'SUCCEEDED');
+    await provider.settlePayment(topup.providerRef, 'SUCCEEDED');
 
     const first = await runWorker(topup.id);
     const second = await runWorker(topup.id);
@@ -208,92 +208,95 @@ async function main() {
 
     // Áp lại đúng kết quả đó qua chính service dùng chung — mô phỏng một worker thử lại sau khi
     // mất kết nối đúng lúc vừa ghi xong.
-    const retries = [1, 2].map(() => applyProviderResult({
-      paymentRequestId: topup.id, providerRef: topup.providerRef, status: 'SUCCEEDED', amount: AMOUNT, source: 'RECONCILER',
-    }));
+    const retries = [];
+    for (let i = 0; i < 2; i++) {
+      retries.push(await applyProviderResult({
+        paymentRequestId: topup.id, providerRef: topup.providerRef, status: 'SUCCEEDED', amount: AMOUNT, source: 'RECONCILER',
+      }));
+    }
     assert(retries.every((r) => r.outcome === 'DUPLICATE'), 'Áp lại cùng kết quả hai lần đều nhận DUPLICATE');
 
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.version === 1 && pr.reconcile_attempts === 1, `version = 1, chỉ 1 lần hỏi provider (thực tế v${pr.version}, ${pr.reconcile_attempts} lần)`);
-    assert(balanceOf(userId) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
-    assert(entryCount(topup.id) === 1, 'Đúng 1 wallet_entry');
-    assertInvariants('R04');
+    assert((await balanceOf(userId)) - before === AMOUNT, 'Ví cộng đúng MỘT lần');
+    assert((await entryCount(topup.id)) === 1, 'Đúng 1 wallet_entry');
+    await assertInvariants('R04');
   }
 
   // ---------------------------------------------------------------------- R05
   section('R05: Provider báo PENDING nhiều lần rồi mới thành công (delayed success)');
   {
     const AMOUNT = 140000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
 
     for (let i = 1; i <= 3; i++) {
       const w = await runWorker(topup.id);
       assert(w.outcome === 'STILL_PENDING', `Lượt ${i}: provider còn PENDING, yêu cầu giữ nguyên (nhận ${w.outcome})`);
     }
-    let pr = prRow(topup.id);
+    let pr = await prRow(topup.id);
     assert(pr.status === 'PENDING' && pr.version === 0, 'Sau 3 lượt: vẫn PENDING, version chưa đổi — không tự coi là thất bại');
     assert(pr.reconcile_attempts === 3, `Ghi nhận đủ 3 lần hỏi provider (thực tế ${pr.reconcile_attempts})`);
-    assert(balanceOf(userId) === before && entryCount(topup.id) === 0, 'Chưa có tiền nào được cộng');
+    assert((await balanceOf(userId)) === before && (await entryCount(topup.id)) === 0, 'Chưa có tiền nào được cộng');
 
-    provider.settlePayment(topup.providerRef, 'SUCCEEDED');
+    await provider.settlePayment(topup.providerRef, 'SUCCEEDED');
     const w = await runWorker(topup.id);
     assert(w.outcome === 'APPLIED', `Provider thành công muộn thì lượt kế tiếp tất toán (nhận ${w.outcome})`);
-    pr = prRow(topup.id);
+    pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.version === 1 && pr.reconcile_attempts === 4, 'SUCCEEDED, version = 1, tổng 4 lần hỏi');
-    assert(balanceOf(userId) - before === AMOUNT && entryCount(topup.id) === 1, 'Ví cộng đúng MỘT lần, 1 wallet_entry');
-    assertInvariants('R05');
+    assert((await balanceOf(userId)) - before === AMOUNT && (await entryCount(topup.id)) === 1, 'Ví cộng đúng MỘT lần, 1 wallet_entry');
+    await assertInvariants('R05');
   }
 
   // ---------------------------------------------------------------------- R06
   section('R06: Provider báo FAILED — không cộng tiền');
   {
     const AMOUNT = 150000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'FAILED');
+    await provider.settlePayment(topup.providerRef, 'FAILED');
 
     const w = await runWorker(topup.id);
     assert(w.outcome === 'APPLIED', `Worker tất toán kết quả FAILED (nhận ${w.outcome})`);
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.status === 'FAILED' && pr.resolved_by === 'RECONCILER' && pr.version === 1, 'FAILED, tất toán bởi RECONCILER, version = 1');
-    assert(balanceOf(userId) === before, 'Ví KHÔNG đổi');
-    assert(entryCount(topup.id) === 0, 'Không có wallet_entry nào');
-    assertInvariants('R06');
+    assert((await balanceOf(userId)) === before, 'Ví KHÔNG đổi');
+    assert((await entryCount(topup.id)) === 0, 'Không có wallet_entry nào');
+    await assertInvariants('R06');
   }
 
   // ---------------------------------------------------------------------- R07
   section('R07: API truy vấn của provider lỗi — giữ trạng thái an toàn, lần sau hỏi lại được');
   {
     const AMOUNT = 160000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'SUCCEEDED');
-    provider.setQueryMode(topup.providerRef, 'ERROR');
+    await provider.settlePayment(topup.providerRef, 'SUCCEEDED');
+    await provider.setQueryMode(topup.providerRef, 'ERROR');
 
     const failed = await runWorker(topup.id);
     assert(failed.code === 0 && failed.outcome === 'PROVIDER_ERROR', `Worker ghi nhận lỗi provider, không sập (nhận ${failed.outcome})`);
-    let pr = prRow(topup.id);
+    let pr = await prRow(topup.id);
     assert(pr.status === 'PENDING' && pr.version === 0, 'Yêu cầu vẫn PENDING — lỗi provider không bị coi là FAILED');
     assert(String(pr.last_reconcile_error || '').includes('PROVIDER_UNAVAILABLE'), 'Lỗi được ghi lại ở last_reconcile_error');
-    assert(balanceOf(userId) === before && entryCount(topup.id) === 0, 'Chưa có tiền nào được cộng');
+    assert((await balanceOf(userId)) === before && (await entryCount(topup.id)) === 0, 'Chưa có tiền nào được cộng');
 
-    provider.setQueryMode(topup.providerRef, 'NORMAL');
+    await provider.setQueryMode(topup.providerRef, 'NORMAL');
     const ok = await runWorker(topup.id);
     assert(ok.outcome === 'APPLIED', `Provider hoạt động lại thì lượt kế tiếp tất toán (nhận ${ok.outcome})`);
-    pr = prRow(topup.id);
+    pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.last_reconcile_error === null, 'SUCCEEDED và vết lỗi cũ đã được xoá');
-    assert(balanceOf(userId) - before === AMOUNT && entryCount(topup.id) === 1, 'Ví cộng đúng MỘT lần');
-    assertInvariants('R07');
+    assert((await balanceOf(userId)) - before === AMOUNT && (await entryCount(topup.id)) === 1, 'Ví cộng đúng MỘT lần');
+    await assertInvariants('R07');
   }
 
   // ---------------------------------------------------------------------- R08
   section('R08: Process worker chết ngang giữa giao dịch cộng tiền');
   {
     const AMOUNT = 170000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'SUCCEEDED');
+    await provider.settlePayment(topup.providerRef, 'SUCCEEDED');
 
     // Chết đúng lúc số dư đã được cộng TRONG giao dịch nhưng bút toán chưa ghi và chưa commit.
     const crashed = await runWorker(topup.id, {
@@ -301,27 +304,27 @@ async function main() {
     });
     assert(crashed.code === CRASH_EXIT_CODE, `Process worker chết giữa chừng (mã thoát ${crashed.code})`);
 
-    let pr = prRow(topup.id);
+    let pr = await prRow(topup.id);
     assert(pr.status === 'PENDING' && pr.version === 0 && pr.resolved_by === null, 'Yêu cầu vẫn PENDING, version chưa đổi — phần ghi dở không được commit');
-    assert(balanceOf(userId) === before, 'Số dư KHÔNG đổi dù process đã cộng tiền trong giao dịch trước khi chết');
-    assert(entryCount(topup.id) === 0, 'Không có wallet_entry mồ côi');
-    assertInvariants('R08 (ngay sau khi process chết)');
+    assert((await balanceOf(userId)) === before, 'Số dư KHÔNG đổi dù process đã cộng tiền trong giao dịch trước khi chết');
+    assert((await entryCount(topup.id)) === 0, 'Không có wallet_entry mồ côi');
+    await assertInvariants('R08 (ngay sau khi process chết)');
 
     const recovered = await runWorker(topup.id);
     assert(recovered.outcome === 'APPLIED', `Lượt đối soát kế tiếp tất toán bình thường (nhận ${recovered.outcome})`);
-    pr = prRow(topup.id);
+    pr = await prRow(topup.id);
     assert(pr.status === 'SUCCEEDED' && pr.version === 1, 'SUCCEEDED, version = 1');
-    assert(balanceOf(userId) - before === AMOUNT && entryCount(topup.id) === 1, 'Ví cộng đúng MỘT lần sau khi phục hồi');
-    assertInvariants('R08 (sau khi phục hồi)');
+    assert((await balanceOf(userId)) - before === AMOUNT && (await entryCount(topup.id)) === 1, 'Ví cộng đúng MỘT lần sau khi phục hồi');
+    await assertInvariants('R08 (sau khi phục hồi)');
   }
 
   // ---------------------------------------------------------------------- R09
   section('R09: Worker đã tất toán FAILED, webhook trái chiều tới sau không được ghi đè');
   {
     const AMOUNT = 180000;
-    const before = balanceOf(userId);
+    const before = await balanceOf(userId);
     const topup = await newTopup(AMOUNT);
-    provider.settlePayment(topup.providerRef, 'FAILED');
+    await provider.settlePayment(topup.providerRef, 'FAILED');
 
     const w = await runWorker(topup.id);
     assert(w.outcome === 'APPLIED', 'Worker tất toán FAILED');
@@ -330,10 +333,10 @@ async function main() {
     });
     const webhook = await postWebhook(contrary);
     assert(webhook.status === 409 && webhook.data.error === 'WEBHOOK_CONFLICT', `Webhook trái chiều bị từ chối (nhận ${webhook.status} ${webhook.data.error})`);
-    const pr = prRow(topup.id);
+    const pr = await prRow(topup.id);
     assert(pr.status === 'FAILED' && pr.version === 1, 'Vẫn FAILED, version = 1 — không bị lật');
-    assert(balanceOf(userId) === before && entryCount(topup.id) === 0, 'Ví KHÔNG đổi');
-    assertInvariants('R09');
+    assert((await balanceOf(userId)) === before && (await entryCount(topup.id)) === 0, 'Ví KHÔNG đổi');
+    await assertInvariants('R09');
   }
 
   console.log(failures === 0 ? '\n=== KẾT QUẢ: TẤT CẢ PASS ✅ ===\n' : `\n=== KẾT QUẢ: ${failures} KIỂM THỬ THẤT BẠI ❌ ===\n`);

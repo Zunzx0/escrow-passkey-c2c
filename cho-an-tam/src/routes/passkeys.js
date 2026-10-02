@@ -92,7 +92,7 @@ function publicUser(row) {
   };
 }
 
-function loadUserRow(id) {
+async function loadUserRow(id) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
 
@@ -100,11 +100,11 @@ function loadUserRow(id) {
  * Cấp access token. Không truyền sessionId thì mở phiên mới (đăng nhập, đăng ký); truyền thì
  * cấp token mới cho đúng phiên đang có (kích hoạt tài khoản, làm mới, đổi mật khẩu).
  */
-function issueSession(req, res, row, { sessionId } = {}) {
+async function issueSession(req, res, row, { sessionId } = {}) {
   const scope = scopeForStatus(row.account_status);
   const token = sessionId
     ? signAccessToken(row, scope, sessionId)
-    : startSession(req, res, row, scope).token;
+    : (await startSession(req, res, row, scope)).token;
   return { token, scope, user: publicUser(row) };
 }
 
@@ -118,7 +118,7 @@ function issueSession(req, res, row, { sessionId } = {}) {
 // công đều chỉ có năng lực mua. Năng lực bán được cấp về sau qua quy trình xin và duyệt;
 // quyền quản trị chỉ được khởi tạo bằng thủ tục vận hành `npm run seed:admin`.
 
-router.post('/register/account', authLimiter, (req, res, next) => {
+router.post('/register/account', authLimiter, async (req, res, next) => {
   try {
     const probeWait = usernameProbes.blockedFor(req);
     if (probeWait) {
@@ -148,19 +148,29 @@ router.post('/register/account', authLimiter, (req, res, next) => {
 
     assertPasswordPolicy(password);
 
-    if (db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername)) {
+    if (await db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername)) {
       usernameProbes.hit(req);
       throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
     }
 
     const userId = uuid();
     const now = nowIso();
-    db.prepare(
-      `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
-       VALUES (?, ?, ?, 'BUYER', ?, 'PENDING_PASSKEY', 0, ?, ?)`
-    ).run(userId, cleanUsername, cleanDisplayName, hashPassword(password), now, now);
+    try {
+      await db.prepare(
+        `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
+         VALUES (?, ?, ?, 'BUYER', ?, 'PENDING_PASSKEY', 0, ?, ?)`
+      ).run(userId, cleanUsername, cleanDisplayName, hashPassword(password), now, now);
+    } catch (e) {
+      // Hai request cùng tên đăng nhập chạy song song có thể cùng qua bước kiểm ở trên;
+      // ràng buộc UNIQUE(username) là chốt chặn thật, trả về đúng thông báo như bước kiểm.
+      if (db.isUniqueViolation(e)) {
+        usernameProbes.hit(req);
+        throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
+      }
+      throw e;
+    }
 
-    const session = issueSession(req, res, loadUserRow(userId));
+    const session = await issueSession(req, res, await loadUserRow(userId));
     res.status(201).json({
       ...session,
       nextStep: 'REGISTER_PASSKEY',
@@ -185,7 +195,7 @@ router.post(
   authLimiter,
   async (req, res, next) => {
     try {
-      const user = loadUserRow(req.user.id);
+      const user = await loadUserRow(req.user.id);
 
       const options = await generateRegistrationOptions({
         rpName: RP_NAME,
@@ -200,7 +210,7 @@ router.post(
       });
 
       const sessionId = uuid();
-      db.prepare(
+      await db.prepare(
         `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
          VALUES (?, ?, NULL, ?, 'REGISTRATION', ?, ?)`
       ).run(
@@ -230,7 +240,7 @@ router.post(
         throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu registrationSessionId hoặc response');
       }
 
-      const challengeRow = db
+      const challengeRow = await db
         .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REGISTRATION' AND user_id = ?`)
         .get(registrationSessionId, req.user.id);
       if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên đăng ký không hợp lệ');
@@ -257,19 +267,27 @@ router.post(
       }
 
       const { credential } = verification.registrationInfo;
-      if (db.prepare('SELECT id FROM passkey_credentials WHERE credential_id = ?').get(credential.id)) {
-        throw new AppError(409, 'CREDENTIAL_EXISTS', 'Passkey này đã được đăng ký rồi');
-      }
-
-      const user = loadUserRow(req.user.id);
+      const user = await loadUserRow(req.user.id);
       const { deviceName } = JSON.parse(challengeRow.context_data || '{}');
       const now = nowIso();
 
       // Ghi credential, mở ví và kích hoạt tài khoản trong CÙNG một giao dịch cơ sở dữ liệu.
       // Đây là chỗ bất biến "tài khoản ACTIVE luôn có ít nhất một Passkey" được tạo ra: không
       // có khoảnh khắc nào tài khoản đã ACTIVE mà chưa có credential.
-      db.transaction(() => {
-        db.prepare(
+      await db.transaction(async () => {
+        // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì
+        // chỉ một request đổi được used_at (bước kiểm used_at ở trên nằm trước một lần await).
+        const consumed = await db
+          .prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL`)
+          .run(now, challengeRow.id);
+        if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã được sử dụng');
+
+        // Kiểm trùng credential TRONG giao dịch để không request nào chen vào giữa kiểm và ghi.
+        if (await db.prepare('SELECT id FROM passkey_credentials WHERE credential_id = ?').get(credential.id)) {
+          throw new AppError(409, 'CREDENTIAL_EXISTS', 'Passkey này đã được đăng ký rồi');
+        }
+
+        await db.prepare(
           `INSERT INTO passkey_credentials
              (id, user_id, credential_id, public_key, counter, transports, device_name, created_at)
            VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -287,13 +305,13 @@ router.post(
         // Quản trị viên không phải một bên của giao dịch nên không giữ ví.
         if (user.role !== 'ADMIN') {
           const walletId = uuid();
-          db.prepare(
+          await db.prepare(
             `INSERT INTO wallets (id, user_id, wallet_type, available_balance, locked_balance, version, created_at, updated_at)
              VALUES (?, ?, 'USER', ?, 0, 0, ?, ?)`
           ).run(walletId, user.id, DEMO_BUYER_INITIAL_BALANCE, now, now);
 
           if (DEMO_BUYER_INITIAL_BALANCE > 0) {
-            db.prepare(
+            await db.prepare(
               `INSERT INTO wallet_entries
                 (id, wallet_id, transaction_id, request_id, entry_type, available_delta, locked_delta,
                  available_after, locked_after, idempotency_key, description, created_at)
@@ -311,15 +329,14 @@ router.post(
           }
         }
 
-        db.prepare(`UPDATE users SET account_status = 'ACTIVE', updated_at = ? WHERE id = ?`).run(now, user.id);
-        db.prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ?`).run(now, challengeRow.id);
+        await db.prepare(`UPDATE users SET account_status = 'ACTIVE', updated_at = ? WHERE id = ?`).run(now, user.id);
       })();
 
-      logSecurityEvent(req, {
+      await logSecurityEvent(req, {
         type: EVENTS.ACCOUNT_ACTIVATED, outcome: 'ALLOWED', statusCode: 201,
         detail: { accountStatus: 'ACTIVE' },
       });
-      res.status(201).json(issueSession(req, res, loadUserRow(user.id), { sessionId: req.user.sessionId }));
+      res.status(201).json(await issueSession(req, res, await loadUserRow(user.id), { sessionId: req.user.sessionId }));
     } catch (e) {
       next(e);
     }
@@ -335,7 +352,7 @@ router.post(
 // Đăng nhập thành công chỉ cấp một PHIÊN. Nó không cấp phiếu uỷ quyền, nên không đưa được
 // tiền ra khỏi ký quỹ, không thêm được credential và không đổi được chính mật khẩu đó.
 
-router.post('/login/password', authLimiter, (req, res, next) => {
+router.post('/login/password', authLimiter, async (req, res, next) => {
   try {
     const { username, password } = req.body || {};
     if (!username || !password) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu username hoặc password');
@@ -353,7 +370,7 @@ router.post('/login/password', authLimiter, (req, res, next) => {
       );
     }
 
-    const user = db.prepare('SELECT * FROM users WHERE username = ?').get(cleanUsername);
+    const user = await db.prepare('SELECT * FROM users WHERE username = ?').get(cleanUsername);
 
     const INVALID = new AppError(401, 'INVALID_CREDENTIALS', 'Tên đăng nhập hoặc mật khẩu không đúng');
 
@@ -369,7 +386,7 @@ router.post('/login/password', authLimiter, (req, res, next) => {
     if (!user.is_active) throw new AppError(401, 'USER_INACTIVE', 'Tài khoản không khả dụng');
 
     loginThrottle.recordSuccess(cleanUsername);
-    const session = issueSession(req, res, user);
+    const session = await issueSession(req, res, user);
     res.json({
       ...session,
       nextStep:
@@ -402,7 +419,7 @@ router.post('/login/options', authLimiter, async (req, res, next) => {
     });
 
     const sessionId = uuid();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, NULL, NULL, ?, 'AUTHENTICATION', '{}', ?)`
     ).run(sessionId, options.challenge, expiresAtIso());
@@ -420,7 +437,7 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu authenticationSessionId hoặc response');
     }
 
-    const challengeRow = db
+    const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'AUTHENTICATION'`)
       .get(authenticationSessionId);
     if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên đăng nhập không hợp lệ');
@@ -429,10 +446,10 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
       throw new AppError(400, 'CHALLENGE_EXPIRED', 'Challenge đã hết hạn');
     }
 
-    const credentialRow = db.prepare('SELECT * FROM passkey_credentials WHERE credential_id = ?').get(response.id);
+    const credentialRow = await db.prepare('SELECT * FROM passkey_credentials WHERE credential_id = ?').get(response.id);
     if (!credentialRow) throw new AppError(401, 'CREDENTIAL_NOT_FOUND', 'Không tìm thấy Passkey tương ứng');
 
-    const user = loadUserRow(credentialRow.user_id);
+    const user = await loadUserRow(credentialRow.user_id);
     if (!user || !user.is_active) throw new AppError(401, 'USER_INACTIVE', 'Tài khoản không khả dụng');
 
     let verification;
@@ -458,15 +475,20 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
 
     const counterCheck = assessCounter(credentialRow, verification.authenticationInfo.newCounter);
     const now = nowIso();
-    db.transaction(() => {
-      db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
+    await db.transaction(async () => {
+      // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì
+      // chỉ một request đổi được used_at (bước kiểm used_at ở trên nằm trước một lần await).
+      const consumed = await db
+        .prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL`)
+        .run(now, challengeRow.id);
+      if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã được sử dụng');
+      await db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
         counterCheck.stored,
         now,
         credentialRow.id
       );
-      db.prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ?`).run(now, challengeRow.id);
     })();
-    reportCounterAnomaly(req, credentialRow, counterCheck);
+    await reportCounterAnomaly(req, credentialRow, counterCheck);
 
     // Chủ tài khoản vừa chứng minh được quyền sở hữu Passkey: gỡ khoá đăng nhập bằng mật khẩu
     // nếu đang bị ai đó cố ý nhập sai để khoá.
@@ -474,7 +496,7 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
 
     // Hai lối đăng nhập cấp CÙNG một loại phiên. Phiên tạo bằng Passkey cũng không được coi
     // là đủ để giải ngân — quyền đó chỉ đến từ phiếu uỷ quyền của một lần xác thực lại.
-    res.json(issueSession(req, res, loadUserRow(user.id)));
+    res.json(await issueSession(req, res, await loadUserRow(user.id)));
   } catch (e) {
     next(e);
   }
@@ -486,43 +508,43 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
 // nên người dùng không bị đá ra mỗi 15 phút. Phiên đã đăng xuất, quá hạn hoặc nhàn rỗi quá lâu
 // thì không làm mới được. Cookie SameSite=Strict nên trang khác không gửi kèm được.
 
-router.post('/session/refresh', authLimiter, (req, res, next) => {
+router.post('/session/refresh', authLimiter, async (req, res, next) => {
   try {
-    const result = rotateRefreshToken(readRefreshCookie(req));
+    const result = await rotateRefreshToken(readRefreshCookie(req));
     if (result.problem) {
       clearRefreshCookie(req, res);
       throw new AppError(401, 'SESSION_EXPIRED', 'Phiên đăng nhập đã kết thúc, vui lòng đăng nhập lại');
     }
-    const user = loadUserRow(result.session.user_id);
+    const user = await loadUserRow(result.session.user_id);
     if (!user || !user.is_active) {
-      revokeSession(result.session.id, 'USER_INACTIVE');
+      await revokeSession(result.session.id, 'USER_INACTIVE');
       clearRefreshCookie(req, res);
       throw new AppError(401, 'SESSION_EXPIRED', 'Tài khoản không khả dụng');
     }
     setRefreshCookie(req, res, result.refreshToken);
-    res.json(issueSession(req, res, user, { sessionId: result.session.id }));
+    res.json(await issueSession(req, res, user, { sessionId: result.session.id }));
   } catch (e) {
     next(e);
   }
 });
 
 // Thu hồi phiên phía máy chủ: sau lệnh này, access token cũ lẫn mã làm mới đều vô hiệu ngay.
-router.post('/session/logout', (req, res) => {
+router.post('/session/logout', async (req, res) => {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) {
     try {
-      const user = loadUserFromToken(header.slice(7));
+      const user = await loadUserFromToken(header.slice(7));
       if (user) {
-        revokeSession(user.sessionId, 'LOGOUT');
+        await revokeSession(user.sessionId, 'LOGOUT');
         req.user = user;
       }
     } catch (_) {
       // token hết hạn: vẫn thu hồi được qua cookie bên dưới
     }
   }
-  revokeByRefreshToken(readRefreshCookie(req), 'LOGOUT');
+  await revokeByRefreshToken(readRefreshCookie(req), 'LOGOUT');
   clearRefreshCookie(req, res);
-  if (req.user) logSecurityEvent(req, { type: EVENTS.LOGOUT, outcome: 'ALLOWED', statusCode: 200 });
+  if (req.user) await logSecurityEvent(req, { type: EVENTS.LOGOUT, outcome: 'ALLOWED', statusCode: 200 });
   res.json({ ok: true });
 });
 
@@ -541,14 +563,14 @@ router.post(
   requireEnrollAuth,
   requireAccountStatus('PENDING_BOOTSTRAP'),
   authLimiter,
-  (req, res, next) => {
+  async (req, res, next) => {
     try {
       const { currentPassword, newPassword } = req.body || {};
       if (!currentPassword || !newPassword) {
         throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu currentPassword hoặc newPassword');
       }
 
-      const user = loadUserRow(req.user.id);
+      const user = await loadUserRow(req.user.id);
       if (!verifyPassword(currentPassword, user.password_hash)) {
         throw new AppError(401, 'INVALID_CREDENTIALS', 'Mật khẩu tạm không đúng');
       }
@@ -558,23 +580,23 @@ router.post(
       }
 
       const now = nowIso();
-      db.transaction(() => {
-        db.prepare(
+      await db.transaction(async () => {
+        await db.prepare(
           `UPDATE users
            SET password_hash = ?, account_status = 'PENDING_PASSKEY', token_version = token_version + 1, updated_at = ?
            WHERE id = ?`
         ).run(hashPassword(newPassword), now, user.id);
-        revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
+        await revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
       })();
 
-      logSecurityEvent(req, {
+      await logSecurityEvent(req, {
         type: EVENTS.ADMIN_BOOTSTRAP_PASSWORD_CHANGED, outcome: 'ALLOWED', statusCode: 200,
         detail: { accountStatus: 'PENDING_PASSKEY' },
       });
 
       // token_version vừa tăng nên mã phiên hiện tại đã hết hiệu lực; cấp lại mã mới.
       res.json({
-        ...issueSession(req, res, loadUserRow(user.id), { sessionId: req.user.sessionId }),
+        ...(await issueSession(req, res, await loadUserRow(user.id), { sessionId: req.user.sessionId })),
         nextStep: 'REGISTER_PASSKEY',
         message: 'Đã đổi mật khẩu tạm. Hãy đăng ký Passkey đầu tiên để kích hoạt quyền quản trị.',
       });
@@ -603,7 +625,7 @@ router.post('/reauth/options', requireAuth, authLimiter, async (req, res, next) 
   try {
     const action = parseAccountAction((req.body || {}).action);
 
-    const credentials = db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
+    const credentials = await db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản chưa có Passkey');
 
     // Không truyền challenge: thư viện tự sinh giá trị ngẫu nhiên bằng nguồn ngẫu nhiên
@@ -619,7 +641,7 @@ router.post('/reauth/options', requireAuth, authLimiter, async (req, res, next) 
 
     const sessionId = uuid();
     const expiresAt = new Date(Date.now() + REAUTH_TTL_SECONDS * 1000).toISOString();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, ?, NULL, ?, 'REAUTH', ?, ?)`
     ).run(sessionId, req.user.id, options.challenge, JSON.stringify({ action }), expiresAt);
@@ -637,7 +659,7 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
     }
 
-    const challengeRow = db
+    const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REAUTH' AND user_id = ?`)
       .get(reauthSessionId, req.user.id);
     if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên xác thực lại không hợp lệ');
@@ -652,7 +674,7 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
       throw new AppError(400, 'CHALLENGE_PURPOSE_MISMATCH', 'Challenge không dành cho thao tác này');
     }
 
-    const credential = db
+    const credential = await db
       .prepare('SELECT * FROM passkey_credentials WHERE user_id = ? AND credential_id = ?')
       .get(req.user.id, response.id);
     if (!credential) throw new AppError(400, 'NO_CREDENTIAL', 'Passkey này không thuộc tài khoản của bạn');
@@ -679,14 +701,19 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
 
     const counterCheck = assessCounter(credential, verification.authenticationInfo.newCounter);
     let issued;
-    db.transaction(() => {
-      db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
+    await db.transaction(async () => {
+      // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì
+      // chỉ một request đổi được used_at, nên chỉ một phiếu uỷ quyền được cấp.
+      const consumed = await db
+        .prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL')
+        .run(nowIso(), challengeRow.id);
+      if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã dùng');
+      await db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
         counterCheck.stored,
         nowIso(),
         credential.id
       );
-      db.prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ?').run(nowIso(), challengeRow.id);
-      issued = issueGrant({
+      issued = await issueGrant({
         userId: req.user.id,
         sessionId: req.user.sessionId,
         transactionId: null,
@@ -696,7 +723,7 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
         contextHash: null,
       });
     })();
-    reportCounterAnomaly(req, credential, counterCheck);
+    await reportCounterAnomaly(req, credential, counterCheck);
 
     res.json({ reauthGrant: issued.rawToken, expiresAt: issued.expiresAt, action: savedContext.action });
   } catch (e) {
@@ -711,13 +738,13 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
 // bộ credential vẫn đăng nhập được bằng mật khẩu, nhưng không tự thực hiện được các thao
 // tác yêu cầu xác thực lại — nên mật khẩu KHÔNG phải một kênh khôi phục Passkey.
 
-function listCredentials(userId) {
-  return db
+async function listCredentials(userId) {
+  return (await db
     .prepare(
       `SELECT id, device_name, created_at, last_used_at FROM passkey_credentials
        WHERE user_id = ? ORDER BY created_at ASC`
     )
-    .all(userId)
+    .all(userId))
     .map((c) => ({
       id: c.id,
       deviceName: c.device_name || 'Thiết bị không tên',
@@ -726,8 +753,8 @@ function listCredentials(userId) {
     }));
 }
 
-router.get('/credentials', requireAuth, (req, res) => {
-  res.json({ credentials: listCredentials(req.user.id) });
+router.get('/credentials', requireAuth, async (req, res) => {
+  res.json({ credentials: await listCredentials(req.user.id) });
 });
 
 // Thêm thiết bị mới. Người gọi PHẢI vừa xác thực lại bằng một credential sẵn có, nghĩa
@@ -738,7 +765,7 @@ router.get('/credentials', requireAuth, (req, res) => {
 // bước thực sự ghi credential mới vào cơ sở dữ liệu.
 router.post('/credentials/options', requireAuth, authLimiter, async (req, res, next) => {
   try {
-    requireGrant({
+    await requireGrant({
       userId: req.user.id,
       sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
@@ -746,10 +773,10 @@ router.post('/credentials/options', requireAuth, authLimiter, async (req, res, n
       message: 'Thêm thiết bị cần xác thực lại bằng passkey đang có',
     });
 
-    const user = loadUserRow(req.user.id);
+    const user = await loadUserRow(req.user.id);
     if (!user) throw new AppError(404, 'USER_NOT_FOUND', 'Không tìm thấy tài khoản');
 
-    const existing = db.prepare('SELECT credential_id, transports FROM passkey_credentials WHERE user_id = ?').all(user.id);
+    const existing = await db.prepare('SELECT credential_id, transports FROM passkey_credentials WHERE user_id = ?').all(user.id);
 
     const options = await generateRegistrationOptions({
       rpName: RP_NAME,
@@ -769,7 +796,7 @@ router.post('/credentials/options', requireAuth, authLimiter, async (req, res, n
 
     const deviceName = String(req.body?.deviceName || '').trim().slice(0, 60) || 'Thiết bị mới';
     const sessionId = uuid();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, ?, NULL, ?, 'REGISTRATION', ?, ?)`
     ).run(sessionId, user.id, options.challenge, JSON.stringify({ addDevice: true, deviceName }), expiresAtIso());
@@ -787,7 +814,7 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu registrationSessionId hoặc response');
     }
 
-    const grant = requireGrant({
+    const grant = await requireGrant({
       userId: req.user.id,
       sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
@@ -796,7 +823,7 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
     });
 
     // Challenge phải thuộc đúng người đang đăng nhập — chặn việc mượn phiên của người khác.
-    const challengeRow = db
+    const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REGISTRATION' AND user_id = ?`)
       .get(registrationSessionId, req.user.id);
     if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên thêm thiết bị không hợp lệ');
@@ -825,12 +852,20 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
     const { deviceName } = JSON.parse(challengeRow.context_data || '{}');
     const now = nowIso();
 
-    if (db.prepare('SELECT id FROM passkey_credentials WHERE credential_id = ?').get(credential.id)) {
-      throw new AppError(409, 'CREDENTIAL_EXISTS', 'Passkey này đã được đăng ký rồi');
-    }
+    await db.transaction(async () => {
+      // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì
+      // chỉ một request đổi được used_at (bước kiểm used_at ở trên nằm trước một lần await).
+      const consumed = await db
+        .prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL`)
+        .run(now, challengeRow.id);
+      if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã được sử dụng');
 
-    db.transaction(() => {
-      db.prepare(
+      // Kiểm trùng credential TRONG giao dịch để không request nào chen vào giữa kiểm và ghi.
+      if (await db.prepare('SELECT id FROM passkey_credentials WHERE credential_id = ?').get(credential.id)) {
+        throw new AppError(409, 'CREDENTIAL_EXISTS', 'Passkey này đã được đăng ký rồi');
+      }
+
+      await db.prepare(
         `INSERT INTO passkey_credentials
            (id, user_id, credential_id, public_key, counter, transports, device_name, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
@@ -844,17 +879,16 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
         deviceName || 'Thiết bị mới',
         now
       );
-      db.prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ?`).run(now, challengeRow.id);
       // Tiêu thụ phiếu trong CÙNG giao dịch cơ sở dữ liệu với việc ghi credential, nên
       // không có khoảnh khắc nào phiếu vừa còn hiệu lực vừa đã được dùng.
-      markGrantUsed(grant.id);
+      await markGrantUsed(grant.id);
     })();
 
-    logSecurityEvent(req, {
+    await logSecurityEvent(req, {
       type: EVENTS.CREDENTIAL_ADDED, outcome: 'ALLOWED', statusCode: 201,
       detail: { deviceName: deviceName || 'Thiết bị mới' },
     });
-    res.status(201).json({ credentials: listCredentials(req.user.id) });
+    res.status(201).json({ credentials: await listCredentials(req.user.id) });
   } catch (e) {
     next(e);
   }
@@ -866,9 +900,9 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
 // Không cho xoá cái CUỐI CÙNG. Đây là một nửa của bất biến "tài khoản ACTIVE luôn có ít
 // nhất một Passkey"; nửa còn lại là việc chỉ kích hoạt tài khoản khi credential đầu tiên
 // đã được ghi.
-router.delete('/credentials/:id', requireAuth, (req, res, next) => {
+router.delete('/credentials/:id', requireAuth, async (req, res, next) => {
   try {
-    const grant = requireGrant({
+    const grant = await requireGrant({
       userId: req.user.id,
       sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
@@ -876,30 +910,33 @@ router.delete('/credentials/:id', requireAuth, (req, res, next) => {
       message: 'Xoá thiết bị cần xác thực lại bằng passkey đang có',
     });
 
-    const target = db
-      .prepare('SELECT * FROM passkey_credentials WHERE id = ? AND user_id = ?')
-      .get(req.params.id, req.user.id);
-    if (!target) throw new AppError(404, 'CREDENTIAL_NOT_FOUND', 'Không tìm thấy thiết bị');
+    // Đọc, đếm và xoá trong CÙNG một giao dịch: nếu đếm ở ngoài, hai lệnh xoá hai thiết bị
+    // khác nhau chạy song song cùng thấy total = 2 và cùng xoá, để tài khoản không còn passkey.
+    const target = await db.transaction(async () => {
+      const target = await db
+        .prepare('SELECT * FROM passkey_credentials WHERE id = ? AND user_id = ?')
+        .get(req.params.id, req.user.id);
+      if (!target) throw new AppError(404, 'CREDENTIAL_NOT_FOUND', 'Không tìm thấy thiết bị');
 
-    const total = db.prepare('SELECT COUNT(*) AS n FROM passkey_credentials WHERE user_id = ?').get(req.user.id).n;
-    if (total <= 1) {
-      throw new AppError(
-        409,
-        'LAST_CREDENTIAL',
-        'Đây là passkey duy nhất của bạn. Hãy thêm thiết bị khác trước khi xoá cái này.'
-      );
-    }
+      const total = (await db.prepare('SELECT COUNT(*) AS n FROM passkey_credentials WHERE user_id = ?').get(req.user.id)).n;
+      if (total <= 1) {
+        throw new AppError(
+          409,
+          'LAST_CREDENTIAL',
+          'Đây là passkey duy nhất của bạn. Hãy thêm thiết bị khác trước khi xoá cái này.'
+        );
+      }
 
-    db.transaction(() => {
-      db.prepare('DELETE FROM passkey_credentials WHERE id = ?').run(target.id);
-      markGrantUsed(grant.id);
+      await db.prepare('DELETE FROM passkey_credentials WHERE id = ?').run(target.id);
+      await markGrantUsed(grant.id);
+      return target;
     })();
 
-    logSecurityEvent(req, {
+    await logSecurityEvent(req, {
       type: EVENTS.CREDENTIAL_REMOVED, outcome: 'ALLOWED', statusCode: 200,
       detail: { credentialId: target.id, deviceName: target.device_name },
     });
-    res.json({ credentials: listCredentials(req.user.id) });
+    res.json({ credentials: await listCredentials(req.user.id) });
   } catch (e) {
     next(e);
   }

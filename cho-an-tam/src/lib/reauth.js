@@ -44,14 +44,14 @@ function requireSessionId(sessionId) {
   return sessionId;
 }
 
-function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash }) {
+async function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash }) {
   requireSessionId(sessionId);
   // Token gốc CSPRNG 32 byte, encode base64url; server chỉ lưu SHA-256 của nó.
   const rawToken = crypto.randomBytes(32).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(rawToken, 'utf8').digest('hex');
   const expiresAt = new Date(Date.now() + REAUTH_TTL_SECONDS * 1000).toISOString();
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO reauth_grants
        (id, user_id, session_id, transaction_id, dispute_id, action, decision, token_hash, context_hash, expires_at, used_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
@@ -83,20 +83,22 @@ function issueGrant({ userId, sessionId, transactionId, disputeId, action, decis
  * vậy một phiếu cấp cho giao dịch A, hoặc cấp cho quyết định hoàn tiền, đơn giản là không
  * nằm trong tập ứng viên khi người gọi dùng nó cho giao dịch B hoặc cho quyết định giải ngân.
  */
-function findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken }) {
+async function findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken }) {
   requireSessionId(sessionId);
   if (!rawToken) return null;
 
   const providedHash = crypto.createHash('sha256').update(String(rawToken), 'utf8').digest('hex');
   const providedBuf = Buffer.from(providedHash, 'hex');
 
-  const candidates = db
+  // IS NOT DISTINCT FROM: so sánh bằng nhưng coi NULL = NULL là đúng. SQLite có cách viết tắt
+  // `IS ?` nhưng PostgreSQL không nhận, còn dạng đầy đủ này chạy được trên cả hai.
+  const candidates = await db
     .prepare(
       `SELECT * FROM reauth_grants
        WHERE user_id = ? AND session_id = ? AND action = ? AND used_at IS NULL AND expires_at > ?
-         AND transaction_id IS ?
-         AND dispute_id IS ?
-         AND decision IS ?`
+         AND transaction_id IS NOT DISTINCT FROM ?
+         AND dispute_id IS NOT DISTINCT FROM ?
+         AND decision IS NOT DISTINCT FROM ?`
     )
     .all(userId, sessionId, action, nowIso(), transactionId || null, disputeId || null, decision || null);
 
@@ -109,8 +111,8 @@ function findValidGrant({ userId, sessionId, transactionId, disputeId, action, d
 }
 
 /** Đánh dấu phiếu đã dùng. PHẢI gọi bên trong cùng giao dịch cơ sở dữ liệu với nghiệp vụ. */
-function markGrantUsed(grantId) {
-  const result = db
+async function markGrantUsed(grantId) {
+  const result = await db
     .prepare('UPDATE reauth_grants SET used_at = ? WHERE id = ? AND used_at IS NULL')
     .run(nowIso(), grantId);
   if (result.changes !== 1) {
@@ -119,8 +121,8 @@ function markGrantUsed(grantId) {
 }
 
 /** Tra phiếu và ném lỗi nếu không hợp lệ. Không tiêu thụ phiếu. */
-function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message }) {
-  const grant = findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken });
+async function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message }) {
+  const grant = await findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken });
   if (!grant) {
     throw new AppError(
       401,

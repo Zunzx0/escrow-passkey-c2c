@@ -41,13 +41,13 @@ function settledOutcome(currentStatus, incomingStatus) {
  * Chỉ ném lỗi khi đầu vào sai hoặc yêu cầu không tồn tại. Thắng/thua trong cuộc đua tất toán
  * KHÔNG phải lỗi — đó là kết quả DUPLICATE/CONFLICT để từng kênh tự quyết cách phản hồi.
  */
-function applyProviderResult({ paymentRequestId, providerRef, status, amount, source }, { req = null } = {}) {
+async function applyProviderResult({ paymentRequestId, providerRef, status, amount, source }, { req = null } = {}) {
   if (!FINAL_STATUSES.has(status)) {
     throw new AppError(400, 'VALIDATION_ERROR', 'Kết quả từ provider phải là SUCCEEDED hoặc FAILED');
   }
   if (!SOURCES.has(source)) throw new Error(`Nguồn kết quả không hợp lệ: ${source}`);
 
-  const pr = db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(paymentRequestId);
+  const pr = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(paymentRequestId);
   if (!pr) throw new AppError(404, 'PAYMENT_REQUEST_NOT_FOUND', 'Không tìm thấy yêu cầu nạp tiền');
   if (pr.provider_ref !== providerRef) {
     return { outcome: 'CONFLICT', status: pr.status, reason: 'providerRef không khớp yêu cầu nạp tiền' };
@@ -58,9 +58,9 @@ function applyProviderResult({ paymentRequestId, providerRef, status, amount, so
   if (pr.status !== 'PENDING') return settledOutcome(pr.status, status);
 
   let applied = false;
-  db.transaction(() => {
+  await db.transaction(async () => {
     const now = nowIso();
-    const claim = db
+    const claim = await db
       .prepare(
         `UPDATE payment_requests
          SET status = ?, version = version + 1, resolved_at = ?, resolved_by = ?, updated_at = ?
@@ -70,12 +70,12 @@ function applyProviderResult({ paymentRequestId, providerRef, status, amount, so
     if (claim.changes !== 1) return;
 
     if (status === 'SUCCEEDED') {
-      const wallet = getUserWallet(pr.user_id);
+      const wallet = await getUserWallet(pr.user_id);
       if (!wallet) throw new AppError(404, 'WALLET_NOT_FOUND', 'Không tìm thấy ví của người nạp tiền');
-      const updated = applyWalletDelta(wallet, pr.amount, 0);
+      const updated = await applyWalletDelta(wallet, pr.amount, 0);
       // Số dư đã đổi, bút toán chưa ghi — điểm hỏng nguy hiểm nhất, dùng cho kiểm thử crash.
       maybeFail('after-wallet-update', 'topup');
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: wallet.id,
         transactionId: null,
         requestId: pr.id,
@@ -98,18 +98,18 @@ function applyProviderResult({ paymentRequestId, providerRef, status, amount, so
 
   if (!applied) {
     // Thua trong cuộc đua tất toán — đọc lại trạng thái mới nhất, xử lý như "đã tất toán".
-    const latest = db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(pr.id);
+    const latest = await db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(pr.id);
     return settledOutcome(latest.status, status);
   }
 
-  logSecurityEvent(req, {
+  await logSecurityEvent(req, {
     type: status === 'SUCCEEDED' ? EVENTS.TOPUP_SUCCEEDED : EVENTS.TOPUP_FAILED,
     outcome: 'ALLOWED',
     statusCode: req ? 200 : null,
     detail: { paymentRequestId: pr.id, amount: pr.amount, source },
   });
   // Chỉ nhánh APPLIED mới báo — webhook lặp hay worker thua cuộc đua không sinh thông báo thừa.
-  onTopupResolved(pr, status);
+  await onTopupResolved(pr, status);
 
   return { outcome: 'APPLIED', status };
 }

@@ -6,8 +6,8 @@ const { maybeFail } = require('./faultInjection');
 // Cập nhật một wallet có điều kiện version (optimistic locking).
 // CHECK (available_balance >= 0) và CHECK (locked_balance >= 0) của schema sẽ tự
 // chặn số dư âm; lỗi ràng buộc SQLite được bắt ở tầng gọi và dịch thành 400.
-function applyWalletDelta(wallet, availableDelta, lockedDelta) {
-  const result = db
+async function applyWalletDelta(wallet, availableDelta, lockedDelta) {
+  const result = await db
     .prepare(
       `UPDATE wallets SET available_balance = available_balance + ?, locked_balance = locked_balance + ?,
        version = version + 1, updated_at = ? WHERE id = ? AND version = ?`
@@ -25,11 +25,11 @@ function applyWalletDelta(wallet, availableDelta, lockedDelta) {
 // `op` đặt tên cho nghiệp vụ đang chạy (lock / release / admin-refund / admin-release), chỉ
 // dùng để bài kiểm thử rollback khoanh đúng nghiệp vụ cần làm hỏng. Bốn nghiệp vụ này dùng
 // chung một khung xử lý, nên không có tên thì không chèn lỗi riêng cho một cái được.
-function applyOrderedWalletUpdates(updates, op = 'any') {
+async function applyOrderedWalletUpdates(updates, op = 'any') {
   const sorted = [...updates].sort((a, b) => (a.wallet.id < b.wallet.id ? -1 : a.wallet.id > b.wallet.id ? 1 : 0));
   const result = new Map();
   for (const u of sorted) {
-    const updated = applyWalletDelta(u.wallet, u.availableDelta, u.lockedDelta);
+    const updated = await applyWalletDelta(u.wallet, u.availableDelta, u.lockedDelta);
     result.set(u.wallet.id, updated);
   }
   // Số dư đã đổi, bút toán chưa ghi — điểm hỏng nguy hiểm nhất nếu không có giao dịch CSDL.
@@ -41,9 +41,9 @@ function applyOrderedWalletUpdates(updates, op = 'any') {
 // ở bước giải ngân chứ không bắn luôn ở bước khoá tiền đi trước nó.
 const OP_BY_TARGET_STATUS = { SECURED: 'lock', COMPLETED: 'release', RELEASED: 'admin-release', REFUNDED: 'admin-refund' };
 
-function applyTransactionStatus(txn, { status, escrowStatus }) {
+async function applyTransactionStatus(txn, { status, escrowStatus }) {
   maybeFail('before-status-change', OP_BY_TARGET_STATUS[status] || 'any');
-  const result = db
+  const result = await db
     .prepare(
       `UPDATE transactions SET status = ?, escrow_status = ?, version = version + 1, updated_at = ?
        WHERE id = ? AND version = ?`
@@ -53,8 +53,8 @@ function applyTransactionStatus(txn, { status, escrowStatus }) {
   return db.prepare('SELECT * FROM transactions WHERE id = ?').get(txn.id);
 }
 
-function insertWalletEntry({ walletId, transactionId, requestId, entryType, availableDelta, lockedDelta, walletAfter, idempotencyKey, requestFingerprint, description }) {
-  db.prepare(
+async function insertWalletEntry({ walletId, transactionId, requestId, entryType, availableDelta, lockedDelta, walletAfter, idempotencyKey, requestFingerprint, description }) {
+  await db.prepare(
     `INSERT INTO wallet_entries
       (id, wallet_id, transaction_id, request_id, entry_type, available_delta, locked_delta,
        available_after, locked_after, idempotency_key, request_fingerprint, description, created_at)
@@ -96,8 +96,8 @@ function fingerprintRequest({ actorId, action, transactionId, amount }) {
  * lại hợp lệ, người gọi trả về kết quả cũ. Nếu dấu vân tay lệch thì ném xung đột, vì
  * hai nghiệp vụ khác nhau đang tranh nhau cùng một khoá.
  */
-function checkIdempotency(idempotencyKey, fingerprint) {
-  const row = db
+async function checkIdempotency(idempotencyKey, fingerprint) {
+  const row = await db
     .prepare('SELECT id, request_fingerprint FROM wallet_entries WHERE idempotency_key = ?')
     .get(idempotencyKey);
   if (!row) return null;
@@ -110,15 +110,15 @@ function checkIdempotency(idempotencyKey, fingerprint) {
   return row;
 }
 
-function isIdempotentReplay(idempotencyKey) {
-  return !!db.prepare('SELECT id FROM wallet_entries WHERE idempotency_key = ?').get(idempotencyKey);
+async function isIdempotentReplay(idempotencyKey) {
+  return !!(await db.prepare('SELECT id FROM wallet_entries WHERE idempotency_key = ?').get(idempotencyKey));
 }
 
-function getUserWallet(userId) {
+async function getUserWallet(userId) {
   return db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(userId);
 }
 
-function getEscrowWallet() {
+async function getEscrowWallet() {
   return db.prepare(`SELECT * FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'`).get();
 }
 

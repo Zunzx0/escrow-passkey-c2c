@@ -17,14 +17,16 @@ const { db, uuid, nowIso } = require('../db');
  * @param {Array<{userId, type, title, body?, transactionId?, paymentRequestId?, key}>} items
  *        key: phân biệt sự kiện; cùng (type, key, userId) chỉ sinh một thông báo.
  */
-function notify(items) {
+async function notify(items) {
   for (const n of items) {
     if (!n || !n.userId) continue;
     try {
-      db.prepare(
-        `INSERT OR IGNORE INTO notifications
+      // ON CONFLICT DO NOTHING (thay cho INSERT OR IGNORE chỉ SQLite hiểu): dedupe_key trùng thì bỏ qua.
+      await db.prepare(
+        `INSERT INTO notifications
            (id, user_id, type, title, body, transaction_id, payment_request_id, dedupe_key, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING`
       ).run(
         uuid(),
         n.userId,
@@ -42,40 +44,40 @@ function notify(items) {
   }
 }
 
-function adminIds() {
-  return db.prepare(`SELECT id FROM users WHERE role = 'ADMIN' AND account_status = 'ACTIVE'`).all().map((u) => u.id);
+async function adminIds() {
+  return (await db.prepare(`SELECT id FROM users WHERE role = 'ADMIN' AND account_status = 'ACTIVE'`).all()).map((u) => u.id);
 }
 
 const money = (n) => `${Number(n).toLocaleString('vi-VN')}₫`;
 
 // ---------- Các sự kiện nghiệp vụ -> thông báo ----------
 
-function onOrderSecured(txn) {
-  notify([{
+async function onOrderSecured(txn) {
+  await notify([{
     userId: txn.seller_id, type: 'ORDER_PAID', key: txn.id, transactionId: txn.id,
     title: 'Đơn hàng đã được thanh toán — cần giao hàng',
     body: `"${txn.item_name}" — ${money(txn.amount)} đang được giữ trong ký quỹ. Hãy gửi hàng cho người mua.`,
   }]);
 }
 
-function onOrderAcknowledged(txn) {
-  notify([{
+async function onOrderAcknowledged(txn) {
+  await notify([{
     userId: txn.buyer_id, type: 'ORDER_ACKNOWLEDGED', key: txn.id, transactionId: txn.id,
     title: 'Người bán đã xác nhận đơn hàng',
     body: `"${txn.item_name}" sẽ sớm được gửi đi. Tiền của bạn vẫn đang được giữ trong ký quỹ.`,
   }]);
 }
 
-function onOrderShipped(txn) {
-  notify([{
+async function onOrderShipped(txn) {
+  await notify([{
     userId: txn.buyer_id, type: 'ORDER_SHIPPED', key: txn.id, transactionId: txn.id,
     title: 'Người bán đã gửi hàng',
     body: `"${txn.item_name}" đang trên đường tới. Khi nhận được kiện hàng, hãy xác nhận đã nhận.`,
   }]);
 }
 
-function onOrderWaitConfirm(txn) {
-  notify([
+async function onOrderWaitConfirm(txn) {
+  await notify([
     {
       userId: txn.buyer_id, type: 'ORDER_WAIT_CONFIRM', key: txn.id, transactionId: txn.id,
       title: 'Kiểm tra hàng rồi xác nhận giải ngân',
@@ -89,23 +91,24 @@ function onOrderWaitConfirm(txn) {
   ]);
 }
 
-function onOrderCompleted(txn) {
-  notify([{
+async function onOrderCompleted(txn) {
+  await notify([{
     userId: txn.seller_id, type: 'ORDER_COMPLETED', key: txn.id, transactionId: txn.id,
     title: 'Người mua đã xác nhận — tiền đã về ví',
     body: `${money(txn.amount)} cho "${txn.item_name}" đã được giải ngân vào ví của bạn.`,
   }]);
 }
 
-function onDisputeOpened(txn, openedByUserId) {
+async function onDisputeOpened(txn, openedByUserId) {
   const counterparty = openedByUserId === txn.buyer_id ? txn.seller_id : txn.buyer_id;
-  notify([
+  const admins = await adminIds();
+  await notify([
     {
       userId: counterparty, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
       title: 'Giao dịch bị mở tranh chấp',
       body: `"${txn.item_name}" đang tranh chấp; ${money(txn.amount)} bị đóng băng chờ quản trị viên phân xử.`,
     },
-    ...adminIds().map((adminId) => ({
+    ...admins.map((adminId) => ({
       userId: adminId, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
       title: 'Có hồ sơ tranh chấp mới cần phân xử',
       body: `"${txn.item_name}" — ${money(txn.amount)}.`,
@@ -113,20 +116,20 @@ function onDisputeOpened(txn, openedByUserId) {
   ]);
 }
 
-function onDisputeResolved(txn, decision) {
+async function onDisputeResolved(txn, decision) {
   const refund = decision === 'REFUND';
   const body = refund
     ? `Quản trị viên quyết định HOÀN TIỀN ${money(txn.amount)} cho người mua.`
     : `Quản trị viên quyết định GIẢI NGÂN ${money(txn.amount)} cho người bán.`;
-  notify([txn.buyer_id, txn.seller_id].map((userId) => ({
+  await notify([txn.buyer_id, txn.seller_id].map((userId) => ({
     userId, type: 'DISPUTE_RESOLVED', key: txn.id, transactionId: txn.id,
     title: `Tranh chấp "${txn.item_name}" đã được phân xử`, body,
   })));
 }
 
-function onTopupResolved(paymentRequest, status) {
+async function onTopupResolved(paymentRequest, status) {
   const ok = status === 'SUCCEEDED';
-  notify([{
+  await notify([{
     userId: paymentRequest.user_id,
     type: ok ? 'TOPUP_SUCCEEDED' : 'TOPUP_FAILED',
     key: paymentRequest.id,
@@ -140,44 +143,44 @@ function onTopupResolved(paymentRequest, status) {
 
 // ---------- Việc cần xử lý: tính thẳng từ trạng thái ----------
 
-function todoFor(user) {
+async function todoFor(user) {
   const items = [];
   const txns = (sql, ...args) => db.prepare(sql).all(...args);
 
-  for (const t of txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'CREATED' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'CREATED' ORDER BY created_at`, user.id)) {
     items.push({ kind: 'PAY_ORDER', role: 'BUYER', transactionId: t.id, title: 'Thanh toán đơn hàng',
       detail: `"${t.item_name}" — ${money(t.amount)} chưa được khoá vào ký quỹ.` });
   }
-  for (const t of txns(`SELECT * FROM transactions WHERE seller_id = ? AND status = 'SECURED' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT * FROM transactions WHERE seller_id = ? AND status = 'SECURED' ORDER BY created_at`, user.id)) {
     items.push(t.seller_ack_at
       ? { kind: 'SHIP_ORDER', role: 'SELLER', transactionId: t.id, title: 'Giao hàng cho người mua',
         detail: `"${t.item_name}" — bạn đã xác nhận đơn, hãy gửi hàng và bấm "Xác nhận giao hàng".` }
       : { kind: 'ACK_ORDER', role: 'SELLER', transactionId: t.id, title: 'Xác nhận đơn hàng mới',
         detail: `"${t.item_name}" — người mua đã thanh toán ${money(t.amount)} vào ký quỹ.` });
   }
-  for (const t of txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'SHIPPING' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'SHIPPING' ORDER BY created_at`, user.id)) {
     items.push({ kind: 'CONFIRM_RECEIPT', role: 'BUYER', transactionId: t.id, title: 'Xác nhận đã nhận hàng',
       detail: `"${t.item_name}" đã được gửi đi.` });
   }
-  for (const t of txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'WAIT_CONFIRM' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'WAIT_CONFIRM' ORDER BY created_at`, user.id)) {
     items.push({ kind: 'RELEASE_OR_DISPUTE', role: 'BUYER', transactionId: t.id, title: 'Xác nhận giải ngân hoặc mở tranh chấp',
       detail: `"${t.item_name}" — ${money(t.amount)} đang chờ quyết định của bạn.` });
   }
-  const pendingTopups = db.prepare(`SELECT COUNT(*) AS n FROM payment_requests WHERE user_id = ? AND status = 'PENDING'`).get(user.id).n;
+  const pendingTopups = (await db.prepare(`SELECT COUNT(*) AS n FROM payment_requests WHERE user_id = ? AND status = 'PENDING'`).get(user.id)).n;
   if (pendingTopups > 0) {
     items.push({ kind: 'TOPUP_PENDING', role: user.role, title: 'Nạp tiền đang chờ xác nhận',
       detail: `${pendingTopups} yêu cầu nạp tiền chưa có kết quả từ cổng thanh toán.` });
   }
 
   if (user.role === 'ADMIN') {
-    for (const d of db.prepare(
+    for (const d of await db.prepare(
       `SELECT d.id, d.transaction_id, t.item_name, t.amount FROM disputes d JOIN transactions t ON t.id = d.transaction_id
        WHERE d.status = 'OPEN' ORDER BY d.created_at`
     ).all()) {
       items.push({ kind: 'ADJUDICATE_DISPUTE', role: 'ADMIN', transactionId: d.transaction_id, disputeId: d.id,
         title: 'Phân xử tranh chấp', detail: `"${d.item_name}" — ${money(d.amount)} đang bị đóng băng.` });
     }
-    const pendingSellers = db.prepare(`SELECT COUNT(*) AS n FROM seller_requests WHERE status = 'PENDING'`).get().n;
+    const pendingSellers = (await db.prepare(`SELECT COUNT(*) AS n FROM seller_requests WHERE status = 'PENDING'`).get()).n;
     if (pendingSellers > 0) {
       items.push({ kind: 'REVIEW_SELLER_REQUESTS', role: 'ADMIN', title: 'Duyệt yêu cầu mở cửa hàng',
         detail: `${pendingSellers} yêu cầu đang chờ duyệt.` });

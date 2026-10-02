@@ -82,7 +82,7 @@ async function main() {
   section('T01: TOPUP SUCCESS — webhook hợp lệ báo SUCCEEDED thì cộng ví đúng một lần');
   {
     const AMOUNT = 300000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     assert(created.status === 201 && created.data.status === 'PENDING', `Tạo yêu cầu nạp tiền PENDING (nhận ${created.status})`);
     const { id, providerRef } = created.data;
@@ -91,14 +91,14 @@ async function main() {
     const cb = await postWebhook(payload, signature);
     assert(cb.status === 200 && cb.data.status === 'SUCCEEDED', `Webhook SUCCEEDED được chấp nhận (nhận ${cb.status})`);
 
-    const pr = paymentRow(id);
+    const pr = await paymentRow(id);
     assert(pr.status === 'SUCCEEDED', 'payment_requests.status = SUCCEEDED');
     assert(pr.version === 1, `payment_requests.version tăng đúng 1 lần (thực tế ${pr.version})`);
 
-    const after = walletRow(buyer.user.id);
+    const after = await walletRow(buyer.user.id);
     assert(after.available_balance - before.available_balance === AMOUNT, `Ví cộng đúng ${AMOUNT.toLocaleString('vi-VN')}₫`);
 
-    const entries = entriesFor(id);
+    const entries = await entriesFor(id);
     assert(entries.length === 1 && entries[0].entry_type === 'TOPUP_CREDIT', 'Đúng 1 wallet_entry loại TOPUP_CREDIT');
     assert(entries[0].available_delta === AMOUNT, 'wallet_entry ghi đúng available_delta');
 
@@ -110,7 +110,7 @@ async function main() {
   section('T02: TOPUP FAILED — webhook báo thất bại thì ví KHÔNG đổi');
   {
     const AMOUNT = 200000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -118,12 +118,12 @@ async function main() {
     const cb = await postWebhook(payload, signature);
     assert(cb.status === 200 && cb.data.status === 'FAILED', `Webhook FAILED được chấp nhận (nhận ${cb.status})`);
 
-    const pr = paymentRow(id);
+    const pr = await paymentRow(id);
     assert(pr.status === 'FAILED', 'payment_requests.status = FAILED');
 
-    const after = walletRow(buyer.user.id);
+    const after = await walletRow(buyer.user.id);
     assert(after.available_balance === before.available_balance, 'Ví không đổi khi nạp tiền thất bại');
-    assert(entriesFor(id).length === 0, 'Không có wallet_entry nào được ghi khi FAILED');
+    assert((await entriesFor(id)).length === 0, 'Không có wallet_entry nào được ghi khi FAILED');
 
     const inv = await getInvariants(admin.token);
     assert(inv.data.ok === true, 'Chín bất biến vẫn đúng sau TOPUP FAILED');
@@ -133,7 +133,7 @@ async function main() {
   section('T03: PENDING/TIMEOUT — chưa có callback thì không tự coi là thất bại, và vẫn tất toán được về sau');
   {
     const AMOUNT = 150000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -142,21 +142,21 @@ async function main() {
     // bất kể chờ bao lâu — khác timeout không đồng nghĩa thất bại.
     const check = await api(`/api/payments/${id}`, { token: buyer.token });
     assert(check.status === 200 && check.data.status === 'PENDING', 'Yêu cầu vẫn PENDING khi chưa có callback');
-    assert(walletRow(buyer.user.id).available_balance === before.available_balance, 'Ví không đổi khi còn PENDING');
+    assert((await walletRow(buyer.user.id)).available_balance === before.available_balance, 'Ví không đổi khi còn PENDING');
 
     // PENDING không bị khoá cứng chỉ vì "đã chờ lâu" — callback tới muộn vẫn tất toán được.
     const { payload, signature } = buildProviderCallback({ paymentRequestId: id, providerRef, status: 'SUCCEEDED', amount: AMOUNT });
     const cb = await postWebhook(payload, signature);
     assert(cb.status === 200 && cb.data.status === 'SUCCEEDED',
       'PENDING chờ lâu vẫn tất toán được khi callback cuối cùng cũng tới (không bị coi là hết hạn cứng)');
-    assert(walletRow(buyer.user.id).available_balance - before.available_balance === AMOUNT, 'Ví cộng đúng số tiền khi tất toán muộn');
+    assert((await walletRow(buyer.user.id)).available_balance - before.available_balance === AMOUNT, 'Ví cộng đúng số tiền khi tất toán muộn');
   }
 
   // ---- T04: DELAYED_SUCCESS ----
   section('T04: DELAYED_SUCCESS — callback tới muộn vẫn xử lý đúng như bình thường');
   {
     const AMOUNT = 250000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -165,14 +165,14 @@ async function main() {
     const { payload, signature } = buildProviderCallback({ paymentRequestId: id, providerRef, status: 'SUCCEEDED', amount: AMOUNT });
     const cb = await postWebhook(payload, signature);
     assert(cb.status === 200 && cb.data.status === 'SUCCEEDED', 'Callback tới muộn vẫn được xử lý thành công');
-    assert(walletRow(buyer.user.id).available_balance - before.available_balance === AMOUNT, 'Ví vẫn cộng đúng số tiền dù callback tới muộn');
+    assert((await walletRow(buyer.user.id)).available_balance - before.available_balance === AMOUNT, 'Ví vẫn cộng đúng số tiền dù callback tới muộn');
   }
 
   // ---- T05: DUPLICATE_CALLBACK ----
   section('T05: DUPLICATE_CALLBACK — gửi lặp cùng kết quả không cộng tiền hai lần');
   {
     const AMOUNT = 400000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -183,9 +183,9 @@ async function main() {
     const second = await postWebhook(payload, signature);
     assert(second.status === 200 && second.data.duplicate === true, 'Lần gọi lặp thứ hai được nhận diện là duplicate');
 
-    const after = walletRow(buyer.user.id);
+    const after = await walletRow(buyer.user.id);
     assert(after.available_balance - before.available_balance === AMOUNT, 'Ví chỉ được cộng đúng MỘT lần dù webhook gửi lặp');
-    assert(entriesFor(id).length === 1, 'Vẫn chỉ có đúng 1 wallet_entry sau khi webhook gửi lặp');
+    assert((await entriesFor(id)).length === 1, 'Vẫn chỉ có đúng 1 wallet_entry sau khi webhook gửi lặp');
 
     const inv = await getInvariants(admin.token);
     assert(inv.data.ok === true, 'Chín bất biến vẫn đúng sau webhook lặp');
@@ -195,7 +195,7 @@ async function main() {
   section('T06: FAKE_WEBHOOK — chữ ký sai bị từ chối, không chạm vào bất kỳ dữ liệu nào');
   {
     const AMOUNT = 500000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -204,12 +204,12 @@ async function main() {
     const fake = await postWebhook(payload, fakeSignature);
     assert(fake.status === 401 && fake.data.error === 'INVALID_SIGNATURE', `Chữ ký giả bị từ chối (nhận ${fake.status} ${fake.data.error})`);
 
-    const pr = paymentRow(id);
+    const pr = await paymentRow(id);
     assert(pr.status === 'PENDING', 'Yêu cầu vẫn PENDING sau khi nhận webhook giả');
-    assert(walletRow(buyer.user.id).available_balance === before.available_balance, 'Ví không đổi sau webhook giả');
-    assert(entriesFor(id).length === 0, 'Không có wallet_entry nào được ghi từ webhook giả');
+    assert((await walletRow(buyer.user.id)).available_balance === before.available_balance, 'Ví không đổi sau webhook giả');
+    assert((await entriesFor(id)).length === 0, 'Không có wallet_entry nào được ghi từ webhook giả');
 
-    const lastBadSigRow = db
+    const lastBadSigRow = await db
       .prepare(`SELECT detail FROM security_events WHERE event_type = 'WEBHOOK_INVALID_SIGNATURE' ORDER BY id DESC LIMIT 1`)
       .get();
     assert(!!lastBadSigRow && !lastBadSigRow.detail.includes(fakeSignature),
@@ -225,7 +225,7 @@ async function main() {
   section('T07: OUT_OF_ORDER_CALLBACK — callback tới sau trái ngược không ghi đè kết quả đã tất toán');
   {
     const AMOUNT = 350000;
-    const before = walletRow(buyer.user.id);
+    const before = await walletRow(buyer.user.id);
     const created = await createTopup(buyer.token, AMOUNT);
     const { id, providerRef } = created.data;
 
@@ -240,10 +240,10 @@ async function main() {
     assert(second.status === 409 && second.data.error === 'WEBHOOK_CONFLICT',
       `Callback trái ngược tới sau bị từ chối (nhận ${second.status} ${second.data.error})`);
 
-    const pr = paymentRow(id);
+    const pr = await paymentRow(id);
     assert(pr.status === 'FAILED', 'payment_requests.status VẪN LÀ FAILED, không bị lật sang SUCCEEDED');
-    assert(walletRow(buyer.user.id).available_balance === before.available_balance, 'Ví không bị cộng tiền dù callback SUCCEEDED tới sau');
-    assert(entriesFor(id).length === 0, 'Không có wallet_entry nào được ghi từ callback trái ngược');
+    assert((await walletRow(buyer.user.id)).available_balance === before.available_balance, 'Ví không bị cộng tiền dù callback SUCCEEDED tới sau');
+    assert((await entriesFor(id)).length === 0, 'Không có wallet_entry nào được ghi từ callback trái ngược');
 
     const inv = await getInvariants(admin.token);
     assert(inv.data.ok === true, 'Chín bất biến vẫn đúng sau callback out-of-order');
@@ -252,11 +252,11 @@ async function main() {
   // ---- T08: nhật ký sự kiện an toàn ----
   section('T08: Webhook để lại đúng vết trong nhật ký sự kiện an toàn');
   {
-    const count = (type) => db.prepare('SELECT COUNT(*) AS n FROM security_events WHERE event_type = ?').get(type).n;
-    assert(count('TOPUP_SUCCEEDED') >= 3, `Có ghi nhận TOPUP_SUCCEEDED (đếm được ${count('TOPUP_SUCCEEDED')})`);
-    assert(count('TOPUP_FAILED') >= 2, `Có ghi nhận TOPUP_FAILED (đếm được ${count('TOPUP_FAILED')})`);
-    assert(count('WEBHOOK_INVALID_SIGNATURE') >= 1, `Có ghi nhận WEBHOOK_INVALID_SIGNATURE (đếm được ${count('WEBHOOK_INVALID_SIGNATURE')})`);
-    assert(count('WEBHOOK_CONFLICT') >= 1, `Có ghi nhận WEBHOOK_CONFLICT (đếm được ${count('WEBHOOK_CONFLICT')})`);
+    const count = async (type) => (await db.prepare('SELECT COUNT(*) AS n FROM security_events WHERE event_type = ?').get(type)).n;
+    assert((await count('TOPUP_SUCCEEDED')) >= 3, `Có ghi nhận TOPUP_SUCCEEDED (đếm được ${(await count('TOPUP_SUCCEEDED'))})`);
+    assert((await count('TOPUP_FAILED')) >= 2, `Có ghi nhận TOPUP_FAILED (đếm được ${(await count('TOPUP_FAILED'))})`);
+    assert((await count('WEBHOOK_INVALID_SIGNATURE')) >= 1, `Có ghi nhận WEBHOOK_INVALID_SIGNATURE (đếm được ${(await count('WEBHOOK_INVALID_SIGNATURE'))})`);
+    assert((await count('WEBHOOK_CONFLICT')) >= 1, `Có ghi nhận WEBHOOK_CONFLICT (đếm được ${(await count('WEBHOOK_CONFLICT'))})`);
   }
 
   console.log(failures === 0 ? '\n=== KẾT QUẢ: TẤT CẢ PASS ✅ ===\n' : `\n=== KẾT QUẢ: ${failures} KIỂM THỬ THẤT BẠI ❌ ===\n`);

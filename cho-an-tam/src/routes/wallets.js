@@ -4,8 +4,8 @@ const { requireAuth } = require('../lib/auth');
 
 const router = express.Router();
 
-router.get('/me', requireAuth, (req, res) => {
-  const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+router.get('/me', requireAuth, async (req, res) => {
+  const wallet = await db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
   if (!wallet) return res.status(404).json({ error: 'WALLET_NOT_FOUND' });
   res.json({
     id: wallet.id,
@@ -16,10 +16,10 @@ router.get('/me', requireAuth, (req, res) => {
   });
 });
 
-router.get('/me/entries', requireAuth, (req, res) => {
-  const wallet = db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
+router.get('/me/entries', requireAuth, async (req, res) => {
+  const wallet = await db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);
   if (!wallet) return res.status(404).json({ error: 'WALLET_NOT_FOUND' });
-  const entries = db
+  const entries = await db
     .prepare('SELECT * FROM wallet_entries WHERE wallet_id = ? ORDER BY created_at DESC, id DESC LIMIT 200')
     .all(wallet.id);
   res.json({

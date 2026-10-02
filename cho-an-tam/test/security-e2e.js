@@ -161,28 +161,28 @@ async function main() {
   const grant = verify.data.reauthGrant;
   assert(!!grant, 'Ký hợp lệ → nhận được phiếu uỷ quyền');
 
-  const original = db.prepare('SELECT amount FROM transactions WHERE id = ?').get(txnId).amount;
-  db.prepare('UPDATE transactions SET amount = ? WHERE id = ?').run(original + 1000000, txnId);
+  const original = (await db.prepare('SELECT amount FROM transactions WHERE id = ?').get(txnId)).amount;
+  await db.prepare('UPDATE transactions SET amount = ? WHERE id = ?').run(original + 1000000, txnId);
 
   const tampered = await api(`/api/transactions/${txnId}/release`, {
     method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID(), reauthGrant: grant },
   });
   assert(tampered.status === 409 && tampered.data.error === 'CONTEXT_MISMATCH',
     `Giải ngân bị CHẶN sau khi số tiền bị sửa (nhận ${tampered.status} ${tampered.data.error})`);
-  const stillLocked = db.prepare('SELECT escrow_status FROM transactions WHERE id = ?').get(txnId);
+  const stillLocked = await db.prepare('SELECT escrow_status FROM transactions WHERE id = ?').get(txnId);
   assert(stillLocked.escrow_status === 'LOCKED', 'Tiền vẫn nằm nguyên trong Escrow, không bị rút ra');
 
   // ---------------------------------------------------------------------- SEC03
   section('SEC03: Trả lại đúng nội dung ban đầu → cùng phiếu đó giải ngân được');
-  db.prepare('UPDATE transactions SET amount = ? WHERE id = ?').run(original, txnId);
-  const sellerBefore = db.prepare(
+  await db.prepare('UPDATE transactions SET amount = ? WHERE id = ?').run(original, txnId);
+  const sellerBefore = (await db.prepare(
     'SELECT available_balance FROM wallets WHERE user_id = ?'
-  ).get(seller.user.id).available_balance;
+  ).get(seller.user.id)).available_balance;
   // Ví ký quỹ dùng chung cho mọi giao dịch nên phải đo MỨC GIẢM, không đo số dư tuyệt
   // đối: các giao dịch khác đang dở dang vẫn giữ tiền ở đó một cách hợp lệ.
-  const escrowBefore = db.prepare(
+  const escrowBefore = (await db.prepare(
     `SELECT locked_balance FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'`
-  ).get().locked_balance;
+  ).get()).locked_balance;
 
   const ok = await api(`/api/transactions/${txnId}/release`, {
     method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID(), reauthGrant: grant },
@@ -190,19 +190,19 @@ async function main() {
   assert(ok.status === 200, `Giải ngân thành công khi nội dung khớp (nhận ${ok.status})`);
   assert(ok.data.status === 'COMPLETED', 'Giao dịch chuyển sang COMPLETED');
 
-  const sellerAfter = db.prepare(
+  const sellerAfter = (await db.prepare(
     'SELECT available_balance FROM wallets WHERE user_id = ?'
-  ).get(seller.user.id).available_balance;
+  ).get(seller.user.id)).available_balance;
   assert(sellerAfter - sellerBefore === PRICE, `Người bán nhận đúng toàn bộ ${PRICE}, không tách khoản`);
 
-  const escrowAfter = db.prepare(
+  const escrowAfter = (await db.prepare(
     `SELECT locked_balance FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'`
-  ).get().locked_balance;
+  ).get()).locked_balance;
   assert(escrowBefore - escrowAfter === PRICE, `Phần bị khoá của ký quỹ giảm đúng ${PRICE}`);
 
-  const legs = db.prepare(
+  const legs = (await db.prepare(
     `SELECT SUM(available_delta + locked_delta) AS tong FROM wallet_entries WHERE transaction_id = ?`
-  ).get(txnId).tong;
+  ).get(txnId)).tong;
   assert(legs === 0, 'Tổng biến động của mọi bút toán trong giao dịch bằng không');
 
   // ---------------------------------------------------------------------- SEC04
@@ -226,8 +226,8 @@ async function main() {
   assert(crossUse.status === 401 && crossUse.data.error === 'REAUTH_REQUIRED',
     `Phiếu của giao dịch A dùng cho giao dịch B bị từ chối (nhận ${crossUse.status} ${crossUse.data.error})`);
 
-  const expired = db.prepare('SELECT id FROM reauth_grants WHERE transaction_id = ? AND used_at IS NULL').get(txnA);
-  db.prepare('UPDATE reauth_grants SET expires_at = ? WHERE id = ?')
+  const expired = await db.prepare('SELECT id FROM reauth_grants WHERE transaction_id = ? AND used_at IS NULL').get(txnA);
+  await db.prepare('UPDATE reauth_grants SET expires_at = ? WHERE id = ?')
     .run(new Date(Date.now() - 1000).toISOString(), expired.id);
   const stale = await api(`/api/transactions/${txnA}/release`, {
     method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID(), reauthGrant: grantA },
@@ -247,9 +247,9 @@ async function main() {
     method: 'POST', token: buyer.token, body: { requestId: sameRequestId },
   });
   assert(lock1.status === 200 && lock2.status === 200, 'Cả hai lần gửi đều trả về 200');
-  const lockLegs = db.prepare(
+  const lockLegs = (await db.prepare(
     `SELECT COUNT(*) AS n FROM wallet_entries WHERE transaction_id = ? AND entry_type = 'ESCROW_LOCK_DEBIT'`
-  ).get(txnC).n;
+  ).get(txnC)).n;
   assert(lockLegs === 1, `Chỉ có đúng 1 bút toán trừ tiền, không nhân đôi (đếm được ${lockLegs})`);
 
   // ---------------------------------------------------------------------- SEC07
@@ -261,7 +261,7 @@ async function main() {
   });
   assert(reused.status === 409 && reused.data.error === 'IDEMPOTENCY_KEY_REUSED',
     `Mã yêu cầu đã dùng cho giao dịch khác bị chặn (nhận ${reused.status} ${reused.data.error})`);
-  const dState = db.prepare('SELECT escrow_status FROM transactions WHERE id = ?').get(txnD);
+  const dState = await db.prepare('SELECT escrow_status FROM transactions WHERE id = ?').get(txnD);
   assert(dState.escrow_status === 'NONE', 'Giao dịch D không bị khoá tiền nhầm theo kết quả cũ');
 
   // ---------------------------------------------------------------------- SEC08
@@ -352,23 +352,23 @@ async function main() {
   const chainBefore = await api(`/api/transactions/${txnId}/logs/verify`, { token: buyer.token });
   assert(chainBefore.data.valid === true, 'Chuỗi nhật ký nguyên vẹn trước khi can thiệp');
 
-  const target = db.prepare(
+  const target = await db.prepare(
     'SELECT id, event_data FROM audit_logs WHERE transaction_id = ? ORDER BY sequence_no ASC LIMIT 1'
   ).get(txnId);
-  db.prepare('UPDATE audit_logs SET event_data = ? WHERE id = ?').run('{"bi_sua":true}', target.id);
+  await db.prepare('UPDATE audit_logs SET event_data = ? WHERE id = ?').run('{"bi_sua":true}', target.id);
   const afterEdit = await api(`/api/transactions/${txnId}/logs/verify`, { token: buyer.token });
   assert(afterEdit.data.valid === false, 'Sửa nội dung một bản ghi giữa chuỗi bị phát hiện');
-  db.prepare('UPDATE audit_logs SET event_data = ? WHERE id = ?').run(target.event_data, target.id);
+  await db.prepare('UPDATE audit_logs SET event_data = ? WHERE id = ?').run(target.event_data, target.id);
 
-  const mid = db.prepare(
+  const mid = await db.prepare(
     'SELECT id FROM audit_logs WHERE transaction_id = ? ORDER BY sequence_no ASC LIMIT 1 OFFSET 1'
   ).get(txnId);
-  const midRow = db.prepare('SELECT * FROM audit_logs WHERE id = ?').get(mid.id);
-  db.prepare('DELETE FROM audit_logs WHERE id = ?').run(mid.id);
+  const midRow = await db.prepare('SELECT * FROM audit_logs WHERE id = ?').get(mid.id);
+  await db.prepare('DELETE FROM audit_logs WHERE id = ?').run(mid.id);
   const afterDelete = await api(`/api/transactions/${txnId}/logs/verify`, { token: buyer.token });
   assert(afterDelete.data.valid === false, 'Xoá một bản ghi giữa chuỗi bị phát hiện qua số thứ tự');
 
-  db.prepare(
+  await db.prepare(
     `INSERT INTO audit_logs (id, transaction_id, sequence_no, actor_id, action, old_status, new_status,
        event_data, previous_hash, current_hash, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`

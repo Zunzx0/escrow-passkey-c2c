@@ -20,21 +20,21 @@ const { logSecurityEvent, EVENTS } = require('./securityEvents');
 
 const DEFAULT_MIN_AGE_SECONDS = parseInt(process.env.RECONCILE_MIN_AGE_SECONDS || '30', 10);
 
-function markAttempt(id) {
+async function markAttempt(id) {
   // Chỉ là vết vận hành: không tăng version, nên không bao giờ làm hỏng lượt tất toán đang chạy
   // song song ở webhook.
-  db.prepare(
+  await db.prepare(
     `UPDATE payment_requests SET reconcile_attempts = reconcile_attempts + 1, last_reconciled_at = ?
      WHERE id = ? AND status = 'PENDING'`
   ).run(nowIso(), id);
 }
 
-function recordError(id, message) {
-  db.prepare('UPDATE payment_requests SET last_reconcile_error = ? WHERE id = ?').run(String(message).slice(0, 300), id);
+async function recordError(id, message) {
+  await db.prepare('UPDATE payment_requests SET last_reconcile_error = ? WHERE id = ?').run(String(message).slice(0, 300), id);
 }
 
-function clearError(id) {
-  db.prepare('UPDATE payment_requests SET last_reconcile_error = NULL WHERE id = ? AND last_reconcile_error IS NOT NULL').run(id);
+async function clearError(id) {
+  await db.prepare('UPDATE payment_requests SET last_reconcile_error = NULL WHERE id = ? AND last_reconcile_error IS NOT NULL').run(id);
 }
 
 /**
@@ -55,9 +55,9 @@ async function reconcileOnce({
 } = {}) {
   const cutoff = new Date(Date.now() - minAgeSeconds * 1000).toISOString();
   const pending = paymentRequestId
-    ? db.prepare(`SELECT * FROM payment_requests WHERE id = ? AND status = 'PENDING' AND created_at <= ?`)
+    ? await db.prepare(`SELECT * FROM payment_requests WHERE id = ? AND status = 'PENDING' AND created_at <= ?`)
       .all(paymentRequestId, cutoff)
-    : db.prepare(
+    : await db.prepare(
       `SELECT * FROM payment_requests WHERE status = 'PENDING' AND created_at <= ?
        ORDER BY created_at ASC LIMIT ?`
     ).all(cutoff, limit);
@@ -65,19 +65,19 @@ async function reconcileOnce({
   const summary = { scanned: pending.length, applied: 0, duplicate: 0, conflict: 0, stillPending: 0, errors: 0, results: [] };
 
   for (const pr of pending) {
-    markAttempt(pr.id);
+    await markAttempt(pr.id);
     if (onQuery) onQuery(pr.id);
 
     let answer;
     try {
       answer = await provider.queryStatus(pr.provider_ref);
     } catch (e) {
-      recordError(pr.id, `${e.code || 'PROVIDER_ERROR'}: ${e.message}`);
+      await recordError(pr.id, `${e.code || 'PROVIDER_ERROR'}: ${e.message}`);
       summary.errors += 1;
       summary.results.push({ id: pr.id, outcome: 'PROVIDER_ERROR', error: e.code || e.message });
       continue;
     }
-    clearError(pr.id);
+    await clearError(pr.id);
 
     if (answer.status === 'PENDING') {
       summary.stillPending += 1;
@@ -86,7 +86,7 @@ async function reconcileOnce({
     }
 
     try {
-      const result = applyProviderResult({
+      const result = await applyProviderResult({
         paymentRequestId: pr.id,
         providerRef: pr.provider_ref,
         status: answer.status,
@@ -99,7 +99,7 @@ async function reconcileOnce({
       if (result.outcome === 'CONFLICT') {
         // Provider và phía ta nói hai điều khác nhau về cùng một khoản tiền: phải để lại vết để
         // người vận hành đối chiếu tay. Tuyệt đối không tự ghi đè bên nào.
-        logSecurityEvent(null, {
+        await logSecurityEvent(null, {
           type: EVENTS.RECONCILE_CONFLICT,
           outcome: 'DENIED',
           detail: { paymentRequestId: pr.id, reason: result.reason, source: 'RECONCILER' },
@@ -108,7 +108,7 @@ async function reconcileOnce({
     } catch (e) {
       // Ví dụ: xung đột phiên bản ví với một thao tác khác. Giao dịch đã rollback toàn bộ, yêu
       // cầu vẫn PENDING — lượt sau thử lại.
-      recordError(pr.id, `${e.code || 'APPLY_ERROR'}: ${e.message}`);
+      await recordError(pr.id, `${e.code || 'APPLY_ERROR'}: ${e.message}`);
       summary.errors += 1;
       summary.results.push({ id: pr.id, outcome: 'APPLY_ERROR', error: e.code || e.message });
     }

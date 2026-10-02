@@ -70,7 +70,7 @@ const TXN_DETAIL = `
   LEFT JOIN listings l ON l.id = t.listing_id
 `;
 
-function loadTxnDetail(id) {
+async function loadTxnDetail(id) {
   return db.prepare(`${TXN_DETAIL} WHERE t.id = ?`).get(id);
 }
 
@@ -97,24 +97,26 @@ const DISPUTE_SELECT = `
   JOIN transactions t ON t.id = d.transaction_id
 `;
 
-router.get('/disputes', (req, res) => {
+router.get('/disputes', async (req, res) => {
   const { status } = req.query;
   const rows = status
-    ? db.prepare(`${DISPUTE_SELECT} WHERE d.status = ? ORDER BY d.created_at DESC`).all(status)
-    : db.prepare(`${DISPUTE_SELECT} ORDER BY d.created_at DESC`).all();
-  res.json({
-    disputes: rows.map((d) => ({
+    ? await db.prepare(`${DISPUTE_SELECT} WHERE d.status = ? ORDER BY d.created_at DESC`).all(status)
+    : await db.prepare(`${DISPUTE_SELECT} ORDER BY d.created_at DESC`).all();
+  const disputes = [];
+  for (const d of rows) {
+    disputes.push({
       ...serializeDispute(d),
-      transaction: serializeTxn(loadTxnDetail(d.transaction_id)),
-    })),
-  });
+      transaction: serializeTxn(await loadTxnDetail(d.transaction_id)),
+    });
+  }
+  res.json({ disputes });
 });
 
-router.get('/disputes/:id', (req, res, next) => {
+router.get('/disputes/:id', async (req, res, next) => {
   try {
-    const dispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
+    const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
-    res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(loadTxnDetail(dispute.transaction_id)) });
+    res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
   } catch (e) {
     next(e);
   }
@@ -168,12 +170,12 @@ function parseDecision(raw) {
 }
 
 /** Nạp hồ sơ tranh chấp cùng giao dịch, và kiểm cặp trạng thái bắt buộc của luồng phân xử. */
-function loadOpenDisputeForAdjudication(disputeId) {
-  const dispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(disputeId);
+async function loadOpenDisputeForAdjudication(disputeId) {
+  const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(disputeId);
   if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND', 'Không tìm thấy hồ sơ tranh chấp');
   if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp phải đang mở');
 
-  const txn = db.prepare('SELECT * FROM transactions WHERE id = ?').get(dispute.transaction_id);
+  const txn = await db.prepare('SELECT * FROM transactions WHERE id = ?').get(dispute.transaction_id);
   if (!txn) throw new AppError(404, 'TRANSACTION_NOT_FOUND', 'Không tìm thấy giao dịch');
   if (txn.status !== 'DISPUTED' || txn.escrow_status !== 'FROZEN') {
     throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở DISPUTED + FROZEN');
@@ -184,9 +186,9 @@ function loadOpenDisputeForAdjudication(disputeId) {
 router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, next) => {
   try {
     const decision = parseDecision((req.body || {}).decision);
-    const { dispute, txn } = loadOpenDisputeForAdjudication(req.params.id);
+    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
 
-    const credentials = db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
+    const credentials = await db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản quản trị chưa có Passkey');
 
     const context = buildAdjudicationContext(dispute, txn, decision, req.user.id);
@@ -204,7 +206,7 @@ router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, n
 
     const sessionId = uuid();
     const expiresAt = new Date(Date.now() + REAUTH_TTL_SECONDS * 1000).toISOString();
-    db.prepare(
+    await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, ?, ?, ?, 'REAUTH', ?, ?)`
     ).run(sessionId, req.user.id, txn.id, options.challenge, JSON.stringify(context), expiresAt);
@@ -223,9 +225,9 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
     }
 
-    const { dispute, txn } = loadOpenDisputeForAdjudication(req.params.id);
+    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
 
-    const challengeRow = db
+    const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REAUTH' AND transaction_id = ? AND user_id = ?`)
       .get(reauthSessionId, txn.id, req.user.id);
     if (!challengeRow) throw new AppError(400, 'CHALLENGE_NOT_FOUND', 'Phiên xác thực lại không hợp lệ');
@@ -249,7 +251,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
       throw new AppError(409, 'CONTEXT_MISMATCH', 'Nội dung hồ sơ đã thay đổi kể từ lúc bắt đầu xác thực.');
     }
 
-    const credential = db
+    const credential = await db
       .prepare('SELECT * FROM passkey_credentials WHERE user_id = ? AND credential_id = ?')
       .get(req.user.id, response.id);
     if (!credential) throw new AppError(400, 'NO_CREDENTIAL', 'Passkey này không thuộc tài khoản của bạn');
@@ -276,14 +278,20 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
 
     const counterCheck = assessCounter(credential, verification.authenticationInfo.newCounter);
     let issued;
-    db.transaction(() => {
-      db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
+    await db.transaction(async () => {
+      // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì chỉ
+      // một request đổi được used_at. Phép kiểm used_at ở trên nằm TRƯỚC bước await xác minh
+      // WebAuthn nên không đủ để chặn phát lại đồng thời.
+      const consumed = await db
+        .prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ? AND used_at IS NULL')
+        .run(nowIso(), challengeRow.id);
+      if (consumed.changes !== 1) throw new AppError(400, 'CHALLENGE_REPLAY', 'Challenge đã dùng');
+      await db.prepare('UPDATE passkey_credentials SET counter = ?, last_used_at = ? WHERE id = ?').run(
         counterCheck.stored,
         nowIso(),
         credential.id
       );
-      db.prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ?').run(nowIso(), challengeRow.id);
-      issued = issueGrant({
+      issued = await issueGrant({
         userId: req.user.id,
         sessionId: req.user.sessionId,
         transactionId: txn.id,
@@ -293,7 +301,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
         contextHash: contextDigest(currentContext),
       });
     })();
-    reportCounterAnomaly(req, credential, counterCheck);
+    await reportCounterAnomaly(req, credential, counterCheck);
 
     res.json({
       reauthGrant: issued.rawToken,
@@ -314,10 +322,10 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
  * và chưa tiêu thụ; (5) phiếu đúng quản trị viên, đúng giao dịch, đúng hồ sơ và ĐÚNG QUYẾT
  * ĐỊNH; (6) ngữ cảnh hiện tại khớp ngữ cảnh đã uỷ quyền.
  */
-function authorizeAdjudication(req, decision) {
-  const { dispute, txn } = loadOpenDisputeForAdjudication(req.params.id);
+async function authorizeAdjudication(req, decision) {
+  const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
 
-  const grant = requireGrant({
+  const grant = await requireGrant({
     userId: req.user.id,
     sessionId: req.user.sessionId,
     transactionId: txn.id,
@@ -335,12 +343,12 @@ function authorizeAdjudication(req, decision) {
   return { dispute, txn, grant };
 }
 
-router.post('/disputes/:id/refund', sensitiveLimiter, (req, res, next) => {
+router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => {
   try {
     const { requestId } = req.body || {};
     if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
 
-    const dispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
+    const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
     if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
 
@@ -351,22 +359,23 @@ router.post('/disputes/:id/refund', sensitiveLimiter, (req, res, next) => {
       amount: null,
     });
     const escrowLegKey = `refund:${requestId}:escrow`;
-    if (checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(loadTxnDetail(dispute.transaction_id)) });
+    if (await checkIdempotency(escrowLegKey, fingerprint)) {
+      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
     }
 
     // Sáu điều kiện của lệnh phân xử, gồm cả phiếu uỷ quyền ràng buộc đúng quyết định REFUND.
-    const { txn, grant } = authorizeAdjudication(req, DECISIONS.REFUND);
+    const { txn, grant } = await authorizeAdjudication(req, DECISIONS.REFUND);
 
-    const escrowWallet = getEscrowWallet();
-    const buyerWallet = getUserWallet(txn.buyer_id);
-
-    const runTxn = db.transaction(() => {
-      const updated = applyOrderedWalletUpdates([
+    const runTxn = db.transaction(async () => {
+      // Đọc ví BÊN TRONG giao dịch: ví ký quỹ dùng chung cho mọi đơn, đọc ở ngoài thì một thao
+      // tác khác chen vào giữa lúc đọc và lúc ghi sẽ làm version cũ, gây xung đột giả.
+      const escrowWallet = await getEscrowWallet();
+      const buyerWallet = await getUserWallet(txn.buyer_id);
+      const updated = await applyOrderedWalletUpdates([
         { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
         { wallet: buyerWallet, availableDelta: txn.amount, lockedDelta: 0 },
       ], 'admin-refund');
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: escrowWallet.id,
         transactionId: txn.id,
         requestId,
@@ -378,7 +387,7 @@ router.post('/disputes/:id/refund', sensitiveLimiter, (req, res, next) => {
         requestFingerprint: fingerprint,
         description: 'Admin hoàn tiền từ Escrow',
       });
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: buyerWallet.id,
         transactionId: txn.id,
         requestId,
@@ -391,16 +400,16 @@ router.post('/disputes/:id/refund', sensitiveLimiter, (req, res, next) => {
         description: 'Người mua nhận hoàn tiền',
       });
 
-      applyTransactionStatus(txn, { status: 'REFUNDED', escrowStatus: 'REFUNDED' });
-      db.prepare(
+      await applyTransactionStatus(txn, { status: 'REFUNDED', escrowStatus: 'REFUNDED' });
+      await db.prepare(
         `UPDATE disputes SET status = 'RESOLVED_REFUND', admin_id = ?, admin_decision = 'REFUND', resolved_at = ? WHERE id = ?`
       ).run(req.user.id, nowIso(), dispute.id);
 
       // Tiêu thụ phiếu trong CÙNG giao dịch cơ sở dữ liệu thực hiện việc chuyển tiền, nên
       // không có khoảnh khắc nào phiếu vừa còn hiệu lực vừa đã được dùng.
-      markGrantUsed(grant.id);
+      await markGrantUsed(grant.id);
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'ADMIN_REFUND',
@@ -409,27 +418,27 @@ router.post('/disputes/:id/refund', sensitiveLimiter, (req, res, next) => {
         eventData: { amount: txn.amount, requestId, disputeId: dispute.id, decision: 'REFUND' },
       });
     });
-    runTxn();
-    onDisputeResolved(txn, 'REFUND');
+    await runTxn();
+    await onDisputeResolved(txn, 'REFUND');
 
-    logSecurityEvent(req, {
+    await logSecurityEvent(req, {
       type: EVENTS.ADMIN_ADJUDICATION, outcome: 'ALLOWED', statusCode: 200,
       detail: { decision: 'REFUND', transactionId: txn.id, disputeId: dispute.id },
     });
 
-    const updatedDispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
-    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(loadTxnDetail(txn.id)) });
+    const updatedDispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
+    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(await loadTxnDetail(txn.id)) });
   } catch (e) {
     next(e);
   }
 });
 
-router.post('/disputes/:id/release', sensitiveLimiter, (req, res, next) => {
+router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) => {
   try {
     const { requestId } = req.body || {};
     if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
 
-    const dispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
+    const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
     if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
 
@@ -440,24 +449,24 @@ router.post('/disputes/:id/release', sensitiveLimiter, (req, res, next) => {
       amount: null,
     });
     const escrowLegKey = `release:${requestId}:escrow`;
-    if (checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(loadTxnDetail(dispute.transaction_id)) });
+    if (await checkIdempotency(escrowLegKey, fingerprint)) {
+      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
     }
 
     // Sáu điều kiện của lệnh phân xử, gồm cả phiếu uỷ quyền ràng buộc đúng quyết định RELEASE.
     // Một phiếu cấp cho hướng hoàn tiền KHÔNG lọt qua đây, vì decision nằm trong mệnh đề WHERE
     // của phép tra phiếu.
-    const { txn, grant } = authorizeAdjudication(req, DECISIONS.RELEASE);
+    const { txn, grant } = await authorizeAdjudication(req, DECISIONS.RELEASE);
 
-    const escrowWallet = getEscrowWallet();
-    const sellerWallet = getUserWallet(txn.seller_id);
-
-    const runTxn = db.transaction(() => {
-      const updated = applyOrderedWalletUpdates([
+    const runTxn = db.transaction(async () => {
+      // Đọc ví BÊN TRONG giao dịch, cùng lý do như ở lệnh hoàn tiền.
+      const escrowWallet = await getEscrowWallet();
+      const sellerWallet = await getUserWallet(txn.seller_id);
+      const updated = await applyOrderedWalletUpdates([
         { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
         { wallet: sellerWallet, availableDelta: txn.amount, lockedDelta: 0 },
       ], 'admin-release');
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: escrowWallet.id,
         transactionId: txn.id,
         requestId,
@@ -469,7 +478,7 @@ router.post('/disputes/:id/release', sensitiveLimiter, (req, res, next) => {
         requestFingerprint: fingerprint,
         description: 'Admin giải ngân từ Escrow',
       });
-      insertWalletEntry({
+      await insertWalletEntry({
         walletId: sellerWallet.id,
         transactionId: txn.id,
         requestId,
@@ -482,14 +491,14 @@ router.post('/disputes/:id/release', sensitiveLimiter, (req, res, next) => {
         description: 'Người bán nhận giải ngân do Admin quyết định',
       });
 
-      applyTransactionStatus(txn, { status: 'RELEASED', escrowStatus: 'RELEASED' });
-      db.prepare(
+      await applyTransactionStatus(txn, { status: 'RELEASED', escrowStatus: 'RELEASED' });
+      await db.prepare(
         `UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_id = ?, admin_decision = 'RELEASE', resolved_at = ? WHERE id = ?`
       ).run(req.user.id, nowIso(), dispute.id);
 
-      markGrantUsed(grant.id);
+      await markGrantUsed(grant.id);
 
-      appendAuditLog(db, {
+      await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
         action: 'ADMIN_RELEASE',
@@ -498,16 +507,16 @@ router.post('/disputes/:id/release', sensitiveLimiter, (req, res, next) => {
         eventData: { amount: txn.amount, requestId, disputeId: dispute.id, decision: 'RELEASE' },
       });
     });
-    runTxn();
-    onDisputeResolved(txn, 'RELEASE');
+    await runTxn();
+    await onDisputeResolved(txn, 'RELEASE');
 
-    logSecurityEvent(req, {
+    await logSecurityEvent(req, {
       type: EVENTS.ADMIN_ADJUDICATION, outcome: 'ALLOWED', statusCode: 200,
       detail: { decision: 'RELEASE', transactionId: txn.id, disputeId: dispute.id },
     });
 
-    const updatedDispute = db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
-    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(loadTxnDetail(txn.id)) });
+    const updatedDispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
+    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(await loadTxnDetail(txn.id)) });
   } catch (e) {
     next(e);
   }
@@ -531,8 +540,8 @@ const SELLER_REQUEST_SELECT = `
   LEFT JOIN users rv ON rv.id = sr.reviewed_by
 `;
 
-router.get('/seller-requests', (req, res) => {
-  const rows = db
+router.get('/seller-requests', async (req, res) => {
+  const rows = await db
     .prepare(
       `${SELLER_REQUEST_SELECT}
        ORDER BY CASE sr.status WHEN 'PENDING' THEN 0 ELSE 1 END, sr.created_at DESC
@@ -545,8 +554,8 @@ router.get('/seller-requests', (req, res) => {
   });
 });
 
-function reviewSellerRequest(req, decision) {
-  const row = db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(req.params.id);
+async function reviewSellerRequest(req, decision) {
+  const row = await db.prepare('SELECT * FROM seller_requests WHERE id = ?').get(req.params.id);
   if (!row) throw new AppError(404, 'REQUEST_NOT_FOUND', 'Không tìm thấy yêu cầu');
   if (row.status !== 'PENDING') {
     throw new AppError(409, 'REQUEST_ALREADY_REVIEWED', 'Yêu cầu này đã được xử lý trước đó');
@@ -558,9 +567,9 @@ function reviewSellerRequest(req, decision) {
   }
 
   const now = nowIso();
-  db.transaction(() => {
+  await db.transaction(async () => {
     // Điều kiện đặt hết trong WHERE: hai admin bấm duyệt cùng lúc thì chỉ một người thắng.
-    const updated = db
+    const updated = await db
       .prepare(
         `UPDATE seller_requests
          SET status = ?, review_note = ?, reviewed_by = ?, reviewed_at = ?, updated_at = ?
@@ -574,7 +583,7 @@ function reviewSellerRequest(req, decision) {
     if (decision === 'APPROVED') {
       // Chỉ nâng đúng tài khoản đang là BUYER. Nếu vì lý do nào đó họ đã là SELLER/ADMIN
       // thì bỏ qua, không hạ quyền ai.
-      const promoted = db
+      const promoted = await db
         .prepare(`UPDATE users SET role = 'SELLER', updated_at = ? WHERE id = ? AND role = 'BUYER'`)
         .run(now, row.user_id);
       if (promoted.changes !== 1) {
@@ -586,17 +595,17 @@ function reviewSellerRequest(req, decision) {
   return db.prepare(`${SELLER_REQUEST_SELECT} WHERE sr.id = ?`).get(row.id);
 }
 
-router.post('/seller-requests/:id/approve', (req, res, next) => {
+router.post('/seller-requests/:id/approve', async (req, res, next) => {
   try {
-    res.json({ request: serializeSellerRequest(reviewSellerRequest(req, 'APPROVED')) });
+    res.json({ request: serializeSellerRequest(await reviewSellerRequest(req, 'APPROVED')) });
   } catch (e) {
     next(e);
   }
 });
 
-router.post('/seller-requests/:id/reject', (req, res, next) => {
+router.post('/seller-requests/:id/reject', async (req, res, next) => {
   try {
-    res.json({ request: serializeSellerRequest(reviewSellerRequest(req, 'REJECTED')) });
+    res.json({ request: serializeSellerRequest(await reviewSellerRequest(req, 'REJECTED')) });
   } catch (e) {
     next(e);
   }
@@ -604,8 +613,8 @@ router.post('/seller-requests/:id/reject', (req, res, next) => {
 
 // ---------- Danh sách người dùng (để Admin nắm ai đang có vai trò gì) ----------
 
-router.get('/users', (req, res) => {
-  const rows = db
+router.get('/users', async (req, res) => {
+  const rows = await db
     .prepare(
       `SELECT u.id, u.username, u.display_name, u.role, u.is_active, u.created_at,
               (SELECT COUNT(*) FROM listings l WHERE l.seller_id = u.id) AS listing_count
@@ -627,8 +636,8 @@ router.get('/users', (req, res) => {
 
 // ---------- UC11: Hash Chain ----------
 
-router.get('/transactions/:id/logs', (req, res) => {
-  const logs = db
+router.get('/transactions/:id/logs', async (req, res) => {
+  const logs = await db
     .prepare('SELECT * FROM audit_logs WHERE transaction_id = ? ORDER BY id ASC')
     .all(req.params.id);
   res.json({
@@ -646,8 +655,8 @@ router.get('/transactions/:id/logs', (req, res) => {
   });
 });
 
-router.get('/transactions/:id/logs/verify', (req, res) => {
-  const result = verifyChain(db, req.params.id);
+router.get('/transactions/:id/logs/verify', async (req, res) => {
+  const result = await verifyChain(db, req.params.id);
   res.json(result);
 });
 
@@ -655,18 +664,18 @@ router.get('/transactions/:id/logs/verify', (req, res) => {
 //
 // Cùng một hàm mà bộ kiểm thử gọi sau mỗi testcase, mở thêm ở đây để buổi bảo vệ có thể
 // chứng minh trạng thái hệ thống bằng dữ liệu ngay trên màn hình thay vì bằng lời.
-router.get('/invariants', (req, res) => {
-  res.json(checkInvariants(db));
+router.get('/invariants', async (req, res) => {
+  res.json(await checkInvariants(db));
 });
 
 // ---------- Nhật ký sự kiện an toàn ----------
 //
 // Tách khỏi nhật ký giao dịch vì trả lời câu hỏi khác: ai đã THỬ làm gì mà bị từ chối. Phần
 // lớn sự kiện ở đây không gắn với giao dịch nào, nên không thuộc về chuỗi băm của giao dịch.
-router.get('/security-events', (req, res) => {
+router.get('/security-events', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '100', 10) || 100, 500);
   const type = req.query.type ? String(req.query.type) : null;
-  res.json({ events: listSecurityEvents({ limit, type }) });
+  res.json({ events: await listSecurityEvents({ limit, type }) });
 });
 
 module.exports = router;

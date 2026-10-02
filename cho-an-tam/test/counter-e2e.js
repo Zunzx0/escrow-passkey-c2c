@@ -38,10 +38,10 @@ function section(title) { console.log(`\n${title}`); }
 function credentialOf(userId) {
   return db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').get(userId);
 }
-function anomalyEvents(credentialId) {
-  return db
+async function anomalyEvents(credentialId) {
+  return (await db
     .prepare(`SELECT * FROM security_events WHERE event_type = 'COUNTER_ANOMALY' AND detail LIKE ? ORDER BY id ASC`)
-    .all(`%${credentialId}%`)
+    .all(`%${credentialId}%`))
     .map((e) => ({ ...e, detail: JSON.parse(e.detail) }));
 }
 
@@ -52,19 +52,19 @@ async function main() {
   // Người dùng A: Passkey đồng bộ, luôn báo 0.
   const authA = createAuthenticator({ zeroCounter: true });
   const userA = await flows.registerUser({ username: `cnt_a_${rand}`, displayName: 'Counter A', authenticator: authA });
-  const credA = credentialOf(userA.user.id);
+  const credA = await credentialOf(userA.user.id);
 
   // Người dùng B: bắt đầu ở 0 rồi đếm thật — dùng cho mọi ca còn lại.
   const authB = createAuthenticator({ zeroCounter: true });
   const userB = await flows.registerUser({ username: `cnt_b_${rand}`, displayName: 'Counter B', authenticator: authB });
-  const credB = credentialOf(userB.user.id);
+  const credB = await credentialOf(userB.user.id);
 
   async function loginB(nextCounter, label) {
     if (nextCounter !== null) authB.forceNextCounter(nextCounter);
-    const before = anomalyEvents(credB.credential_id).length;
+    const before = (await anomalyEvents(credB.credential_id)).length;
     const r = await flows.loginPasskey(authB);
-    const after = anomalyEvents(credB.credential_id);
-    return { r, newAnomalies: after.length - before, last: after[after.length - 1], stored: credentialOf(userB.user.id).counter, label };
+    const after = await anomalyEvents(credB.credential_id);
+    return { r, newAnomalies: after.length - before, last: after[after.length - 1], stored: (await credentialOf(userB.user.id)).counter, label };
   }
 
   // ---------------------------------------------------------------------- C01
@@ -73,8 +73,8 @@ async function main() {
     assert(credA.counter === 0, 'Đăng ký xong, counter lưu = 0');
     const r = await flows.loginPasskey(authA);
     assert(r.status === 200 && !!r.data.token, `Đăng nhập thành công (nhận ${r.status})`);
-    assert(credentialOf(userA.user.id).counter === 0, 'Counter vẫn lưu = 0');
-    assert(anomalyEvents(credA.credential_id).length === 0, 'KHÔNG ghi COUNTER_ANOMALY');
+    assert((await credentialOf(userA.user.id)).counter === 0, 'Counter vẫn lưu = 0');
+    assert((await anomalyEvents(credA.credential_id)).length === 0, 'KHÔNG ghi COUNTER_ANOMALY');
   }
 
   // ---------------------------------------------------------------------- C02
@@ -105,7 +105,7 @@ async function main() {
     assert(x.last && x.last.actor_id === userB.user.id, 'Sự kiện ghi đúng người dùng');
     assert(x.last && x.last.outcome === 'ALLOWED', 'Sự kiện đánh dấu ALLOWED — lần xác thực được chấp nhận');
     assert(x.stored === 6, `Counter lưu giữ nguyên mức cao nhất = 6 (thực tế ${x.stored})`);
-    assert(credentialOf(userB.user.id).id === credB.id, 'Credential KHÔNG bị xoá hay khoá');
+    assert((await credentialOf(userB.user.id)).id === credB.id, 'Credential KHÔNG bị xoá hay khoá');
   }
 
   // ---------------------------------------------------------------------- C05
@@ -140,9 +140,9 @@ async function main() {
   section('C08: Bất thường ở lối xác thực lại — vẫn cấp phiếu, vẫn ghi nhận');
   {
     authB.forceNextCounter(7); // N -> N
-    const before = anomalyEvents(credB.credential_id).length;
+    const before = (await anomalyEvents(credB.credential_id)).length;
     const grant = await flows.accountGrant(userB.token, authB, 'MANAGE_CREDENTIAL');
-    const events = anomalyEvents(credB.credential_id);
+    const events = await anomalyEvents(credB.credential_id);
     assert(grant.status === 200 && !!grant.data.reauthGrant, `Xác thực lại VẪN cấp phiếu uỷ quyền (nhận ${grant.status})`);
     assert(events.length - before === 1, 'Ghi đúng 1 sự kiện COUNTER_ANOMALY ở lối xác thực lại');
     const last = events[events.length - 1];

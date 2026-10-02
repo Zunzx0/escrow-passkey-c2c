@@ -26,9 +26,9 @@ function assessCounter(credential, newCounter) {
 }
 
 /** Ghi sự kiện nếu có bất thường. Gọi SAU khi giao dịch cơ sở dữ liệu của lần xác thực đã commit. */
-function reportCounterAnomaly(req, credential, check) {
+async function reportCounterAnomaly(req, credential, check) {
   if (!check.anomaly) return;
-  logSecurityEvent(req, {
+  await logSecurityEvent(req, {
     type: EVENTS.COUNTER_ANOMALY,
     // Lần xác thực vẫn được CHẤP NHẬN — sự kiện chỉ đánh dấu để người vận hành xem xét.
     outcome: 'ALLOWED',

@@ -17,15 +17,15 @@ const { db } = require('../db');
 
 const DEFAULT_GRACE_SECONDS = parseInt(process.env.CHALLENGE_CLEANUP_GRACE_SECONDS || '3600', 10);
 
-function cleanupChallenges({ graceSeconds = DEFAULT_GRACE_SECONDS, now = Date.now() } = {}) {
+async function cleanupChallenges({ graceSeconds = DEFAULT_GRACE_SECONDS, now = Date.now() } = {}) {
   const threshold = new Date(now - graceSeconds * 1000).toISOString();
   let deletedExpired = 0;
   let deletedUsed = 0;
-  db.transaction(() => {
-    deletedExpired = db.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(threshold).changes;
-    deletedUsed = db
+  await db.transaction(async () => {
+    deletedExpired = (await db.prepare('DELETE FROM auth_challenges WHERE expires_at < ?').run(threshold)).changes;
+    deletedUsed = (await db
       .prepare('DELETE FROM auth_challenges WHERE used_at IS NOT NULL AND used_at < ?')
-      .run(threshold).changes;
+      .run(threshold)).changes;
   })();
   return { deletedExpired, deletedUsed, threshold };
 }

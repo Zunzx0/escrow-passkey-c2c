@@ -147,14 +147,19 @@ const App = (() => {
 
   function $(sel, root) { return (root || document).querySelector(sel); }
 
+  // Gốc địa chỉ của API, do js/config.js quyết định: '' khi giao diện và API cùng một máy chủ,
+  // https://api.enclave.id.vn khi giao diện chạy trên Vercel.
+  const API_BASE = window.ENCLAVE_API_BASE || '';
+
   // Access token sống ngắn; khi hết hạn thì xin token mới bằng cookie làm mới (HttpOnly, trang
   // không đọc được). Nhiều request cùng gặp 401 thì chỉ làm mới một lần.
+  // credentials: 'include' vì cookie làm mới thuộc về origin của API, có thể khác origin của trang.
   let refreshing = null;
   function refreshSession() {
     if (!refreshing) {
       refreshing = (async () => {
         try {
-          const res = await fetch('/api/passkeys/session/refresh', { method: 'POST', credentials: 'same-origin' });
+          const res = await fetch(API_BASE + '/api/passkeys/session/refresh', { method: 'POST', credentials: 'include' });
           if (!res.ok) return false;
           const data = await res.json();
           if (!data.token) return false;
@@ -174,7 +179,7 @@ const App = (() => {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
 
-    const res = await fetch('/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    const res = await fetch(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
     const data = await res.json().catch(() => ({}));
 
     if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
@@ -383,9 +388,9 @@ const App = (() => {
     // Thu hồi phiên ở máy chủ, không chỉ xoá token trong trình duyệt. Lỗi mạng thì vẫn đăng xuất
     // phía máy khách; phiên ở máy chủ sẽ tự hết hạn.
     const token = state.token;
-    fetch('/api/passkeys/session/logout', {
+    fetch(API_BASE + '/api/passkeys/session/logout', {
       method: 'POST',
-      credentials: 'same-origin',
+      credentials: 'include',
       headers: token ? { Authorization: 'Bearer ' + token } : {},
     }).catch(() => {});
     clearSession();
@@ -2194,7 +2199,7 @@ const App = (() => {
     // Cổng giả lập chỉ cho đúng người tạo yêu cầu nạp tiền thao tác, nên phải kèm phiên.
     const headers = body !== undefined ? { 'Content-Type': 'application/json' } : {};
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-    const res = await fetch('/mock-provider' + path, {
+    const res = await fetch(API_BASE + '/mock-provider' + path, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,

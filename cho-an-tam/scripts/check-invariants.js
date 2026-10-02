@@ -13,26 +13,33 @@
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
-const { db, DB_PATH } = require('../src/db');
+const { db, describeDatabase } = require('../src/db');
 const { checkInvariants } = require('../src/lib/invariants');
 
-const result = checkInvariants(db);
+async function main() {
+  const result = await checkInvariants(db);
 
-console.log('');
-console.log(`  Kiểm ${result.checked} bất biến hệ thống`);
-console.log(`  Cơ sở dữ liệu: ${DB_PATH}`);
-console.log('  ' + '-'.repeat(70));
-for (const c of result.checks) {
-  console.log(`   ${c.ok ? 'ĐÚNG' : 'SAI '}  ${c.no}. ${c.name}${c.ok ? '' : ` (${c.violations} vi phạm)`}`);
+  console.log('');
+  console.log(`  Kiểm ${result.checked} bất biến hệ thống`);
+  console.log(`  Cơ sở dữ liệu: ${describeDatabase()}`);
+  console.log('  ' + '-'.repeat(70));
+  for (const c of result.checks) {
+    console.log(`   ${c.ok ? 'ĐÚNG' : 'SAI '}  ${c.no}. ${c.name}${c.ok ? '' : ` (${c.violations} vi phạm)`}`);
+  }
+  console.log('  ' + '-'.repeat(70));
+
+  if (result.ok) {
+    console.log(`  Không có vi phạm nào trên ${result.checked} bất biến.\n`);
+    process.exit(0);
+  }
+
+  console.log(`  Có ${result.violations.length} vi phạm:\n`);
+  for (const v of result.violations) console.log(`   - [${v.invariant}] ${v.detail}`);
+  console.log('');
+  process.exit(1);
 }
-console.log('  ' + '-'.repeat(70));
 
-if (result.ok) {
-  console.log(`  Không có vi phạm nào trên ${result.checked} bất biến.\n`);
-  process.exit(0);
-}
-
-console.log(`  Có ${result.violations.length} vi phạm:\n`);
-for (const v of result.violations) console.log(`   - [${v.invariant}] ${v.detail}`);
-console.log('');
-process.exit(1);
+main().catch((e) => {
+  console.error(e);
+  process.exit(1);
+});

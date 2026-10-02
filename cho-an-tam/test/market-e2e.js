@@ -370,13 +370,13 @@ async function main() {
     assert(losses.every((r) => r.data.error === 'LISTING_SOLD'), 'Request thua đều nhận đúng mã lỗi LISTING_SOLD');
 
     // Kiểm ở DB, không chỉ ở response HTTP.
-    const listingRow = db.prepare('SELECT status, version FROM listings WHERE id = ?').get(raceListingId);
+    const listingRow = await db.prepare('SELECT status, version FROM listings WHERE id = ?').get(raceListingId);
     assert(listingRow.status === 'LOCKED', 'listings.status chuyển đúng sang LOCKED');
     assert(listingRow.version === 1, `listings.version tăng đúng 1 lần (thực tế: ${listingRow.version})`);
 
-    const secureCount = db
+    const secureCount = (await db
       .prepare(`SELECT COUNT(*) AS n FROM transactions WHERE id IN (${orderIds.map(() => '?').join(',')}) AND status = 'SECURED'`)
-      .get(...orderIds).n;
+      .get(...orderIds)).n;
     assert(secureCount === 1, `Chỉ đúng 1 transaction ở SECURED trong số ${N} đơn cạnh tranh (thực tế: ${secureCount})`);
 
     const afterBalances = await Promise.all(raceBuyers.map((b) => api('/api/wallets/me', { token: b.token })));
@@ -390,12 +390,12 @@ async function main() {
     }
     assert(debitedCount === 1, `Chỉ đúng 1 buyer bị trừ tiền trong số ${N} người đua (thực tế: ${debitedCount})`);
 
-    const escrowCreditCount = db
+    const escrowCreditCount = (await db
       .prepare(
         `SELECT COUNT(*) AS n FROM wallet_entries
          WHERE transaction_id IN (${orderIds.map(() => '?').join(',')}) AND entry_type = 'ESCROW_LOCK_CREDIT'`
       )
-      .get(...orderIds).n;
+      .get(...orderIds)).n;
     assert(escrowCreditCount === 1, `Escrow chỉ được cộng tiền đúng 1 lần trong số ${N} người đua (thực tế: ${escrowCreditCount})`);
   }
 
