@@ -107,10 +107,54 @@ app.use((err, req, res, next) => {
   res.status(status).json({ error: err.code || 'BAD_REQUEST', message: err.message || 'Yêu cầu không hợp lệ' });
 });
 
+// ---------------------------------------------------------------------------
+// Khởi tạo quản trị viên đầu tiên lúc khởi động — chỉ dùng cho triển khai KHÔNG có quyền
+// truy cập shell trên máy chủ (ví dụ Render gói free).
+//
+// Đây KHÔNG phải một endpoint HTTP: không có request nào kích hoạt được việc này, chỉ chạy
+// đúng lúc tiến trình khởi động. Chỉ người có quyền vào Render Dashboard mới đặt được hai
+// biến môi trường bên dưới — người dùng cuối, kể cả đang có phiên đăng nhập, không chạm
+// tới được. Bỏ qua hoàn toàn nếu thiếu biến, hoặc nếu hệ thống đã có ít nhất một ADMIN.
+//
+// Sau khi dùng xong, NÊN xoá hai biến này khỏi Render (Settings → Environment) để tránh
+// vô tình tạo lại tài khoản trùng tên nếu DB bị mất và server khởi động lại — script vẫn
+// tự chặn việc này (xem bootstrapAdminFromEnv), nhưng dọn sạch vẫn là thói quen tốt hơn.
+function bootstrapAdminFromEnv() {
+  const username = process.env.ADMIN_BOOTSTRAP_USERNAME;
+  const password = process.env.ADMIN_BOOTSTRAP_PASSWORD;
+  if (!username || !password) return;
+
+  const { db } = require('./db');
+  const alreadyHasAdmin = db.prepare(`SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1`).get();
+  if (alreadyHasAdmin) {
+    console.log('[admin-bootstrap] Đã có ít nhất một ADMIN trong cơ sở dữ liệu — bỏ qua.');
+    return;
+  }
+
+  const { createBootstrapAdmin, BootstrapError } = require('./lib/adminBootstrap');
+  try {
+    const { user } = createBootstrapAdmin({
+      username,
+      displayName: process.env.ADMIN_BOOTSTRAP_DISPLAY_NAME || 'Quản trị viên',
+      temporaryPassword: password,
+    });
+    console.log(`[admin-bootstrap] Đã tạo quản trị viên "${user.username}" ở trạng thái chờ thiết lập.`);
+    console.log('[admin-bootstrap] Đăng nhập bằng mật khẩu đã đặt trong ADMIN_BOOTSTRAP_PASSWORD, ');
+    console.log('[admin-bootstrap] đổi mật khẩu rồi đăng ký Passkey đầu tiên để kích hoạt quyền quản trị.');
+  } catch (e) {
+    if (e instanceof BootstrapError) {
+      console.error(`[admin-bootstrap] Không tạo được: [${e.code}] ${e.message}`);
+    } else {
+      throw e;
+    }
+  }
+}
+
 const { startBackgroundJobs } = require('./lib/backgroundJobs');
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
+  bootstrapAdminFromEnv();
   const jobs = startBackgroundJobs();
   console.log(`\nChợ An Tâm — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:${PORT}`);
   console.log(`   WEBAUTHN_RP_ID=${RP_ID}  WEBAUTHN_ORIGIN=${ORIGIN}`);
