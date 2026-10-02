@@ -23,12 +23,24 @@ const {
 const { db, uuid, nowIso } = require('../db');
 const {
   signAccessToken,
+  startSession,
+  loadUserFromToken,
   requireAuth,
   requireEnrollAuth,
   requireAccountStatus,
   scopeForStatus,
 } = require('../lib/auth');
-const { rateLimit } = require('../lib/rateLimit');
+const {
+  revokeSession,
+  revokeAllSessions,
+  revokeByRefreshToken,
+  rotateRefreshToken,
+  setRefreshCookie,
+  clearRefreshCookie,
+  readRefreshCookie,
+} = require('../lib/session');
+const loginThrottle = require('../lib/loginThrottle');
+const { rateLimit, probeCounter } = require('../lib/rateLimit');
 const {
   ACTIONS,
   ACCOUNT_ACTIONS,
@@ -52,6 +64,20 @@ const RATE_LIMIT_AUTH_PER_MINUTE = parseInt(process.env.RATE_LIMIT_AUTH_PER_MINU
 
 const authLimiter = rateLimit({ perMinute: RATE_LIMIT_AUTH_PER_MINUTE });
 
+// Phản hồi "tên đăng nhập đã tồn tại" vẫn giữ để người dùng thật biết đổi tên khác, nhưng mỗi
+// IP chỉ được nhận nó vài lần mỗi giờ; quá ngưỡng thì cả điểm đăng ký bị chặn với IP đó.
+const usernameProbes = probeCounter({
+  limit: parseInt(process.env.USERNAME_PROBE_LIMIT_PER_HOUR || '8', 10),
+  name: 'register-username-taken',
+});
+
+function tooManyRequests(code, message, retryAfter, res) {
+  res.setHeader('Retry-After', String(retryAfter));
+  const err = new AppError(429, code, message);
+  err.securityDetail = { retryAfter };
+  return err;
+}
+
 function expiresAtIso() {
   return new Date(Date.now() + CHALLENGE_TTL_SECONDS * 1000).toISOString();
 }
@@ -70,9 +96,16 @@ function loadUserRow(id) {
   return db.prepare('SELECT * FROM users WHERE id = ?').get(id);
 }
 
-function issueSession(row) {
+/**
+ * Cấp access token. Không truyền sessionId thì mở phiên mới (đăng nhập, đăng ký); truyền thì
+ * cấp token mới cho đúng phiên đang có (kích hoạt tài khoản, làm mới, đổi mật khẩu).
+ */
+function issueSession(req, res, row, { sessionId } = {}) {
   const scope = scopeForStatus(row.account_status);
-  return { token: signAccessToken(row, scope), scope, user: publicUser(row) };
+  const token = sessionId
+    ? signAccessToken(row, scope, sessionId)
+    : startSession(req, res, row, scope).token;
+  return { token, scope, user: publicUser(row) };
 }
 
 // ---------- Bước 1 của đăng ký: tạo tài khoản bằng mật khẩu ----------
@@ -87,6 +120,16 @@ function issueSession(row) {
 
 router.post('/register/account', authLimiter, (req, res, next) => {
   try {
+    const probeWait = usernameProbes.blockedFor(req);
+    if (probeWait) {
+      throw tooManyRequests(
+        'USERNAME_PROBE_LIMITED',
+        `Bạn đã thử quá nhiều tên đăng nhập đã có người dùng. Thử lại sau ${probeWait} giây.`,
+        probeWait,
+        res
+      );
+    }
+
     const { username, displayName, password } = req.body || {};
     if (!username || !displayName || !password) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu username, displayName hoặc password');
@@ -106,6 +149,7 @@ router.post('/register/account', authLimiter, (req, res, next) => {
     assertPasswordPolicy(password);
 
     if (db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername)) {
+      usernameProbes.hit(req);
       throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
     }
 
@@ -116,7 +160,7 @@ router.post('/register/account', authLimiter, (req, res, next) => {
        VALUES (?, ?, ?, 'BUYER', ?, 'PENDING_PASSKEY', 0, ?, ?)`
     ).run(userId, cleanUsername, cleanDisplayName, hashPassword(password), now, now);
 
-    const session = issueSession(loadUserRow(userId));
+    const session = issueSession(req, res, loadUserRow(userId));
     res.status(201).json({
       ...session,
       nextStep: 'REGISTER_PASSKEY',
@@ -275,7 +319,7 @@ router.post(
         type: EVENTS.ACCOUNT_ACTIVATED, outcome: 'ALLOWED', statusCode: 201,
         detail: { accountStatus: 'ACTIVE' },
       });
-      res.status(201).json(issueSession(loadUserRow(user.id)));
+      res.status(201).json(issueSession(req, res, loadUserRow(user.id), { sessionId: req.user.sessionId }));
     } catch (e) {
       next(e);
     }
@@ -297,18 +341,35 @@ router.post('/login/password', authLimiter, (req, res, next) => {
     if (!username || !password) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu username hoặc password');
 
     const cleanUsername = String(username).trim().toLowerCase();
+
+    // Kiểm khoá TRƯỚC khi đụng tới mật khẩu: trong lúc khoá, mật khẩu đúng cũng không được thử.
+    const lockWait = loginThrottle.lockedFor(cleanUsername);
+    if (lockWait) {
+      throw tooManyRequests(
+        'LOGIN_TEMPORARILY_LOCKED',
+        `Đăng nhập bằng mật khẩu tạm khoá do nhập sai nhiều lần. Thử lại sau ${lockWait} giây, hoặc đăng nhập bằng Passkey.`,
+        lockWait,
+        res
+      );
+    }
+
     const user = db.prepare('SELECT * FROM users WHERE username = ?').get(cleanUsername);
 
     const INVALID = new AppError(401, 'INVALID_CREDENTIALS', 'Tên đăng nhập hoặc mật khẩu không đúng');
 
     if (!user) {
       burnVerify(password);
+      loginThrottle.recordFailure(cleanUsername);
       throw INVALID;
     }
-    if (!verifyPassword(password, user.password_hash)) throw INVALID;
+    if (!verifyPassword(password, user.password_hash)) {
+      loginThrottle.recordFailure(cleanUsername);
+      throw INVALID;
+    }
     if (!user.is_active) throw new AppError(401, 'USER_INACTIVE', 'Tài khoản không khả dụng');
 
-    const session = issueSession(user);
+    loginThrottle.recordSuccess(cleanUsername);
+    const session = issueSession(req, res, user);
     res.json({
       ...session,
       nextStep:
@@ -407,12 +468,62 @@ router.post('/login/verify', authLimiter, async (req, res, next) => {
     })();
     reportCounterAnomaly(req, credentialRow, counterCheck);
 
+    // Chủ tài khoản vừa chứng minh được quyền sở hữu Passkey: gỡ khoá đăng nhập bằng mật khẩu
+    // nếu đang bị ai đó cố ý nhập sai để khoá.
+    loginThrottle.recordSuccess(user.username);
+
     // Hai lối đăng nhập cấp CÙNG một loại phiên. Phiên tạo bằng Passkey cũng không được coi
     // là đủ để giải ngân — quyền đó chỉ đến từ phiếu uỷ quyền của một lần xác thực lại.
-    res.json(issueSession(loadUserRow(user.id)));
+    res.json(issueSession(req, res, loadUserRow(user.id)));
   } catch (e) {
     next(e);
   }
+});
+
+// ---------- Làm mới phiên và đăng xuất ----------
+//
+// Access token sống ngắn; trình duyệt xin token mới bằng mã làm mới trong cookie HttpOnly,
+// nên người dùng không bị đá ra mỗi 15 phút. Phiên đã đăng xuất, quá hạn hoặc nhàn rỗi quá lâu
+// thì không làm mới được. Cookie SameSite=Strict nên trang khác không gửi kèm được.
+
+router.post('/session/refresh', authLimiter, (req, res, next) => {
+  try {
+    const result = rotateRefreshToken(readRefreshCookie(req));
+    if (result.problem) {
+      clearRefreshCookie(req, res);
+      throw new AppError(401, 'SESSION_EXPIRED', 'Phiên đăng nhập đã kết thúc, vui lòng đăng nhập lại');
+    }
+    const user = loadUserRow(result.session.user_id);
+    if (!user || !user.is_active) {
+      revokeSession(result.session.id, 'USER_INACTIVE');
+      clearRefreshCookie(req, res);
+      throw new AppError(401, 'SESSION_EXPIRED', 'Tài khoản không khả dụng');
+    }
+    setRefreshCookie(req, res, result.refreshToken);
+    res.json(issueSession(req, res, user, { sessionId: result.session.id }));
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Thu hồi phiên phía máy chủ: sau lệnh này, access token cũ lẫn mã làm mới đều vô hiệu ngay.
+router.post('/session/logout', (req, res) => {
+  const header = req.headers.authorization || '';
+  if (header.startsWith('Bearer ')) {
+    try {
+      const user = loadUserFromToken(header.slice(7));
+      if (user) {
+        revokeSession(user.sessionId, 'LOGOUT');
+        req.user = user;
+      }
+    } catch (_) {
+      // token hết hạn: vẫn thu hồi được qua cookie bên dưới
+    }
+  }
+  revokeByRefreshToken(readRefreshCookie(req), 'LOGOUT');
+  clearRefreshCookie(req, res);
+  if (req.user) logSecurityEvent(req, { type: EVENTS.LOGOUT, outcome: 'ALLOWED', statusCode: 200 });
+  res.json({ ok: true });
 });
 
 // ---------- Ngoại lệ khởi tạo: đổi mật khẩu tạm của quản trị viên ----------
@@ -447,11 +558,14 @@ router.post(
       }
 
       const now = nowIso();
-      db.prepare(
-        `UPDATE users
-         SET password_hash = ?, account_status = 'PENDING_PASSKEY', token_version = token_version + 1, updated_at = ?
-         WHERE id = ?`
-      ).run(hashPassword(newPassword), now, user.id);
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE users
+           SET password_hash = ?, account_status = 'PENDING_PASSKEY', token_version = token_version + 1, updated_at = ?
+           WHERE id = ?`
+        ).run(hashPassword(newPassword), now, user.id);
+        revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
+      })();
 
       logSecurityEvent(req, {
         type: EVENTS.ADMIN_BOOTSTRAP_PASSWORD_CHANGED, outcome: 'ALLOWED', statusCode: 200,
@@ -460,7 +574,7 @@ router.post(
 
       // token_version vừa tăng nên mã phiên hiện tại đã hết hiệu lực; cấp lại mã mới.
       res.json({
-        ...issueSession(loadUserRow(user.id)),
+        ...issueSession(req, res, loadUserRow(user.id), { sessionId: req.user.sessionId }),
         nextStep: 'REGISTER_PASSKEY',
         message: 'Đã đổi mật khẩu tạm. Hãy đăng ký Passkey đầu tiên để kích hoạt quyền quản trị.',
       });
@@ -574,6 +688,7 @@ router.post('/reauth/verify', requireAuth, authLimiter, async (req, res, next) =
       db.prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ?').run(nowIso(), challengeRow.id);
       issued = issueGrant({
         userId: req.user.id,
+        sessionId: req.user.sessionId,
         transactionId: null,
         disputeId: null,
         action: savedContext.action,
@@ -625,6 +740,7 @@ router.post('/credentials/options', requireAuth, authLimiter, async (req, res, n
   try {
     requireGrant({
       userId: req.user.id,
+      sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
       rawToken: (req.body || {}).reauthGrant,
       message: 'Thêm thiết bị cần xác thực lại bằng passkey đang có',
@@ -673,6 +789,7 @@ router.post('/credentials/verify', requireAuth, authLimiter, async (req, res, ne
 
     const grant = requireGrant({
       userId: req.user.id,
+      sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
       rawToken: reauthGrant,
       message: 'Thêm thiết bị cần xác thực lại bằng passkey đang có',
@@ -753,6 +870,7 @@ router.delete('/credentials/:id', requireAuth, (req, res, next) => {
   try {
     const grant = requireGrant({
       userId: req.user.id,
+      sessionId: req.user.sessionId,
       action: ACTIONS.MANAGE_CREDENTIAL,
       rawToken: (req.body || {}).reauthGrant,
       message: 'Xoá thiết bị cần xác thực lại bằng passkey đang có',

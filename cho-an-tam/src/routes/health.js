@@ -5,6 +5,9 @@ const { backgroundJobConfig } = require('../lib/backgroundJobs');
 const router = express.Router();
 
 router.get('/health', (req, res) => {
+  // Trên máy chủ công khai chỉ báo "còn sống". Cấu hình tác vụ nền, cờ chèn lỗi hay tên môi
+  // trường là thông tin nội bộ, giúp kẻ dò quét hiểu hệ thống mà không giúp gì người dùng.
+  if (process.env.APP_ENV === 'production') return res.json({ status: 'OK' });
   res.json({
     status: 'OK',
     time: new Date().toISOString(),

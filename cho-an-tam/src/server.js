@@ -1,4 +1,5 @@
 require('dotenv').config();
+const crypto = require('crypto');
 const path = require('path');
 const express = require('express');
 
@@ -22,6 +23,8 @@ const notificationsRouter = require('./routes/notifications');
 const mockProviderRouter = require('./routes/mockProvider');
 const adminRouter = require('./routes/admin');
 const { logFromError } = require('./lib/securityEvents');
+const { AppError } = require('./lib/errors');
+const { InjectedFault } = require('./lib/faultInjection');
 
 const app = express();
 
@@ -48,8 +51,18 @@ app.use('/api/admin', adminRouter);
 // Phía PROVIDER mô phỏng, cố ý nằm ngoài /api — xem routes/mockProvider.js.
 app.use('/mock-provider', mockProviderRouter);
 
+// Tuyến API không tồn tại: trả JSON thống nhất thay cho trang "Cannot POST ..." mặc định của
+// Express, vốn để lộ framework đang dùng.
+app.use(['/api', '/mock-provider'], (req, res) => {
+  res.status(404).json({ error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+});
+
 // Frontend tĩnh (HTML/CSS/JS thuần, không cần build)
 app.use(express.static(path.join(__dirname, '..', 'public')));
+
+app.use((req, res) => {
+  res.status(404).json({ error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+});
 
 // ---------------------------------------------------------------------------
 // Middleware lỗi tập trung.
@@ -66,13 +79,32 @@ app.use((err, req, res, next) => {
     return res.status(400).json({ error: 'CONSTRAINT_VIOLATION', message: 'Vi phạm ràng buộc dữ liệu (ví dụ số dư không đủ)' });
   }
 
+  // Lỗi của bộ đọc JSON: chỉ báo "body không hợp lệ", không trả nguyên văn thông báo của parser.
+  if (err && err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'INVALID_JSON', message: 'Nội dung gửi lên không phải JSON hợp lệ' });
+  }
+  if (err && err.type === 'entity.too.large') {
+    return res.status(413).json({ error: 'PAYLOAD_TOO_LARGE', message: 'Nội dung gửi lên quá lớn' });
+  }
+
   const status = err.status || 500;
-  const code = err.code || 'INTERNAL_ERROR';
+  // Với lỗi 5xx, chỉ lỗi do chính ứng dụng định nghĩa mới được đưa mã ra ngoài. Lỗi bất ngờ
+  // (lỗi lập trình, lỗi SQL...) có thể chứa chi tiết nội bộ nên chỉ ghi ở log máy chủ.
+  const intentional = err instanceof AppError || err instanceof InjectedFault;
 
   logFromError(req, err, status);
 
-  if (status >= 500) console.error(err);
-  res.status(status).json({ error: code, message: err.message || 'Lỗi hệ thống' });
+  if (status >= 500) {
+    const requestId = crypto.randomUUID();
+    console.error(`[error ${requestId}] ${req.method} ${req.originalUrl}`, err);
+    return res.status(status).json({
+      error: intentional ? err.code : 'INTERNAL_ERROR',
+      message: intentional && err instanceof AppError ? err.message : 'Lỗi hệ thống, vui lòng thử lại sau',
+      requestId,
+    });
+  }
+  // Lỗi 4xx luôn do mã ứng dụng chủ động ném kèm status (lỗi parser đã xử lý ở trên).
+  res.status(status).json({ error: err.code || 'BAD_REQUEST', message: err.message || 'Yêu cầu không hợp lệ' });
 });
 
 const { startBackgroundJobs } = require('./lib/backgroundJobs');

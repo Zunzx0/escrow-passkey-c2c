@@ -59,9 +59,45 @@ function rateLimit({ perMinute = 10, name = null } = {}) {
   };
 }
 
+/**
+ * Bộ đếm "lần dò" theo IP trong một cửa sổ dài (mặc định một giờ). Khác rateLimit ở chỗ chỉ
+ * những phản hồi mang tín hiệu dò tìm mới bị đếm (ví dụ "tên đăng nhập đã tồn tại"), nên người
+ * dùng bình thường gần như không chạm tới, còn kẻ dò danh sách tài khoản thì bị chặn sau vài lần.
+ */
+function probeCounter({ limit, windowMs = 60 * 60 * 1000, name }) {
+  const hits = new Map();
+  let lastProbeSweep = Date.now();
+  function entry(req, now) {
+    if (now - lastProbeSweep > SWEEP_EVERY_MS) {
+      lastProbeSweep = now;
+      for (const [k, e] of hits) if (e.resetAt < now) hits.delete(k);
+    }
+    const key = `${req.ip}|${name}`;
+    let e = hits.get(key);
+    if (!e || e.resetAt < now) {
+      e = { count: 0, resetAt: now + windowMs };
+      hits.set(key, e);
+    }
+    return e;
+  }
+  return {
+    /** Số giây còn bị chặn, hoặc 0. */
+    blockedFor(req, now = Date.now()) {
+      const e = entry(req, now);
+      return e.count >= limit ? Math.max(1, Math.ceil((e.resetAt - now) / 1000)) : 0;
+    },
+    hit(req, now = Date.now()) {
+      entry(req, now).count += 1;
+    },
+    reset() {
+      hits.clear();
+    },
+  };
+}
+
 /** Xoá toàn bộ xô đếm. Chỉ dùng cho kiểm thử. */
 function resetRateLimits() {
   buckets.clear();
 }
 
-module.exports = { rateLimit, resetRateLimits };
+module.exports = { rateLimit, probeCounter, resetRateLimits };

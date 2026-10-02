@@ -37,7 +37,15 @@ const ACCOUNT_ACTIONS = new Set([ACTIONS.MANAGE_CREDENTIAL, ACTIONS.CHANGE_PASSW
 
 const DECISIONS = { REFUND: 'REFUND', RELEASE: 'RELEASE' };
 
-function issueGrant({ userId, transactionId, disputeId, action, decision, contextHash }) {
+// Phiếu còn gắn với PHIÊN đã xác thực lại: phiếu lọt sang một phiên khác của cùng tài khoản
+// (ví dụ kẻ tấn công đăng nhập song song bằng mật khẩu đánh cắp) cũng không dùng được.
+function requireSessionId(sessionId) {
+  if (!sessionId) throw new Error('Phiếu uỷ quyền cần sessionId của phiên đang xác thực lại');
+  return sessionId;
+}
+
+function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash }) {
+  requireSessionId(sessionId);
   // Token gốc CSPRNG 32 byte, encode base64url; server chỉ lưu SHA-256 của nó.
   const rawToken = crypto.randomBytes(32).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(rawToken, 'utf8').digest('hex');
@@ -45,11 +53,12 @@ function issueGrant({ userId, transactionId, disputeId, action, decision, contex
 
   db.prepare(
     `INSERT INTO reauth_grants
-       (id, user_id, transaction_id, dispute_id, action, decision, token_hash, context_hash, expires_at, used_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+       (id, user_id, session_id, transaction_id, dispute_id, action, decision, token_hash, context_hash, expires_at, used_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
   ).run(
     uuid(),
     userId,
+    sessionId,
     transactionId || null,
     disputeId || null,
     action,
@@ -74,7 +83,8 @@ function issueGrant({ userId, transactionId, disputeId, action, decision, contex
  * vậy một phiếu cấp cho giao dịch A, hoặc cấp cho quyết định hoàn tiền, đơn giản là không
  * nằm trong tập ứng viên khi người gọi dùng nó cho giao dịch B hoặc cho quyết định giải ngân.
  */
-function findValidGrant({ userId, transactionId, disputeId, action, decision, rawToken }) {
+function findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken }) {
+  requireSessionId(sessionId);
   if (!rawToken) return null;
 
   const providedHash = crypto.createHash('sha256').update(String(rawToken), 'utf8').digest('hex');
@@ -83,12 +93,12 @@ function findValidGrant({ userId, transactionId, disputeId, action, decision, ra
   const candidates = db
     .prepare(
       `SELECT * FROM reauth_grants
-       WHERE user_id = ? AND action = ? AND used_at IS NULL AND expires_at > ?
+       WHERE user_id = ? AND session_id = ? AND action = ? AND used_at IS NULL AND expires_at > ?
          AND transaction_id IS ?
          AND dispute_id IS ?
          AND decision IS ?`
     )
-    .all(userId, action, nowIso(), transactionId || null, disputeId || null, decision || null);
+    .all(userId, sessionId, action, nowIso(), transactionId || null, disputeId || null, decision || null);
 
   return (
     candidates.find((g) => {
@@ -109,8 +119,8 @@ function markGrantUsed(grantId) {
 }
 
 /** Tra phiếu và ném lỗi nếu không hợp lệ. Không tiêu thụ phiếu. */
-function requireGrant({ userId, transactionId, disputeId, action, decision, rawToken, message }) {
-  const grant = findValidGrant({ userId, transactionId, disputeId, action, decision, rawToken });
+function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message }) {
+  const grant = findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken });
   if (!grant) {
     throw new AppError(
       401,

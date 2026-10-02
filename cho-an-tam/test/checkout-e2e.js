@@ -63,10 +63,10 @@ async function main() {
   {
     const before = balanceOf(buyer.user.id);
     const pr = await topup(200000);
-    const page = await http(`/mock-provider/checkout/${pr.providerRef}`);
+    const page = await http(`/mock-provider/checkout/${pr.providerRef}`, { token: buyer.token });
     assert(page.status === 200 && page.data.amount === 200000 && page.data.status === 'PENDING', 'Trang của cổng thanh toán hiển thị đúng số tiền, trạng thái PENDING');
 
-    const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
+    const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
     assert(pay.status === 200 && pay.data.webhook.delivered && pay.data.webhook.status === 200, 'Cổng thanh toán gửi được webhook về máy chủ (HTTP 200)');
     const row = prRow(pr.id);
     assert(row.status === 'SUCCEEDED' && row.resolved_by === 'WEBHOOK', 'Yêu cầu tất toán SUCCEEDED qua WEBHOOK');
@@ -77,7 +77,7 @@ async function main() {
   {
     const before = balanceOf(buyer.user.id);
     const pr = await topup(150000);
-    const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', body: { outcome: 'SUCCEEDED', deliverWebhook: false } });
+    const pay = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: false } });
     assert(pay.status === 200 && pay.data.webhook.skipped, 'Cổng thanh toán ghi nhận thành công nhưng không gửi webhook');
     assert(prRow(pr.id).status === 'PENDING', 'Phía sàn vẫn PENDING — trang của cổng thanh toán không tự cộng ví');
     assert(balanceOf(buyer.user.id) === before, 'Ví CHƯA đổi');
@@ -96,12 +96,12 @@ async function main() {
   {
     const before = balanceOf(buyer.user.id);
     const pr = await topup(120000);
-    await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', body: { outcome: 'FAILED', deliverWebhook: true } });
+    await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'FAILED', deliverWebhook: true } });
     assert(prRow(pr.id).status === 'FAILED', 'Yêu cầu tất toán FAILED');
     assert(balanceOf(buyer.user.id) === before, 'Ví KHÔNG đổi');
 
     section('K04: Không "thanh toán lại" được khoản đã có kết quả ở cổng');
-    const again = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
+    const again = await http(`/mock-provider/checkout/${pr.providerRef}/pay`, { method: 'POST', token: buyer.token, body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
     assert(again.status === 409 && again.data.error === 'ALREADY_SETTLED', `Bị từ chối (nhận ${again.status} ${again.data.error})`);
     assert(prRow(pr.id).status === 'FAILED' && balanceOf(buyer.user.id) === before, 'Trạng thái và ví giữ nguyên');
   }

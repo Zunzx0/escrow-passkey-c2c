@@ -30,8 +30,15 @@ function sha256Hex(str) {
  * Vì vậy không cần pg_advisory_xact_lock — tính chất "không phân nhánh chuỗi hash"
  * (tương đương TC26) được đảm bảo tự nhiên bởi mô hình luồng của Node + better-sqlite3.
  */
+const OP_BY_AUDIT_ACTION = {
+  ESCROW_LOCKED: 'lock',
+  ESCROW_RELEASED: 'release',
+  ADMIN_RELEASE: 'admin-release',
+  ADMIN_REFUND: 'admin-refund',
+};
+
 function appendAuditLog(db, { transactionId, actorId, action, oldStatus, newStatus, eventData }) {
-  require('./faultInjection').maybeFail('before-audit-log');
+  require('./faultInjection').maybeFail('before-audit-log', OP_BY_AUDIT_ACTION[action] || 'any');
   const last = db
     .prepare(
       'SELECT sequence_no, current_hash FROM audit_logs WHERE transaction_id = ? ORDER BY sequence_no DESC LIMIT 1'

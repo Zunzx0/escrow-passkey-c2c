@@ -275,9 +275,26 @@ CREATE INDEX IF NOT EXISTS idx_wallet_entries_request ON wallet_entries(request_
 -- hiển thị "hoàn tiền cho người mua" còn yêu cầu gửi lên lại mang "giải ngân cho người bán",
 -- và máy chủ vẫn chấp nhận vì phiếu hợp lệ. Khi đó lần xác thực lại chỉ chứng minh quản trị
 -- viên CÓ MẶT, không chứng minh quản trị viên đã CHẤP THUẬN điều gì.
+-- Phiên đăng nhập phía máy chủ. JWT mang `sid` trỏ vào đây, nên đăng xuất, đổi mật khẩu
+-- hay quá hạn nhàn rỗi thu hồi được phiên ngay lập tức thay vì chờ JWT tự hết hạn.
+-- refresh_hash là SHA-256 của mã làm mới nằm trong cookie HttpOnly; mã gốc không lưu.
+CREATE TABLE IF NOT EXISTS sessions (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  refresh_hash TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  revoked_reason TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
 CREATE TABLE IF NOT EXISTS reauth_grants (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  session_id TEXT,
   transaction_id TEXT REFERENCES transactions(id) ON DELETE CASCADE,
   dispute_id TEXT REFERENCES disputes(id) ON DELETE CASCADE,
   action TEXT NOT NULL DEFAULT 'RELEASE_ESCROW'

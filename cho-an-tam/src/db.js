@@ -155,6 +155,13 @@ function migrate() {
     if (add.length) console.log(`[migrate] payment_requests: đã thêm cột ${add.map(([n]) => n).join(', ')}.`);
   }
 
+  // Phiếu uỷ quyền gắn với phiên đã xác thực lại; cột cho phép NULL nên thêm bằng ALTER TABLE.
+  const grantColsNow = new Set(db.prepare('PRAGMA table_info(reauth_grants)').all().map((c) => c.name));
+  if (grantColsNow.size > 0 && !grantColsNow.has('session_id')) {
+    db.exec('ALTER TABLE reauth_grants ADD COLUMN session_id TEXT');
+    console.log('[migrate] reauth_grants: đã thêm cột session_id.');
+  }
+
   const txnCols = new Set(db.prepare('PRAGMA table_info(transactions)').all().map((c) => c.name));
   if (txnCols.size > 0 && !txnCols.has('seller_ack_at')) {
     db.exec('ALTER TABLE transactions ADD COLUMN seller_ack_at TEXT');

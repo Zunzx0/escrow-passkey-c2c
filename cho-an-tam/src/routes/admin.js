@@ -285,6 +285,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
       db.prepare('UPDATE auth_challenges SET used_at = ? WHERE id = ?').run(nowIso(), challengeRow.id);
       issued = issueGrant({
         userId: req.user.id,
+        sessionId: req.user.sessionId,
         transactionId: txn.id,
         disputeId: dispute.id,
         action: ACTIONS.ADJUDICATE,
@@ -318,6 +319,7 @@ function authorizeAdjudication(req, decision) {
 
   const grant = requireGrant({
     userId: req.user.id,
+    sessionId: req.user.sessionId,
     transactionId: txn.id,
     disputeId: dispute.id,
     action: ACTIONS.ADJUDICATE,

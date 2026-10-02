@@ -147,7 +147,29 @@ const App = (() => {
 
   function $(sel, root) { return (root || document).querySelector(sel); }
 
-  async function api(path, { method = 'GET', body } = {}) {
+  // Access token sống ngắn; khi hết hạn thì xin token mới bằng cookie làm mới (HttpOnly, trang
+  // không đọc được). Nhiều request cùng gặp 401 thì chỉ làm mới một lần.
+  let refreshing = null;
+  function refreshSession() {
+    if (!refreshing) {
+      refreshing = (async () => {
+        try {
+          const res = await fetch('/api/passkeys/session/refresh', { method: 'POST', credentials: 'same-origin' });
+          if (!res.ok) return false;
+          const data = await res.json();
+          if (!data.token) return false;
+          setSession(data.token, { ...(state.user || {}), ...data.user });
+          return true;
+        } catch (_) {
+          return false;
+        }
+      })();
+      refreshing.finally(() => { refreshing = null; });
+    }
+    return refreshing;
+  }
+
+  async function api(path, { method = 'GET', body } = {}, retried = false) {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
@@ -156,6 +178,7 @@ const App = (() => {
     const data = await res.json().catch(() => ({}));
 
     if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
+      if (!retried && await refreshSession()) return api(path, { method, body }, true);
       clearSession();
       renderChrome();
       route();
@@ -216,7 +239,7 @@ const App = (() => {
   const WEBAUTHN_HINTS = {
     login: {
       NotAllowedError:
-        'Không đăng nhập được bằng Passkey. Thiết bị này chưa có Passkey nào cho Chợ An Tâm, ' +
+        'Không đăng nhập được bằng Passkey. Thiết bị này chưa có Passkey nào cho Enclave, ' +
         'hoặc bạn đã bấm huỷ, hoặc để quá lâu. Hãy đăng nhập bằng mật khẩu ở phía dưới.',
     },
     enroll: {
@@ -224,7 +247,7 @@ const App = (() => {
         'Chưa gắn được Passkey. Bạn đã bấm huỷ ở cửa sổ xác minh, hoặc để quá lâu. ' +
         'Bấm lại và hoàn tất bước vân tay, Face ID hoặc mã PIN của thiết bị.',
       InvalidStateError:
-        'Thiết bị này đã có sẵn một Passkey của tài khoản khác trên Chợ An Tâm. ' +
+        'Thiết bị này đã có sẵn một Passkey của tài khoản khác trên Enclave. ' +
         'Hãy chọn "Dùng thiết bị khác" trong cửa sổ của trình duyệt, hoặc tạo Passkey mới cho tài khoản này.',
       ConstraintError:
         'Thiết bị chưa bật khoá màn hình (vân tay, Face ID hoặc mã PIN). ' +
@@ -357,6 +380,14 @@ const App = (() => {
   }
 
   function logout() {
+    // Thu hồi phiên ở máy chủ, không chỉ xoá token trong trình duyệt. Lỗi mạng thì vẫn đăng xuất
+    // phía máy khách; phiên ở máy chủ sẽ tự hết hạn.
+    const token = state.token;
+    fetch('/api/passkeys/session/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: token ? { Authorization: 'Bearer ' + token } : {},
+    }).catch(() => {});
     clearSession();
     toast('Đã đăng xuất', 'ok');
     location.hash = '#/';
@@ -378,7 +409,7 @@ const App = (() => {
 
   function openAuthModal(tab = 'login') {
     openModal({
-      title: 'Chợ An Tâm',
+      title: 'Enclave',
       body: `
         <div class="tabs tabs-split" id="authTabs" style="margin-bottom:var(--s-5)">
           <button data-act="auth-tab" data-tab="login">Đăng nhập</button>
@@ -716,10 +747,30 @@ const App = (() => {
   }
   function categoryLabel(key) { const c = categoryOf(key); return c ? c.label : (key || '—'); }
   function categoryIcon(key) { const c = categoryOf(key); return (c && c.icon) || 'package'; }
+
+  // Mỗi ngành hàng một tông màu riêng cho khung ảnh placeholder — thay cho ô xám đồng loạt,
+  // để lưới sản phẩm trông có sức sống dù chưa có ảnh thật. Màu chỉ mang tính trang trí/phân
+  // loại, không trùng với các màu mang nghĩa trạng thái (cam = hành động, xanh lục = ký quỹ).
+  const CATEGORY_TINT = {
+    DIEN_THOAI: { bg: '#EAF1FE', ink: '#2F6FE4' },
+    MAY_TINH:   { bg: '#EFECFB', ink: '#6A4FD1' },
+    DIEN_TU:    { bg: '#E3F6F8', ink: '#0E8FA6' },
+    MAY_ANH:    { bg: '#EEF1F5', ink: '#4A5568' },
+    THOI_TRANG: { bg: '#FBE8EF', ink: '#D23A72' },
+    GIA_DUNG:   { bg: '#FBF0E1', ink: '#B06A12' },
+    SACH:       { bg: '#E3F5EC', ink: '#118059' },
+    THE_THAO:   { bg: '#FCE9E9', ink: '#D1393B' },
+    SUU_TAM:    { bg: '#F3E8FC', ink: '#8938CC' },
+  };
+  function categoryTint(key) { return CATEGORY_TINT[key] || { bg: '#F2F2F2', ink: '#8A8A8A' }; }
   function conditionLabel(key) {
     const c = state.meta && (state.meta.conditions || []).find((x) => x.key === key);
     return c ? c.label : (key || '—');
   }
+  // Tông màu theo tình trạng sản phẩm, dùng cho nhãn nổi trên ảnh — "Mới" nổi bật nhất
+  // (xanh lá), "Đã dùng nhiều" trầm nhất (vàng cam), tái dùng đúng bộ màu .tag đã có sẵn.
+  const CONDITION_TONE = { NEW: 'tag-success', LIKE_NEW: 'tag-info', GOOD: 'tag-navy', FAIR: 'tag-warning' };
+  function conditionTone(key) { return CONDITION_TONE[key] || ''; }
 
   /** "vừa đăng", "3 giờ trước", "2 ngày trước" — kiểu hiển thị thời gian của các chợ C2C. */
   function relTime(iso) {
@@ -738,9 +789,11 @@ const App = (() => {
    * Ảnh sản phẩm. Hệ thống chưa có chức năng tải ảnh lên (README — hạn chế đã biết), nên hiện ô
    * giữ chỗ trung tính theo ngành hàng, như cách các chợ hiển thị tin chưa có ảnh.
    */
-  function productImage(l, { sold = false, size = 56 } = {}) {
+  function productImage(l, { sold = false, size = 56, tinted = true } = {}) {
     const label = sold ? listingStatus(l).label : '';
-    return `<div class="pimg ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
+    const tint = tinted ? categoryTint(l && l.category) : null;
+    const style = tint ? ` style="background:${tint.bg}; color:${tint.ink}"` : '';
+    return `<div class="pimg ${sold ? 'is-sold' : ''}"${style} ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
   }
 
   /** Trạng thái của một tin đăng theo góc nhìn người mua. */
@@ -856,11 +909,16 @@ const App = (() => {
   function productCard(l) {
     return `
       <a class="pcard" href="#/listing/${esc(l.id)}">
-        ${productImage(l, { sold: l.isSold })}
+        <div class="pcard-media">
+          ${productImage(l, { sold: l.isSold })}
+          ${!l.isSold ? `<span class="tag ${conditionTone(l.condition)} pcard-cond">${esc(conditionLabel(l.condition))}</span>` : ''}
+        </div>
         <div class="pcard-body">
           <div class="pcard-title">${esc(l.title)}</div>
-          <div class="pcard-price">${money(l.price)}</div>
-          <div class="pcard-meta">${esc(conditionLabel(l.condition))}</div>
+          <div class="pcard-price-row">
+            <span class="pcard-price">${money(l.price)}</span>
+            ${!l.isSold ? `<span class="escrow-mini" title="Tiền giữ trong ký quỹ tới khi bạn xác nhận">${ico('shield-check', 13)} Ký quỹ</span>` : ''}
+          </div>
           <div class="pcard-foot">
             <span class="pcard-meta">${ico('map-pin', 12)} ${esc(l.location || 'Toàn quốc')}</span>
             <span>${esc(relTime(l.createdAt))}</span>
@@ -2132,13 +2190,17 @@ const App = (() => {
   }
 
   /** Gọi "trang" của Mock Provider — nằm ngoài /api vì đó là hệ thống của provider, không phải của sàn. */
-  async function providerApi(path, { method = 'GET', body } = {}) {
+  async function providerApi(path, { method = 'GET', body } = {}, retried = false) {
+    // Cổng giả lập chỉ cho đúng người tạo yêu cầu nạp tiền thao tác, nên phải kèm phiên.
+    const headers = body !== undefined ? { 'Content-Type': 'application/json' } : {};
+    if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
     const res = await fetch('/mock-provider' + path, {
       method,
-      headers: body !== undefined ? { 'Content-Type': 'application/json' } : {},
+      headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     const data = await res.json().catch(() => ({}));
+    if (res.status === 401 && !retried && await refreshSession()) return providerApi(path, { method, body }, true);
     if (!res.ok) {
       const err = new Error(data.message || data.error || `Lỗi HTTP ${res.status}`);
       err.code = data.error;
@@ -3076,6 +3138,13 @@ const App = (() => {
       await refreshUnread();
       if (state.unread !== before) renderChrome();
     }, 20000);
+
+    // Làm mới access token trước khi nó hết hạn (15 phút), và ngay khi quay lại tab sau một lúc
+    // để máy ngủ, để người dùng không bị đăng xuất giữa chừng.
+    setInterval(() => { if (state.token) refreshSession(); }, 10 * 60 * 1000);
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && state.token) refreshSession();
+    });
   }
 
   return { init };

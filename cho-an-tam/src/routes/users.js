@@ -4,6 +4,7 @@ const { db, uuid, nowIso } = require('../db');
 const { requireAuth, requireEnrollAuth, optionalAuth, signAccessToken } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
 const { ACTIONS, requireGrant, markGrantUsed } = require('../lib/reauth');
+const { revokeAllSessions } = require('../lib/session');
 const { hashPassword, verifyPassword, assertPasswordPolicy } = require('../lib/password');
 const { rateLimit } = require('../lib/rateLimit');
 const { logSecurityEvent, EVENTS } = require('../lib/securityEvents');
@@ -102,6 +103,7 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
 
     const grant = requireGrant({
       userId: req.user.id,
+      sessionId: req.user.sessionId,
       action: ACTIONS.CHANGE_PASSWORD,
       rawToken: reauthGrant,
       message: 'Đổi mật khẩu cần xác thực lại bằng passkey đang có',
@@ -122,6 +124,7 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
       db.prepare(
         'UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?'
       ).run(hashed, now, user.id);
+      revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
       markGrantUsed(grant.id);
     })();
 
@@ -129,7 +132,7 @@ router.post('/me/password', requireAuth, sensitiveLimiter, (req, res, next) => {
 
     const fresh = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
     res.json({
-      token: signAccessToken(fresh),
+      token: signAccessToken(fresh, null, req.user.sessionId),
       changedAt: now,
       message: 'Đã đổi mật khẩu. Mọi phiên đăng nhập khác của tài khoản này đã bị thu hồi.',
     });

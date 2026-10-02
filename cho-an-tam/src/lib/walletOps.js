@@ -37,8 +37,12 @@ function applyOrderedWalletUpdates(updates, op = 'any') {
   return result;
 }
 
+// Tên nghiệp vụ suy từ trạng thái đích, để FAULT_INJECT="release:before-status-change" chỉ bắn
+// ở bước giải ngân chứ không bắn luôn ở bước khoá tiền đi trước nó.
+const OP_BY_TARGET_STATUS = { SECURED: 'lock', COMPLETED: 'release', RELEASED: 'admin-release', REFUNDED: 'admin-refund' };
+
 function applyTransactionStatus(txn, { status, escrowStatus }) {
-  maybeFail('before-status-change');
+  maybeFail('before-status-change', OP_BY_TARGET_STATUS[status] || 'any');
   const result = db
     .prepare(
       `UPDATE transactions SET status = ?, escrow_status = ?, version = version + 1, updated_at = ?

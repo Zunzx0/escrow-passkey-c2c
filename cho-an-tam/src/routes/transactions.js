@@ -638,6 +638,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
       db.prepare(`UPDATE auth_challenges SET used_at = ? WHERE id = ?`).run(nowIso(), challengeRow.id);
       issued = issueGrant({
         userId: req.user.id,
+        sessionId: req.user.sessionId,
         transactionId: txn.id,
         action: ACTIONS.RELEASE,
         contextHash,
@@ -679,6 +680,7 @@ router.post('/:id/release', requireAuth, (req, res, next) => {
     // Phiếu phải đúng user, đúng giao dịch, đúng hành động, còn hạn và chưa dùng.
     const grant = requireGrant({
       userId: req.user.id,
+      sessionId: req.user.sessionId,
       transactionId: txn.id,
       action: ACTIONS.RELEASE,
       rawToken: reauthGrant,

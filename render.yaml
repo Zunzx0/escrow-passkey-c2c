@@ -11,6 +11,13 @@ services:
         value: production
       - key: DB_PATH
         value: data/escrow.db
+      # Chốt cứng RP ID/Origin theo tên miền chính thức. Không để rơi về RENDER_EXTERNAL_HOSTNAME
+      # (subdomain .onrender.com) — Passkey bị ràng buộc với đúng RP ID lúc đăng ký, đổi domain
+      # mà không đặt hai biến này thì mọi Passkey cũ lẫn mới đều không khớp origin thật.
+      - key: WEBAUTHN_RP_ID
+        value: enclave.id.vn
+      - key: WEBAUTHN_ORIGIN
+        value: https://enclave.id.vn
       - key: JWT_SECRET
         generateValue: true
       - key: PAYMENT_WEBHOOK_SECRET
@@ -21,7 +28,3 @@ services:
         value: "1"
       - key: MOCK_PROVIDER_CHECKOUT
         value: "1"
-      - key: WEBAUTHN_RP_ID
-        value: enclave.id.vn
-      - key: WEBAUTHN_ORIGIN
-        value: https://enclave.id.vn

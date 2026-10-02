@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { db } = require('../db');
+const { createSession, getSession, sessionProblem, touchSession, setRefreshCookie } = require('./session');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_dev_only_not_secure';
 const ACCESS_TOKEN_TTL_SECONDS = parseInt(process.env.ACCESS_TOKEN_TTL_SECONDS || '900', 10);
@@ -27,7 +28,8 @@ function scopeForStatus(accountStatus) {
  * huỷ các phiên đang mở khác" ở Bảng 2.1 thành một tính chất kiểm chứng được, thay vì một
  * lời hứa suông trên một hệ thống dùng JWT không trạng thái.
  */
-function signAccessToken(user, scope) {
+function signAccessToken(user, scope, sessionId) {
+  if (!sessionId) throw new Error('signAccessToken cần sessionId của phiên phía máy chủ');
   return jwt.sign(
     {
       sub: user.id,
@@ -35,10 +37,18 @@ function signAccessToken(user, scope) {
       role: user.role,
       scp: scope || scopeForStatus(user.account_status),
       tv: user.token_version || 0,
+      sid: sessionId,
     },
     JWT_SECRET,
     { expiresIn: ACCESS_TOKEN_TTL_SECONDS }
   );
+}
+
+/** Mở một phiên mới: ghi phiên phía máy chủ, đặt cookie làm mới, trả access token. */
+function startSession(req, res, user, scope) {
+  const { sessionId, refreshToken } = createSession(user.id);
+  setRefreshCookie(req, res, refreshToken);
+  return { token: signAccessToken(user, scope, sessionId), sessionId };
 }
 
 /**
@@ -64,6 +74,11 @@ function loadUserFromToken(token) {
   if (!row || !row.is_active) return null;
   if ((payload.tv || 0) !== row.token_version) return null; // mật khẩu đã đổi -> phiên cũ hết hiệu lực
 
+  // Phiên phía máy chủ: đã đăng xuất, quá hạn hay nhàn rỗi quá lâu thì JWT còn hạn cũng vô hiệu.
+  const session = getSession(payload.sid);
+  if (sessionProblem(session) || session.user_id !== row.id) return null;
+  touchSession(session);
+
   // Phạm vi thực tế là giao của phạm vi ghi trong token và phạm vi mà trạng thái tài khoản
   // hiện tại cho phép. Token cũ mang scope 'full' của một tài khoản vừa bị đưa về trạng thái
   // chưa hoàn tất sẽ không còn dùng được như phiên đầy đủ.
@@ -78,6 +93,7 @@ function loadUserFromToken(token) {
     role: row.role,
     accountStatus: row.account_status,
     tokenVersion: row.token_version,
+    sessionId: session.id,
     scope,
   };
 }
@@ -180,6 +196,7 @@ function requireAccountStatus(...statuses) {
 
 module.exports = {
   signAccessToken,
+  startSession,
   loadUserFromToken,
   requireAuth,
   requireEnrollAuth,
