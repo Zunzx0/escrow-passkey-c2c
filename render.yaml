@@ -21,3 +21,7 @@ services:
         value: "1"
       - key: MOCK_PROVIDER_CHECKOUT
         value: "1"
+      - key: WEBAUTHN_RP_ID
+        value: enclave.id.vn
+      - key: WEBAUTHN_ORIGIN
+        value: https://enclave.id.vn
