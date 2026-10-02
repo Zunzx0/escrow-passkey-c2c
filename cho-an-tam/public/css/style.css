@@ -94,20 +94,18 @@ img { max-width: 100%; display: block; }
 
 .topbar {
   position: sticky; top: 0; z-index: 40;
-  background: var(--primary); color: #fff;
-  box-shadow: 0 1px 0 rgba(0, 0, 0, .08);
+  background: var(--surface); color: var(--text);
+  border-bottom: 1px solid var(--border);
 }
 .topbar-inner { display: flex; align-items: center; gap: var(--s-5); min-height: var(--topbar-h); }
-.brand { display: inline-flex; align-items: center; color: #fff; flex: 0 0 auto; }
-/* Logo gốc dùng chữ vàng nhạt/cam-đỏ, chìm trên nền cam của topbar — đặt trên chip nền tối
-   để giữ độ tương phản thay vì để trực tiếp trên --primary. */
-.brand-chip {
-  display: inline-flex; align-items: center; height: 40px; padding: 0 var(--s-4);
-  background: #1C2029; border-radius: var(--radius-md);
-}
-.brand-logo { height: 20px; width: auto; display: block; }
+.brand { display: inline-flex; align-items: center; flex: 0 0 auto; }
+/* Logo dùng thẳng, không còn khung nền riêng — nền trắng của topbar đã đủ tương phản. */
+.brand-logo { height: 26px; width: auto; display: block; }
 .footer-logo { height: 26px; width: auto; display: block; margin-bottom: var(--s-3); }
-.topbar-search { flex: 1 1 auto; display: flex; max-width: 640px; background: #fff; border-radius: var(--radius); padding: 3px; }
+.topbar-search {
+  flex: 1 1 auto; display: flex; max-width: 640px; background: var(--surface-2);
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 3px;
+}
 .topbar-search input {
   flex: 1 1 auto; min-width: 0; border: 0; outline: 0; padding: 7px 10px; background: transparent; color: var(--text);
 }
@@ -118,29 +116,30 @@ img { max-width: 100%; display: block; }
 .topbar-search-btn:hover { background: var(--primary-hover); }
 .topbar-actions { display: flex; align-items: center; gap: var(--s-2); flex: 0 0 auto; }
 .top-link {
-  display: inline-flex; align-items: center; gap: 6px; color: #fff; padding: 7px 10px;
+  display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); padding: 7px 10px;
   border-radius: var(--radius); font-weight: 500; white-space: nowrap; cursor: pointer; background: transparent; border: 0;
 }
-.top-link:hover { background: rgba(255, 255, 255, .14); }
-.top-link.solid { background: #fff; color: var(--primary); font-weight: 600; }
-.top-link.solid:hover { background: var(--primary-soft); }
+.top-link:hover { background: var(--surface-2); }
+.top-link.solid { background: var(--primary); color: #fff; font-weight: 600; }
+.top-link.solid:hover { background: var(--primary-hover); }
 
 .notify-btn { position: relative; }
 .notify-btn .badge-count { position: absolute; top: 0; right: 0; transform: translate(35%, -25%); }
 
 .balance-chip {
   display: inline-flex; flex-direction: column; line-height: 1.15; padding: 4px 10px;
-  border-radius: var(--radius); background: rgba(255, 255, 255, .16); color: #fff; white-space: nowrap;
+  border-radius: var(--radius); background: var(--primary-soft); color: var(--primary-ink); white-space: nowrap;
 }
 .balance-chip b { font-size: 14px; }
-.balance-chip span { font-size: 11px; opacity: .9; }
+.balance-chip span { font-size: 11px; opacity: .85; }
 
-.user-chip { display: inline-flex; align-items: center; gap: 8px; color: #fff; padding: 4px 8px; border-radius: var(--radius); }
+.user-chip { display: inline-flex; align-items: center; gap: 8px; color: var(--text); padding: 4px 8px; border-radius: var(--radius); }
+.user-chip:hover { background: var(--surface-2); }
 .user-chip-text { display: flex; flex-direction: column; line-height: 1.15; }
 .user-chip-name { font-weight: 600; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.role-pill { font-size: 11px; opacity: .9; }
+.role-pill { font-size: 11px; color: var(--muted); }
 .avatar {
-  width: 32px; height: 32px; border-radius: 50%; background: #fff; color: var(--primary);
+  width: 32px; height: 32px; border-radius: 50%; background: var(--primary); color: #fff;
   display: inline-grid; place-items: center; font-weight: 700; font-size: 13px; flex: 0 0 auto;
 }
 
@@ -221,8 +220,8 @@ img { max-width: 100%; display: block; }
   border: 0; background: transparent; color: inherit; cursor: pointer;
 }
 .icon-btn:hover { background: rgba(0, 0, 0, .06); }
-.icon-btn.on-chrome { color: #fff; }
-.icon-btn.on-chrome:hover { background: rgba(255, 255, 255, .16); }
+.icon-btn.on-chrome { color: var(--text-2); }
+.icon-btn.on-chrome:hover { background: var(--surface-2); color: var(--text); }
 
 /* ---------------------------------------------------------------- nhãn */
 
@@ -610,7 +609,7 @@ table.data th.num, table.data td.num { text-align: right; }
 @media (max-width: 860px) {
   .topbar-inner { flex-wrap: wrap; padding-top: 10px; padding-bottom: 10px; gap: var(--s-3); }
   .topbar-search { order: 3; flex-basis: 100%; max-width: none; }
-  .brand-name { font-size: 18px; }
+  .brand-logo { height: 22px; }
   .balance-chip, .user-chip-text, .top-link .lbl { display: none; }
   .shell { flex-direction: column; }
   /* Menu tài khoản thành một dải cuộn ngang, như thanh tab của app mua sắm. */
