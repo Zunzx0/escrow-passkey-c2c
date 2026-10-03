@@ -2,6 +2,13 @@ const path = require('path');
 const fs = require('fs');
 const crypto = require('crypto');
 const { SqliteAsyncDatabase, PgAsyncDatabase, PG_LOCK_KEY } = require('./lib/asyncDb');
+const { normalizeSettledListingsSql } = require('./lib/listingNormalize');
+
+function logListingNormalization(sold, reopened) {
+  if (sold || reopened) {
+    console.log(`[migrate] listings: chuẩn hoá ${sold} tin đăng đã bán -> SOLD, ${reopened} tin đăng đã hoàn tiền -> AVAILABLE.`);
+  }
+}
 
 // Chọn nền lưu trữ:
 //
@@ -232,6 +239,19 @@ function openSqlite() {
       ).run(...RESERVING_STATUSES);
       console.log('[migrate] Đã thêm cột status vào listings (AVAILABLE mặc định, LOCKED cho tin đăng đã có đơn giữ chỗ/đã bán).');
     }
+
+    normalizeSettledListings();
+  }
+
+  // Tin đăng còn kẹt LOCKED dù giao dịch đã tất toán (dữ liệu tạo trước lib/listingLifecycle.js).
+  // Chạy ở mọi lần khởi động; xem lib/listingNormalize.js.
+  function normalizeSettledListings() {
+    const sql = normalizeSettledListingsSql('', `strftime('%Y-%m-%dT%H:%M:%fZ','now')`);
+    db.transaction(() => {
+      const sold = db.prepare(sql.sold).run();
+      const reopened = db.prepare(sql.reopened).run();
+      logListingNormalization(sold.changes, reopened.changes);
+    })();
   }
 
   // Nâng cấp passkey_credentials: bỏ UNIQUE trên user_id (cho phép nhiều thiết bị/tài khoản)
@@ -396,6 +416,12 @@ function openPg() {
         [uuid()]
       );
       if (seeded.rowCount === 1) console.log('[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.');
+      // Không phải migration có phiên bản: chạy ở MỌI lần khởi động, giống bản SQLite (xem
+      // lib/listingNormalize.js — hai câu lệnh có điều kiện, chạy lại không đổi gì).
+      const sql = normalizeSettledListingsSql('app.', 'app.now_iso()');
+      const sold = await client.query(sql.sold);
+      const reopened = await client.query(sql.reopened);
+      logListingNormalization(sold.rowCount, reopened.rowCount);
       await client.query('COMMIT');
     } catch (err) {
       await client.query('ROLLBACK').catch(() => {});

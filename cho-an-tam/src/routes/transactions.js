@@ -14,6 +14,7 @@ const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const {
   onOrderSecured, onOrderAcknowledged, onOrderShipped, onOrderWaitConfirm, onOrderCompleted, onDisputeOpened,
 } = require('../lib/notifications');
+const { settleListing } = require('../lib/listingLifecycle');
 
 // Mỗi lần xin challenge đều ghi một bản ghi vào cơ sở dữ liệu, nên đây là điểm gửi ồ ạt
 // rẻ tiền nếu không chặn. Mở tranh chấp cũng được giới hạn vì nó đóng băng tiền của
@@ -464,7 +465,12 @@ router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, ne
 //
 // Trạng thái WAIT_CONFIRM bắt đầu thời hạn kiểm tra hàng, nên nó phải khởi phát từ một sự
 // kiện mà chỉ người mua quan sát được: kiện hàng đã tới tay.
-router.post('/:id/wait-confirm', requireAuth, requireRole('BUYER'), async (req, res, next) => {
+//
+// "Người mua" ở đây là buyer_id CỦA CHÍNH GIAO DỊCH NÀY (assertOwnership), không phải vai trò
+// toàn cục: một người mua được duyệt quyền bán hàng trong lúc đơn đang SHIPPING đã mang role
+// SELLER, và requireRole('BUYER') trước đây khiến họ không xác nhận nhận hàng được — tiền kẹt ở
+// SHIPPING. Cùng lý do với secure / reauth / release (xem chú thích của assertOwnership).
+router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
   try {
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
@@ -742,6 +748,8 @@ router.post('/:id/release', requireAuth, async (req, res, next) => {
       });
 
       await applyTransactionStatus(txn, { status: 'COMPLETED', escrowStatus: 'RELEASED' });
+      // Đã giải ngân thì sản phẩm đã bán hẳn: LOCKED -> SOLD trong cùng giao dịch với dòng tiền.
+      await settleListing(txn, 'RELEASE');
       await markGrantUsed(grant.id);
 
       await appendAuditLog(db, {

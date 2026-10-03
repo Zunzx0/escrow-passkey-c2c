@@ -159,9 +159,9 @@ CREATE INDEX IF NOT EXISTS idx_payment_requests_pending ON payment_requests(stat
 -- `WHERE status='AVAILABLE' AND version=oldVersion` trên bảng này quyết định (xem
 -- routes/transactions.js), không được suy ra ngầm từ việc dò transactions.listing_id —
 -- cách dò đó có thể tiếp tục tồn tại như kiểm tra nghiệp vụ bổ sung nhưng không còn là
--- hàng rào concurrency chính. Lifecycle của listing SAU trạng thái kết thúc của giao dịch
--- (đăng bán lại sau REFUND, hay chuyển sang SOLD sau RELEASE) chưa được chốt; không tự
--- thêm transition nào rời khỏi LOCKED khi chưa có quyết định nghiệp vụ riêng.
+-- hàng rào concurrency chính. Rời khỏi LOCKED chỉ khi tất toán, trong CÙNG giao dịch cơ sở dữ
+-- liệu chuyển tiền (lib/listingLifecycle.js): giải ngân -> SOLD, hoàn tiền -> AVAILABLE (mở
+-- bán lại).
 CREATE TABLE IF NOT EXISTS listings (
   id TEXT PRIMARY KEY,
   seller_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
