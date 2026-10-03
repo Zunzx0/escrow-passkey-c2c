@@ -22,6 +22,7 @@
     "test:invariants": "node test/invariants-unit.js",
     "test:notifications": "node test/notification-e2e.js",
     "test:checkout": "node test/checkout-e2e.js",
+    "test:dispute-race": "node test/dispute-race-e2e.js",
     "test:security-report": "node test/security-report-regression-e2e.js",
     "test:all": "node test/e2e.js && node test/market-e2e.js && node test/security-e2e.js && node test/hybrid-e2e.js && node test/payment-e2e.js && node test/reconcile-e2e.js",
     "reconcile": "node scripts/reconcile.js",
