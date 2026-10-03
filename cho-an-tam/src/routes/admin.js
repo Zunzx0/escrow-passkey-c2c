@@ -367,6 +367,22 @@ router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => 
     const { txn, grant } = await authorizeAdjudication(req, DECISIONS.REFUND);
 
     const runTxn = db.transaction(async () => {
+      // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ, là câu lệnh ĐẦU TIÊN của giao dịch: hai lệnh phân
+      // xử đua nhau cho cùng một hồ sơ (dù cùng quyết định hay khác quyết định, dù đã qua được
+      // bước kiểm `dispute.status !== 'OPEN'` ở ngoài vì đọc trước khi bên thắng commit) thì chỉ
+      // một request đổi được status. Trước đây hồ sơ chỉ được bảo vệ GIÁN TIẾP qua version check
+      // của applyTransactionStatus (hoặc tình cờ qua CHECK constraint của ví) — đúng nhưng mong
+      // manh: bên thua vẫn kịp sửa ví trước khi bị rollback, và lỗi trả về là CONSTRAINT_VIOLATION
+      // mơ hồ thay vì một lý do rõ ràng. Chốt chặn riêng ở đây làm bên thua dừng lại NGAY, trước
+      // khi chạm tới ví.
+      const claimed = await db
+        .prepare(`UPDATE disputes SET status = 'RESOLVED_REFUND', admin_id = ?, admin_decision = 'REFUND', resolved_at = ?
+                   WHERE id = ? AND status = 'OPEN'`)
+        .run(req.user.id, nowIso(), dispute.id);
+      if (claimed.changes !== 1) {
+        throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp đã được xử lý ở nơi khác');
+      }
+
       // Đọc ví BÊN TRONG giao dịch: ví ký quỹ dùng chung cho mọi đơn, đọc ở ngoài thì một thao
       // tác khác chen vào giữa lúc đọc và lúc ghi sẽ làm version cũ, gây xung đột giả.
       const escrowWallet = await getEscrowWallet();
@@ -401,9 +417,6 @@ router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => 
       });
 
       await applyTransactionStatus(txn, { status: 'REFUNDED', escrowStatus: 'REFUNDED' });
-      await db.prepare(
-        `UPDATE disputes SET status = 'RESOLVED_REFUND', admin_id = ?, admin_decision = 'REFUND', resolved_at = ? WHERE id = ?`
-      ).run(req.user.id, nowIso(), dispute.id);
 
       // Tiêu thụ phiếu trong CÙNG giao dịch cơ sở dữ liệu thực hiện việc chuyển tiền, nên
       // không có khoảnh khắc nào phiếu vừa còn hiệu lực vừa đã được dùng.
@@ -459,6 +472,15 @@ router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) =>
     const { txn, grant } = await authorizeAdjudication(req, DECISIONS.RELEASE);
 
     const runTxn = db.transaction(async () => {
+      // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ — xem chú thích tương ứng ở /refund phía trên.
+      const claimed = await db
+        .prepare(`UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_id = ?, admin_decision = 'RELEASE', resolved_at = ?
+                   WHERE id = ? AND status = 'OPEN'`)
+        .run(req.user.id, nowIso(), dispute.id);
+      if (claimed.changes !== 1) {
+        throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp đã được xử lý ở nơi khác');
+      }
+
       // Đọc ví BÊN TRONG giao dịch, cùng lý do như ở lệnh hoàn tiền.
       const escrowWallet = await getEscrowWallet();
       const sellerWallet = await getUserWallet(txn.seller_id);
@@ -492,9 +514,6 @@ router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) =>
       });
 
       await applyTransactionStatus(txn, { status: 'RELEASED', escrowStatus: 'RELEASED' });
-      await db.prepare(
-        `UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_id = ?, admin_decision = 'RELEASE', resolved_at = ? WHERE id = ?`
-      ).run(req.user.id, nowIso(), dispute.id);
 
       await markGrantUsed(grant.id);
 
