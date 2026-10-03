@@ -22,6 +22,7 @@ const { logSecurityEvent, listSecurityEvents, EVENTS } = require('../lib/securit
 const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounter');
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const { onDisputeResolved } = require('../lib/notifications');
+const { settleListing } = require('../lib/listingLifecycle');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
 // challenge đều ghi một bản ghi vào cơ sở dữ liệu.
@@ -418,6 +419,10 @@ router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => 
 
       await applyTransactionStatus(txn, { status: 'REFUNDED', escrowStatus: 'REFUNDED' });
 
+      // Tiền đã về người mua thì sản phẩm mở bán lại — cùng giao dịch, nên rollback ở bất kỳ
+      // bước nào phía sau cũng đưa tin đăng về LOCKED cùng với tiền.
+      await settleListing(txn, 'REFUND');
+
       // Tiêu thụ phiếu trong CÙNG giao dịch cơ sở dữ liệu thực hiện việc chuyển tiền, nên
       // không có khoảnh khắc nào phiếu vừa còn hiệu lực vừa đã được dùng.
       await markGrantUsed(grant.id);
@@ -514,6 +519,7 @@ router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) =>
       });
 
       await applyTransactionStatus(txn, { status: 'RELEASED', escrowStatus: 'RELEASED' });
+      await settleListing(txn, 'RELEASE');
 
       await markGrantUsed(grant.id);
 
