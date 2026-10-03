@@ -16,9 +16,8 @@
  *   script-src 'self'         — giao diện không có <script> nội tuyến nào, toàn bộ mã nằm ở
  *                               tệp rời, nên KHÔNG cần 'unsafe-inline'. Đây là phần có giá
  *                               trị nhất của CSP: chặn đúng dạng XSS chèn thẻ script.
- *   style-src  'unsafe-inline'— buộc phải mở, vì giao diện dùng nhiều thuộc tính style="…".
- *                               Gỡ được thì tốt hơn, nhưng phải viết lại toàn bộ phần dựng
- *                               HTML, việc đó không thuộc phạm vi đợt này.
+ *   style-src  'self'         — toàn bộ kiểu nằm trong css/style.css; giao diện không còn
+ *                               thuộc tính style nội tuyến hoặc gán element.style.
  *   img-src    data:          — favicon là một SVG nội tuyến dạng data URI.
  *   connect-src 'self'        — chặn việc gửi dữ liệu ra máy chủ khác.
  *   frame-ancestors 'none'    — chống clickjacking; thay cho X-Frame-Options ở trình duyệt mới.
@@ -27,7 +26,7 @@
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
+  "style-src 'self'",
   "img-src 'self' data:",
   "font-src 'self' data:",
   "connect-src 'self'",

@@ -10,6 +10,8 @@
  * Chạy sau khi đã chạy các bộ khác, vì nó cố tình làm chạm trần giới hạn tần suất.
  */
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { api, flows } = require('./helpers/accounts');
 
 const BASE = process.env.BASE_URL || 'http://localhost:3000';
@@ -37,9 +39,17 @@ async function main() {
   assert(/frame-ancestors 'none'/.test(csp), "CSP có frame-ancestors 'none' (chống clickjacking)");
   assert(/script-src 'self'/.test(csp) && !/script-src[^;]*unsafe-inline/.test(csp),
     "CSP cấm script nội tuyến (script-src 'self', không có unsafe-inline)");
+  assert(/style-src 'self'/.test(csp) && !/style-src[^;]*unsafe-inline/.test(csp),
+    "CSP cấm style nội tuyến (style-src 'self', không có unsafe-inline)");
   assert(/object-src 'none'/.test(csp), "CSP có object-src 'none'");
   assert(!!page.headers.get('referrer-policy'), 'Có Referrer-Policy');
   assert(page.headers.get('x-powered-by') === null, 'Không lộ X-Powered-By');
+
+  const vercelConfig = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'public', 'vercel.json'), 'utf8'));
+  const vercelHeaders = vercelConfig.headers.find((entry) => entry.source === '/(.*)').headers;
+  const vercelCsp = vercelHeaders.find((header) => header.key === 'Content-Security-Policy').value;
+  assert(/style-src 'self'/.test(vercelCsp) && !/style-src[^;]*unsafe-inline/.test(vercelCsp),
+    'CSP của Vercel cũng cấm style nội tuyến');
 
   const apiRes = await fetch(BASE + '/health');
   assert((apiRes.headers.get('cache-control') || '').includes('no-store') === false,
@@ -48,6 +58,21 @@ async function main() {
   const apiPrivate = await fetch(BASE + '/api/listings');
   assert((apiPrivate.headers.get('cache-control') || '').includes('no-store'),
     'Phản hồi API mang Cache-Control: no-store');
+
+  const robots = await fetch(BASE + '/robots.txt');
+  const robotsBody = await robots.text();
+  assert(robots.status === 200 && /User-agent:\s*\*/i.test(robotsBody),
+    'robots.txt tồn tại và có chỉ dẫn cho crawler');
+
+  const securityTxt = await fetch(BASE + '/.well-known/security.txt');
+  const securityTxtBody = await securityTxt.text();
+  assert(securityTxt.status === 200 && /^Contact:/m.test(securityTxtBody),
+    'security.txt tồn tại và có kênh báo cáo lỗ hổng');
+  assert(/^Canonical:\s*https:\/\/enclave\.id\.vn\/\.well-known\/security\.txt$/m.test(securityTxtBody),
+    'security.txt khai báo đúng địa chỉ chuẩn trên enclave.id.vn');
+  const expires = securityTxtBody.match(/^Expires:\s*(.+)$/m);
+  assert(!!expires && Number.isFinite(Date.parse(expires[1])) && Date.parse(expires[1]) > Date.now(),
+    'security.txt có thời hạn còn hiệu lực');
 
   // ------------------------------------------------------------------ P1-2
   section('P1-2: Giới hạn tần suất trên điểm đăng nhập');
