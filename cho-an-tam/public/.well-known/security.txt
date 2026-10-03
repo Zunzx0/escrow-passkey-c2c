@@ -1,0 +1,5 @@
+Contact: https://github.com/Zunzx0/escrow-passkey-c2c/security/advisories/new
+Expires: 2027-10-01T00:00:00Z
+Preferred-Languages: vi, en
+Canonical: https://enclave.id.vn/.well-known/security.txt
+Policy: https://github.com/Zunzx0/escrow-passkey-c2c/security/policy

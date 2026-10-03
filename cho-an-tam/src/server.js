@@ -105,6 +105,14 @@ app.use(['/api', '/mock-provider'], (req, res) => {
 // SERVE_FRONTEND=0 ở máy chủ API: mở giao diện ngay trên api.enclave.id.vn sẽ chạy WebAuthn với
 // sai origin và chỉ gây nhầm lẫn.
 if (process.env.SERVE_FRONTEND !== '0') {
+  // express.static mặc định bỏ qua dotfile. Chỉ mở đúng security.txt thay vì cho phép mọi
+  // đường dẫn bắt đầu bằng dấu chấm trong public/ được tải xuống.
+  app.get('/.well-known/security.txt', (req, res) => {
+    res.type('text/plain').sendFile(
+      path.join(__dirname, '..', 'public', '.well-known', 'security.txt'),
+      { dotfiles: 'allow' }
+    );
+  });
   app.use(express.static(path.join(__dirname, '..', 'public')));
 }
 

@@ -417,7 +417,7 @@ const App = (() => {
     openModal({
       title: 'Enclave',
       body: `
-        <div class="tabs tabs-split" id="authTabs" style="margin-bottom:var(--s-5)">
+        <div class="tabs tabs-split mb-5" id="authTabs">
           <button data-act="auth-tab" data-tab="login">Đăng nhập</button>
           <button data-act="auth-tab" data-tab="register">Đăng ký</button>
         </div>
@@ -495,7 +495,7 @@ const App = (() => {
       dismissible: false,
       body: `
         <div class="stack">
-          <p class="muted" style="margin:0">${note || (bootstrap
+          <p class="muted m-0">${note || (bootstrap
             ? 'Đặt mật khẩu riêng của bạn để tiếp tục.'
             : 'Bước cuối để kích hoạt tài khoản.')}</p>
 
@@ -757,18 +757,18 @@ const App = (() => {
   // Mỗi ngành hàng một tông màu riêng cho khung ảnh placeholder — thay cho ô xám đồng loạt,
   // để lưới sản phẩm trông có sức sống dù chưa có ảnh thật. Màu chỉ mang tính trang trí/phân
   // loại, không trùng với các màu mang nghĩa trạng thái (cam = hành động, xanh lục = ký quỹ).
-  const CATEGORY_TINT = {
-    DIEN_THOAI: { bg: '#EAF1FE', ink: '#2F6FE4' },
-    MAY_TINH:   { bg: '#EFECFB', ink: '#6A4FD1' },
-    DIEN_TU:    { bg: '#E3F6F8', ink: '#0E8FA6' },
-    MAY_ANH:    { bg: '#EEF1F5', ink: '#4A5568' },
-    THOI_TRANG: { bg: '#FBE8EF', ink: '#D23A72' },
-    GIA_DUNG:   { bg: '#FBF0E1', ink: '#B06A12' },
-    SACH:       { bg: '#E3F5EC', ink: '#118059' },
-    THE_THAO:   { bg: '#FCE9E9', ink: '#D1393B' },
-    SUU_TAM:    { bg: '#F3E8FC', ink: '#8938CC' },
+  const CATEGORY_TINT_CLASS = {
+    DIEN_THOAI: 'pimg-dien-thoai',
+    MAY_TINH: 'pimg-may-tinh',
+    DIEN_TU: 'pimg-dien-tu',
+    MAY_ANH: 'pimg-may-anh',
+    THOI_TRANG: 'pimg-thoi-trang',
+    GIA_DUNG: 'pimg-gia-dung',
+    SACH: 'pimg-sach',
+    THE_THAO: 'pimg-the-thao',
+    SUU_TAM: 'pimg-suu-tam',
   };
-  function categoryTint(key) { return CATEGORY_TINT[key] || { bg: '#F2F2F2', ink: '#8A8A8A' }; }
+  function categoryTintClass(key) { return CATEGORY_TINT_CLASS[key] || 'pimg-neutral'; }
   function conditionLabel(key) {
     const c = state.meta && (state.meta.conditions || []).find((x) => x.key === key);
     return c ? c.label : (key || '—');
@@ -797,9 +797,8 @@ const App = (() => {
    */
   function productImage(l, { sold = false, size = 56, tinted = true } = {}) {
     const label = sold ? listingStatus(l).label : '';
-    const tint = tinted ? categoryTint(l && l.category) : null;
-    const style = tint ? ` style="background:${tint.bg}; color:${tint.ink}"` : '';
-    return `<div class="pimg ${sold ? 'is-sold' : ''}"${style} ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
+    const tintClass = tinted ? categoryTintClass(l && l.category) : '';
+    return `<div class="pimg ${tintClass} ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
   }
 
   /** Trạng thái của một tin đăng theo góc nhìn người mua. */
@@ -843,7 +842,7 @@ const App = (() => {
     } else if (req && req.status === 'REJECTED') {
       action = `<button class="btn btn-primary" data-act="open-seller-request">${ico('refresh-cw', 17)} Gửi lại yêu cầu</button>`;
       extra = `
-        <div class="note note-danger" style="margin-top:var(--s-3)">
+        <div class="note note-danger mt-3">
           ${ico('circle-alert', 18)}
           <span>Yêu cầu trước bị từ chối${req.reviewedAt ? ' lúc ' + fmtDateTime(req.reviewedAt) : ''}.
             Lý do: <b>${esc(req.reviewNote || 'không ghi')}</b></span>
@@ -855,11 +854,11 @@ const App = (() => {
     return `
       <div class="card"><div class="card-body">
         <div class="row-between">
-          <div class="row" style="flex-wrap:nowrap;gap:var(--s-3)">
-            <span class="ico-box" style="background:var(--primary-soft);color:var(--primary)">${ico('tag', 22)}</span>
+          <div class="row flex-nowrap gap-3">
+            <span class="ico-box cat-action-icon">${ico('tag', 22)}</span>
             <div>
-              <h3 style="margin:0">Có đồ không dùng tới? Đăng bán ngay</h3>
-              <p class="muted small" style="margin:2px 0 0">Gửi yêu cầu mở cửa hàng; quản trị viên duyệt xong thì chính tài khoản
+              <h3 class="m-0">Có đồ không dùng tới? Đăng bán ngay</h3>
+              <p class="muted small m-2-0-0">Gửi yêu cầu mở cửa hàng; quản trị viên duyệt xong thì chính tài khoản
                 này được nâng lên người bán — giữ nguyên ví, passkey và lịch sử mua.</p>
             </div>
           </div>
@@ -1177,8 +1176,8 @@ const App = (() => {
               </select>
             </div>
           </div>
-          <div id="listingGrid" style="margin-top:var(--s-3)">${skeletonGrid(12)}</div>
-          <div class="load-more" id="loadMore" style="margin-top:var(--s-4)"></div>
+          <div id="listingGrid" class="mt-3">${skeletonGrid(12)}</div>
+          <div class="load-more mt-4" id="loadMore"></div>
         </section>
 
         <div class="trust-strip">
@@ -1249,7 +1248,7 @@ const App = (() => {
 
   async function viewListing(id) {
     if (!id) { location.hash = '#/'; return; }
-    view().innerHTML = `<div class="page"><div class="skeleton" style="height:420px"></div></div>`;
+    view().innerHTML = `<div class="page"><div class="skeleton h-420"></div></div>`;
 
     const l = await api('/listings/' + encodeURIComponent(id));
     let seller = null;
@@ -1336,7 +1335,7 @@ const App = (() => {
           <b>${esc(name)}</b>
           <div class="small muted">@${esc((seller && seller.username) || l.sellerUsername)}
             ${seller ? ` · Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
-          <div class="small" style="color:var(--trust);margin-top:2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
+          <div class="small text-trust mt-2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
         </div>
       </div>
       ${seller ? `
@@ -1359,7 +1358,7 @@ const App = (() => {
     }
     if (!state.user) {
       return `<button class="btn btn-primary btn-lg btn-block" data-act="open-auth">${ico('shopping-bag', 18)} Mua ngay</button>
-        <p class="muted tiny center" style="margin:0">Cần đăng nhập để mua.</p>`;
+        <p class="muted tiny center m-0">Cần đăng nhập để mua.</p>`;
     }
     if (state.user.role !== 'BUYER') {
       return `<div class="note note-warning">${ico('circle-alert', 18)}
@@ -1379,7 +1378,7 @@ const App = (() => {
       ${!enough ? `<div class="note note-danger">${ico('circle-alert', 18)}
         <span>Số dư khả dụng (${money(state.wallet.availableBalance)}) chưa đủ. <a href="#/wallet"><b>Nạp tiền vào ví</b></a></span></div>` : ''}
       <button class="btn btn-primary btn-lg btn-block" data-act="do-order" data-id="${esc(l.id)}">${ico('shopping-bag', 18)} Mua ngay</button>
-      <p class="muted tiny center" style="margin:0">Chưa trừ tiền ở bước này — bạn xác nhận thanh toán vào ký quỹ ở bước sau.</p>`;
+      <p class="muted tiny center m-0">Chưa trừ tiền ở bước này — bạn xác nhận thanh toán vào ký quỹ ở bước sau.</p>`;
   }
 
   async function doOrder(listingId, btn) {
@@ -1429,8 +1428,8 @@ const App = (() => {
             <button class="${state.orderTab === 'buy' ? 'active' : ''}" data-act="order-tab" data-tab="buy">Đơn mua</button>
           </div>` : ''}
           <div class="card-body">
-            <div class="chips" style="margin-bottom:var(--s-4)">${orderFilterChips()}</div>
-            <div id="orderList"><div class="skeleton" style="min-height:120px"></div></div>
+            <div class="chips mb-4">${orderFilterChips()}</div>
+            <div id="orderList"><div class="skeleton min-h-120"></div></div>
           </div>
         </div>
       </div>`;
@@ -1461,7 +1460,7 @@ const App = (() => {
       if (state.orderFilter === 'done') list = list.filter((t) => DONE_STATUSES.includes(t.status));
 
       if (list.length === 0) {
-        box.innerHTML = `<div class="empty" style="padding:var(--s-8)">
+        box.innerHTML = `<div class="empty p-8">
           <span class="ico-box">${ico('receipt', 28)}</span>
           <h3>Chưa có đơn nào ở mục này</h3>
           <p>${perspective === 'BUYER' ? 'Khi bạn mua một sản phẩm, đơn sẽ xuất hiện ở đây.' : 'Khi có người mua tin đăng của bạn, đơn sẽ xuất hiện ở đây.'}</p>
@@ -1488,7 +1487,7 @@ const App = (() => {
           <div class="order-tile">${productImage({ category: t.listingCategory }, { size: 30 })}</div>
           <div>
             <a class="order-title" href="#/tx/${esc(t.id)}">${esc(t.itemName)}</a>
-            <div class="row" style="gap:6px">${statusTag(t)}${escrowTag(t)}</div>
+            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}</div>
             ${progressBar(t)}
           </div>
           <div class="order-amount">
@@ -1575,7 +1574,7 @@ const App = (() => {
     openModal({
       title: 'Mở tranh chấp',
       body: `
-        <div class="note note-warning" style="margin-bottom:var(--s-4)">
+        <div class="note note-warning mb-4">
           ${ico('triangle-alert', 18)}
           <span>Khi mở tranh chấp, toàn bộ tiền trong ký quỹ bị <b>đóng băng</b> — không bên nào rút được — cho tới khi
             quản trị viên xem xét và quyết định hoàn tiền cho người mua hay giải ngân cho người bán.</span>
@@ -1614,12 +1613,12 @@ const App = (() => {
         <div>
           <div class="price-row total"><span>Chuyển cho ${esc(t.sellerName || 'người bán')}</span><span class="val">${money(t.amount)}</span></div>
         </div>
-        <div class="note note-warning" style="margin-top:var(--s-4)">
+        <div class="note note-warning mt-4">
           ${ico('triangle-alert', 18)}
           <span>Chỉ xác nhận khi bạn đã nhận và kiểm hàng. Sau bước này tiền thuộc về người bán
             và không rút lại được — nếu hàng có vấn đề, hãy mở tranh chấp thay vì xác nhận.</span>
         </div>
-        <div class="note" style="margin-top:var(--s-3)">
+        <div class="note mt-3">
           ${ico('key-round', 18)}
           <span>Đây là thao tác <b>chuyển tiền thật</b>, nên hệ thống bắt buộc <b>xác thực lại bằng vân tay hoặc
             khuôn mặt</b> ngay cả khi bạn đang đăng nhập. Xác thực này chỉ dùng được đúng một lần, cho đúng đơn
@@ -1692,19 +1691,19 @@ const App = (() => {
       <div class="page">
         ${banner('Bảo mật tài khoản', 'Passkey, thiết bị và mật khẩu của bạn')}
 
-        <div class="card" style="padding:var(--s-5); margin-bottom:var(--s-5)">
-          <div class="row-between" style="margin-bottom:var(--s-4)">
-            <h3 style="margin:0">Passkey đã đăng ký</h3>
+        <div class="card p-5 mb-5">
+          <div class="row-between mb-4">
+            <h3 class="m-0">Passkey đã đăng ký</h3>
             <button class="btn btn-primary btn-sm" data-act="add-device">${ico('plus', 15)} Thêm thiết bị</button>
           </div>
           <div id="credentialList">${skeletonGrid(2)}</div>
         </div>
 
-        <div class="card" style="padding:var(--s-5)">
+        <div class="card p-5">
           <div class="row-between">
             <div>
-              <h3 style="margin:0 0 4px">Mật khẩu</h3>
-              <p class="muted tiny" style="margin:0">
+              <h3 class="m-0-0-4">Mật khẩu</h3>
+              <p class="muted tiny m-0">
                 Dùng để mở phiên làm việc. Đổi mật khẩu sẽ đăng xuất mọi phiên khác.
               </p>
             </div>
@@ -1725,7 +1724,7 @@ const App = (() => {
       box.innerHTML = `
         <div class="stack">
           ${credentials.map((c) => `
-            <div class="row-between" style="padding:10px 0; border-bottom:1px solid var(--border)">
+            <div class="row-between border-row">
               <div>
                 <b>${esc(c.deviceName)}</b>
                 <div class="muted tiny">
@@ -1739,7 +1738,7 @@ const App = (() => {
               </button>
             </div>`).join('')}
           ${onlyOne ? `
-            <p class="muted tiny" style="margin:var(--s-3) 0 0">
+            <p class="muted tiny m-s3-0-0">
               Chỉ còn một Passkey nên không xoá được. Nên thêm một thiết bị dự phòng.
             </p>` : ''}
         </div>`;
@@ -1793,7 +1792,7 @@ const App = (() => {
             <input id="newPassword" type="password" autocomplete="new-password">
             <span class="hint">Ít nhất 8 ký tự</span>
           </div>
-          <p class="muted tiny" style="margin:0">
+          <p class="muted tiny m-0">
             Bạn sẽ được yêu cầu xác thực bằng Passkey. Các phiên đăng nhập khác sẽ bị đăng xuất.
           </p>
         </div>`,
@@ -1819,8 +1818,8 @@ const App = (() => {
         title: 'Đổi mật khẩu thành công',
         body: `
           <div class="center">
-            <div style="margin-bottom: var(--s-3)">
-              <span style="color: var(--success)">${ico('circle-check', 48)}</span>
+            <div class="mb-3">
+              <span class="text-success">${ico('circle-check', 48)}</span>
             </div>
             <p>Mật khẩu của bạn đã được cập nhật.<br>Các phiên đăng nhập khác đã bị đăng xuất.</p>
           </div>`,
@@ -1845,7 +1844,7 @@ const App = (() => {
         ${banner('Tin đăng của tôi', 'Mỗi tin là một sản phẩm đơn chiếc — khi có người thanh toán, tin ngừng nhận đơn mới',
           `<button class="btn btn-primary" data-act="new-listing">${ico('plus', 17)} Đăng tin mới</button>`)}
         <div id="todoBox"></div>
-        <div class="card"><div class="table-scroll" id="shopPanel"><div class="skeleton" style="min-height:160px"></div></div></div>
+        <div class="card"><div class="table-scroll" id="shopPanel"><div class="skeleton min-h-160"></div></div></div>
       </div>`;
 
     loadTodo('#todoBox', { hideWhenEmpty: true });
@@ -1884,8 +1883,8 @@ const App = (() => {
     return `
       <tr>
         <td>
-          <div class="row" style="flex-wrap:nowrap;gap:var(--s-3)">
-            <div style="width:52px;flex:0 0 auto">${productImage(l, { size: 22 })}</div>
+          <div class="row flex-nowrap gap-3">
+            <div class="thumb-52">${productImage(l, { size: 22 })}</div>
             <div>
               <a href="#/listing/${esc(l.id)}"><b>${esc(l.title)}</b></a>
               <div class="small muted">${esc(categoryLabel(l.category))} · ${esc(l.location || 'Toàn quốc')}</div>
@@ -1896,7 +1895,7 @@ const App = (() => {
         <td><span class="tag ${st.tone}">${esc(st.label)}</span></td>
         <td class="nowrap small">${fmtDateTime(l.createdAt)}</td>
         <td>
-          <div class="row" style="justify-content:flex-end;flex-wrap:nowrap">
+          <div class="row justify-end flex-nowrap">
             <a class="btn btn-sm btn-ghost" href="#/listing/${esc(l.id)}">Xem</a>
             <button class="btn btn-sm" data-act="edit-listing" data-id="${esc(l.id)}">Sửa</button>
             <button class="btn btn-sm btn-ghost" data-act="delete-listing" data-id="${esc(l.id)}">Gỡ</button>
@@ -1988,7 +1987,7 @@ const App = (() => {
       title: 'Sửa tin đăng',
       wide: true,
       body: listingForm(l) + (l.isSold
-        ? `<div class="note note-warning" style="margin-top:var(--s-4)">${ico('circle-alert', 18)}
+        ? `<div class="note note-warning mt-4">${ico('circle-alert', 18)}
              <span>Tin này đã có người thanh toán nên không đổi được giá bán.</span></div>`
         : ''),
       footer: `<button class="btn" data-act="modal-close">Huỷ</button>
@@ -2237,7 +2236,7 @@ const App = (() => {
     openModal({
       title: 'Cổng thanh toán (mô phỏng)',
       body: `
-        <div class="note note-warning" style="margin-bottom:var(--s-4)">
+        <div class="note note-warning mb-4">
           ${ico('info', 18)}
           <span>Đây là trang của <b>cổng thanh toán</b>, không phải của sàn. Trong demo, bạn chọn kết quả thanh toán;
             cổng sẽ gửi webhook đã ký về máy chủ của sàn.</span>
@@ -2245,7 +2244,7 @@ const App = (() => {
         <div class="price-row"><span>Phương thức</span><span>${ico(m.icon, 16)} ${esc(m.label)}</span></div>
         <div class="price-row"><span>Mã giao dịch tại cổng</span><span class="mono">${esc(shortId(page.providerRef))}</span></div>
         <div class="price-row total"><span>Số tiền thanh toán</span><span class="val">${money(page.amount)}</span></div>
-        ${settled ? `<div class="note note-success" style="margin-top:var(--s-4)">${ico('circle-check', 18)}<span>Cổng thanh toán
+        ${settled ? `<div class="note note-success mt-4">${ico('circle-check', 18)}<span>Cổng thanh toán
           đã có kết quả <b>${esc(page.status)}</b>. Nếu ví chưa đổi, hệ thống sẽ tự đối soát.</span></div>` : ''}`,
       footer: settled
         ? '<button class="btn" data-act="modal-close">Đóng</button>'
@@ -2316,15 +2315,15 @@ const App = (() => {
     try { ({ items } = await api('/notifications/todo')); } catch (_) { box.innerHTML = ''; return; }
     if (items.length === 0) {
       box.innerHTML = hideWhenEmpty ? '' : `
-        <div class="note note-success" style="margin-bottom:var(--s-5)">
+        <div class="note note-success mb-5">
           ${ico('circle-check', 18)}<span>Không có việc nào đang chờ bạn.</span>
         </div>`;
       return;
     }
     box.innerHTML = `
-      <div class="card" style="margin-bottom:var(--s-5)">
+      <div class="card mb-5">
         <div class="card-head"><h2>Việc cần xử lý</h2><span class="badge-count">${items.length}</span></div>
-        <div class="card-body stack" style="gap:var(--s-3)">
+        <div class="card-body stack gap-3">
           ${items.map((i) => `
             <a class="todo-item" href="${todoLink(i)}">
               ${ico(TODO_ICON[i.kind] || 'clipboard-list', 18)}
@@ -2358,7 +2357,7 @@ const App = (() => {
     const { notifications, unreadCount } = await api('/notifications?limit=50');
     state.unread = unreadCount;
     if (notifications.length === 0) {
-      box.innerHTML = '<p class="muted" style="margin:0">Chưa có thông báo nào.</p>';
+      box.innerHTML = '<p class="muted m-0">Chưa có thông báo nào.</p>';
       return;
     }
     box.innerHTML = notifications.map((n) => `
@@ -2434,7 +2433,7 @@ const App = (() => {
           <div class="tx-value">
             <span>Giá trị giao dịch</span>
             <b>${money(t.amount)}</b>
-            <div style="margin-top:6px">${statusTag(t)}</div>
+            <div class="mt-6px">${statusTag(t)}</div>
           </div>
         </div>
 
@@ -2462,11 +2461,11 @@ const App = (() => {
             ${actionBox(t, role, isBuyer)}
             <div class="card">
               <div class="card-head"><h3>Bảo mật của giao dịch</h3></div>
-              <div class="card-body stack" style="gap:var(--s-3)">
-                <div class="small" style="display:grid;gap:8px">
-                  <div class="row" style="flex-wrap:nowrap;align-items:flex-start">${ico('fingerprint', 16)}<span>Giải ngân và phân xử luôn đòi <b>xác thực lại bằng Passkey</b>, kể cả khi đang đăng nhập.</span></div>
-                  <div class="row" style="flex-wrap:nowrap;align-items:flex-start">${ico('key-round', 16)}<span>Phiếu uỷ quyền dùng một lần, ràng buộc đúng giao dịch này, đúng số tiền, đúng người nhận.</span></div>
-                  <div class="row" style="flex-wrap:nowrap;align-items:flex-start">${ico('link-2', 16)}<span>Mọi bước được ghi vào chuỗi băm riêng của giao dịch; sửa lén một bản ghi sẽ bị phát hiện.</span></div>
+              <div class="card-body stack gap-3">
+                <div class="small layout-grid gap-8px">
+                  <div class="row flex-nowrap items-start">${ico('fingerprint', 16)}<span>Giải ngân và phân xử luôn đòi <b>xác thực lại bằng Passkey</b>, kể cả khi đang đăng nhập.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('key-round', 16)}<span>Phiếu uỷ quyền dùng một lần, ràng buộc đúng giao dịch này, đúng số tiền, đúng người nhận.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('link-2', 16)}<span>Mọi bước được ghi vào chuỗi băm riêng của giao dịch; sửa lén một bản ghi sẽ bị phát hiện.</span></div>
                 </div>
                 <div class="row">
                   <button class="btn btn-sm" data-act="tx-verify-chain" data-id="${esc(t.id)}">${ico('shield-check', 15)} Kiểm chứng chuỗi nhật ký</button>
@@ -2524,7 +2523,7 @@ const App = (() => {
         <div class="label">${ico('shield-check', 15)} Tiền ký quỹ</div>
         <div class="amount">${money(t.amount)}</div>
         <div><b>${esc(b.label)}</b></div>
-        ${b.text ? `<div class="small" style="margin-top:2px">${esc(b.text)}</div>` : ''}
+        ${b.text ? `<div class="small mt-2px">${esc(b.text)}</div>` : ''}
         <div class="escrow-flow">
           ${flow.map((f, i) => `<span class="${i === b.here ? 'here' : ''}">${esc(f)}</span>${i < flow.length - 1 ? ico('arrow-right', 14) : ''}`).join('')}
         </div>
@@ -2539,13 +2538,13 @@ const App = (() => {
       ? (t.status === 'DISPUTED' ? 'Hồ sơ tranh chấp đang chờ bạn phân xử.' : 'Không có việc gì cho quản trị viên ở giao dịch này.')
       : nextStepText(t, isBuyer);
     const warn = isBuyer && t.status === 'WAIT_CONFIRM'
-      ? `<div class="note note-warning" style="margin-top:var(--s-3)">${ico('triangle-alert', 18)}
+      ? `<div class="note note-warning mt-3">${ico('triangle-alert', 18)}
           <span>Chỉ giải ngân khi đã kiểm hàng. Sau bước này tiền thuộc về người bán và không rút lại được.</span></div>`
       : '';
     return `
       <div class="action-box ${acts ? '' : 'idle'}">
         <h3>Hành động hiện tại</h3>
-        <p class="small" style="margin:0;color:var(--text-2)">${esc(text)}</p>
+        <p class="small m-0 text-2">${esc(text)}</p>
         ${warn}
         ${acts ? `<div class="row">${acts}</div>` : ''}
       </div>`;
@@ -2560,9 +2559,9 @@ const App = (() => {
           <span class="tag ${resolved ? 'tag-success' : 'tag-danger'}">${resolved ? 'Đã phân xử' : 'Đang chờ phân xử'}</span>
         </div>
         <div class="card-body">
-          <p class="small muted" style="margin:0 0 6px">Mở bởi <b>${d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
-          <p style="margin:0 0 6px">“${esc(d.reason)}”</p>
-          ${resolved ? `<p class="small" style="margin:0">Quyết định: <b>${d.adminDecision === 'REFUND'
+          <p class="small muted m-0-0-6">Mở bởi <b>${d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
+          <p class="m-0-0-6">“${esc(d.reason)}”</p>
+          ${resolved ? `<p class="small m-0">Quyết định: <b>${d.adminDecision === 'REFUND'
             ? 'Hoàn tiền cho người mua' : 'Giải ngân cho người bán'}</b> lúc ${fmtDateTime(d.resolvedAt)}</p>` : ''}
         </div>
       </div>`;
@@ -2630,22 +2629,22 @@ const App = (() => {
     }
 
     box.innerHTML = `
-      <div class="note" style="margin-bottom:var(--s-5)">
+      <div class="note mb-5">
         ${ico(result.ok ? 'shield-check' : 'frown', 18)}
         <span>${result.ok
           ? `Cả <b>${result.checked}</b> bất biến đều đúng trên dữ liệu hiện tại.`
           : `Có <b>${result.violations.length}</b> vi phạm. Đây là dấu hiệu dữ liệu hoặc logic đã sai, không phải lỗi hiển thị.`}</span>
       </div>
-      <div class="stack" style="gap:var(--s-4)">
+      <div class="stack gap-4">
         ${result.checks.map((c) => {
           const bad = broken.get(c.code);
           return `
             <div class="card"><div class="card-body">
-              <div class="row-between" style="align-items:flex-start">
+              <div class="row-between items-start">
                 <div class="grow">
-                  <h3 style="margin:0 0 4px">${c.no}. ${esc(c.name)}</h3>
-                  <p class="muted small" style="margin:0">${esc(c.statement)}</p>
-                  ${bad ? `<ul class="muted small" style="margin:8px 0 0">${bad.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
+                  <h3 class="m-0-0-4">${c.no}. ${esc(c.name)}</h3>
+                  <p class="muted small m-0">${esc(c.statement)}</p>
+                  ${bad ? `<ul class="muted small mt-8px">${bad.map((d) => `<li>${esc(d)}</li>`).join('')}</ul>` : ''}
                 </div>
                 <span class="tag ${bad ? 'tag-danger' : 'tag-success'}">${bad ? 'VI PHẠM' : 'ĐÚNG'}</span>
               </div>
@@ -2665,12 +2664,12 @@ const App = (() => {
       return;
     }
 
-    list.innerHTML = `<div class="stack" style="gap:var(--s-5)">${requests.map((r) => {
+    list.innerHTML = `<div class="stack gap-5">${requests.map((r) => {
       const st = SELLER_REQUEST_UI[r.status] || { label: r.status, tone: '' };
       const open = r.status === 'PENDING';
       return `
         <div class="card"><div class="card-body">
-          <div class="row-between" style="align-items:flex-start">
+          <div class="row-between items-start">
             <div class="grow">
               <h3>${esc(r.shopName)}</h3>
               <div class="muted small">
@@ -2682,11 +2681,11 @@ const App = (() => {
           </div>
 
           ${r.pitch
-            ? `<p class="small" style="margin:var(--s-4) 0;white-space:pre-wrap">“${esc(r.pitch)}”</p>`
-            : `<p class="small muted" style="margin:var(--s-4) 0">Người gửi không viết mô tả.</p>`}
+            ? `<p class="small m-s4-0 pre-wrap">“${esc(r.pitch)}”</p>`
+            : `<p class="small muted m-s4-0">Người gửi không viết mô tả.</p>`}
 
           ${!open && r.reviewNote
-            ? `<div class="note ${r.status === 'REJECTED' ? 'note-danger' : 'note-success'}" style="margin-bottom:var(--s-4)">
+            ? `<div class="note ${r.status === 'REJECTED' ? 'note-danger' : 'note-success'} mb-4">
                  ${ico(r.status === 'REJECTED' ? 'circle-alert' : 'circle-check', 18)}
                  <span>${esc(r.reviewNote)}</span>
                </div>`
@@ -2752,12 +2751,12 @@ const App = (() => {
       return;
     }
 
-    list.innerHTML = `<div class="stack" style="gap:var(--s-5)">${disputes.map((d) => {
+    list.innerHTML = `<div class="stack gap-5">${disputes.map((d) => {
       const t = d.transaction || {};
       const open = d.status === 'OPEN';
       return `
         <div class="card"><div class="card-body">
-          <div class="row-between" style="align-items:flex-start">
+          <div class="row-between items-start">
             <div class="grow">
               <h3>${esc(t.itemName || 'Đơn hàng')}</h3>
               <div class="muted small">
@@ -2775,10 +2774,10 @@ const App = (() => {
     
           </div>
 
-          <p class="small" style="margin:0 0 4px">
+          <p class="small m-0-0-4">
             <b>${d.openedBy === 'BUYER' ? 'Người mua' : 'Người bán'} ${esc(d.createdByName || '')} khiếu nại:</b>
           </p>
-          <p class="small" style="margin:0 0 var(--s-4);white-space:pre-wrap">“${esc(d.reason)}”</p>
+          <p class="small m-0-0-s4 pre-wrap">“${esc(d.reason)}”</p>
 
           <div class="row">
             ${open ? `
@@ -2830,7 +2829,7 @@ const App = (() => {
 
     const counts = users.reduce((acc, u) => ({ ...acc, [u.role]: (acc[u.role] || 0) + 1 }), {});
     list.innerHTML = `
-      <div class="stat-grid" style="margin-bottom:var(--s-6)">
+      <div class="stat-grid mb-6">
         <div class="card stat">
           <span class="ico-box">${ico('shopping-bag', 22)}</span>
           <span><span class="k">Người mua</span><span class="v">${counts.BUYER || 0}</span></span>
@@ -2884,9 +2883,9 @@ const App = (() => {
     ).join('');
 
     box.innerHTML = `
-      <div class="row" style="margin-bottom:var(--s-5);align-items:center">
+      <div class="row mb-5">
         <label class="muted small" for="secEventType">Lọc theo loại</label>
-        <select id="secEventType" style="width:auto">
+        <select id="secEventType" class="w-auto">
           <option value="">Tất cả loại sự kiện</option>
           ${typeOptions}
         </select>
@@ -2960,7 +2959,7 @@ const App = (() => {
             <button class="btn" data-act="audit-load">Xem nhật ký</button>
             <button class="btn btn-primary" data-act="audit-verify">${ico('shield-check', 17)} Kiểm chứng chuỗi</button>
           </div>
-          <p class="muted tiny" style="margin:10px 0 0">Mã giao dịch nằm ở trang chi tiết giao dịch (nút "Xem mã băm").</p>
+          <p class="muted tiny mt-10px">Mã giao dịch nằm ở trang chi tiết giao dịch (nút "Xem mã băm").</p>
         </div></div>
 
         <div id="auditResult"></div>
@@ -2973,7 +2972,7 @@ const App = (() => {
     const box = $('#auditResult');
     if (!box) return;
     if (!txId) return toast('Nhập mã đơn hàng', 'err');
-    box.innerHTML = '<div class="skeleton" style="height:160px"></div>';
+    box.innerHTML = '<div class="skeleton h-160"></div>';
     try {
       const { logs } = await api(`/transactions/${encodeURIComponent(txId)}/logs`);
       if (logs.length === 0) {
