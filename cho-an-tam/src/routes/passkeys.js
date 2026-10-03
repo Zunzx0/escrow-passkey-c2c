@@ -61,11 +61,20 @@ const RP_NAME = 'Escrow Passkeys C2C';
 const CHALLENGE_TTL_SECONDS = parseInt(process.env.CHALLENGE_TTL_SECONDS || '300', 10);
 const DEMO_BUYER_INITIAL_BALANCE = parseInt(process.env.DEMO_BUYER_INITIAL_BALANCE || '5000000', 10);
 const RATE_LIMIT_AUTH_PER_MINUTE = parseInt(process.env.RATE_LIMIT_AUTH_PER_MINUTE || '10', 10);
+const RATE_LIMIT_REGISTRATION_USERNAME_PER_MINUTE = parseInt(
+  process.env.RATE_LIMIT_REGISTRATION_USERNAME_PER_MINUTE || '4',
+  10
+);
 
 const authLimiter = rateLimit({ perMinute: RATE_LIMIT_AUTH_PER_MINUTE });
+const registrationUsernameLimiter = rateLimit({
+  perMinute: RATE_LIMIT_REGISTRATION_USERNAME_PER_MINUTE,
+  name: 'register-account-by-username',
+  identity: (req) => String((req.body && req.body.username) || '').trim().toLowerCase(),
+});
 
-// Phản hồi "tên đăng nhập đã tồn tại" vẫn giữ để người dùng thật biết đổi tên khác, nhưng mỗi
-// IP chỉ được nhận nó vài lần mỗi giờ; quá ngưỡng thì cả điểm đăng ký bị chặn với IP đó.
+// Đếm số username ĐÃ CÓ khác nhau mà một IP dò trúng trong cửa sổ dài. Lặp lại cùng một tên
+// không tăng bộ đếm; đăng ký nhiều tài khoản mới hợp lệ từ cùng mạng cũng không bị phạt.
 const usernameProbes = probeCounter({
   limit: parseInt(process.env.USERNAME_PROBE_LIMIT_PER_HOUR || '8', 10),
   name: 'register-username-taken',
@@ -118,7 +127,7 @@ async function issueSession(req, res, row, { sessionId } = {}) {
 // công đều chỉ có năng lực mua. Năng lực bán được cấp về sau qua quy trình xin và duyệt;
 // quyền quản trị chỉ được khởi tạo bằng thủ tục vận hành `npm run seed:admin`.
 
-router.post('/register/account', authLimiter, async (req, res, next) => {
+router.post('/register/account', authLimiter, registrationUsernameLimiter, async (req, res, next) => {
   try {
     const probeWait = usernameProbes.blockedFor(req);
     if (probeWait) {
@@ -148,9 +157,18 @@ router.post('/register/account', authLimiter, async (req, res, next) => {
 
     assertPasswordPolicy(password);
 
+    // Tính hash trước khi tra username để hai nhánh "mới" và "đã tồn tại" đều chịu cùng
+    // phép tính mật mã tốn chi phí. Điều này giảm chênh lệch thời gian phản hồi có thể dùng
+    // làm kênh phụ để dò tài khoản.
+    const passwordHash = hashPassword(password);
+
     if (await db.prepare('SELECT id FROM users WHERE username = ?').get(cleanUsername)) {
-      usernameProbes.hit(req);
-      throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
+      usernameProbes.hit(req, cleanUsername);
+      throw new AppError(
+        409,
+        'REGISTRATION_UNAVAILABLE',
+        'Không thể sử dụng thông tin đăng ký này. Hãy kiểm tra lại hoặc chọn tên đăng nhập khác.'
+      );
     }
 
     const userId = uuid();
@@ -159,13 +177,18 @@ router.post('/register/account', authLimiter, async (req, res, next) => {
       await db.prepare(
         `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
          VALUES (?, ?, ?, 'BUYER', ?, 'PENDING_PASSKEY', 0, ?, ?)`
-      ).run(userId, cleanUsername, cleanDisplayName, hashPassword(password), now, now);
+      ).run(userId, cleanUsername, cleanDisplayName, passwordHash, now, now);
     } catch (e) {
       // Hai request cùng tên đăng nhập chạy song song có thể cùng qua bước kiểm ở trên;
-      // ràng buộc UNIQUE(username) là chốt chặn thật, trả về đúng thông báo như bước kiểm.
+      // Ràng buộc UNIQUE(username) là chốt chặn thật. Cuộc đua đăng ký cùng tên vẫn nhận
+      // cùng phản hồi chung như nhánh kiểm tra phía trên, không làm lộ thêm chi tiết.
       if (db.isUniqueViolation(e)) {
-        usernameProbes.hit(req);
-        throw new AppError(409, 'USERNAME_TAKEN', 'Tên đăng nhập đã tồn tại');
+        usernameProbes.hit(req, cleanUsername);
+        throw new AppError(
+          409,
+          'REGISTRATION_UNAVAILABLE',
+          'Không thể sử dụng thông tin đăng ký này. Hãy kiểm tra lại hoặc chọn tên đăng nhập khác.'
+        );
       }
       throw e;
     }
