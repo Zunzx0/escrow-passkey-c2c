@@ -67,6 +67,7 @@ const SUITES = [
   'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
   'payment-e2e', 'reconcile-e2e', 'counter-e2e', 'cleanup-e2e', 'notification-e2e', 'checkout-e2e',
   'dispute-race-e2e',
+  'username-enumeration-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');
 

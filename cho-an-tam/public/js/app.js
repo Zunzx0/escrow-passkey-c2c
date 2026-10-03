@@ -98,6 +98,7 @@ const App = (() => {
     COUNTER_ANOMALY: 'signCount của Passkey bất thường',
     TOPUP_SUCCEEDED: 'Nạp tiền thành công',
     TOPUP_FAILED: 'Nạp tiền thất bại',
+    REGISTRATION_DENIED: 'Thông tin đăng ký không khả dụng',
   };
 
   const PAYMENT_UI = {

@@ -28,14 +28,18 @@ function sweep(now) {
  * @param perMinute  số yêu cầu tối đa trong một phút cho mỗi (IP, tuyến)
  * @param name       tên nhóm, để hai tuyến khác nhau có thể dùng chung một xô nếu muốn
  */
-function rateLimit({ perMinute = 10, name = null } = {}) {
+function rateLimit({ perMinute = 10, name = null, identity = null } = {}) {
   return (req, res, next) => {
     const now = Date.now();
     sweep(now);
 
     // req.route chỉ có sau khi Express khớp tuyến, tức là luôn có ở middleware cấp tuyến.
     const pattern = name || `${req.baseUrl || ''}${(req.route && req.route.path) || req.path}`;
-    const key = `${req.ip}|${req.method}|${pattern}`;
+    // `identity` cho phép một tuyến nhạy cảm có thêm xô theo giá trị đã chuẩn hoá, ví dụ
+    // (IP, username) ở đăng ký. IP vẫn luôn nằm trong khoá để một người ở IP khác không thể
+    // cố ý làm đầy xô của nạn nhân và khoá tên đăng nhập họ đang muốn đăng ký.
+    const identityPart = typeof identity === 'function' ? String(identity(req) || '') : '';
+    const key = `${req.ip}|${req.method}|${pattern}|${identityPart}`;
 
     let bucket = buckets.get(key);
     if (!bucket || bucket.resetAt < now) {
@@ -75,7 +79,7 @@ function probeCounter({ limit, windowMs = 60 * 60 * 1000, name }) {
     const key = `${req.ip}|${name}`;
     let e = hits.get(key);
     if (!e || e.resetAt < now) {
-      e = { count: 0, resetAt: now + windowMs };
+      e = { count: 0, values: new Set(), resetAt: now + windowMs };
       hits.set(key, e);
     }
     return e;
@@ -86,8 +90,20 @@ function probeCounter({ limit, windowMs = 60 * 60 * 1000, name }) {
       const e = entry(req, now);
       return e.count >= limit ? Math.max(1, Math.ceil((e.resetAt - now) / 1000)) : 0;
     },
-    hit(req, now = Date.now()) {
-      entry(req, now).count += 1;
+    // Nếu có `value`, chỉ đếm mỗi giá trị chuẩn hoá một lần. Cơ chế này phát hiện một IP
+    // lần lượt thử nhiều username nhưng không phạt người dùng vì gõ lại cùng một tên.
+    hit(req, value = null, now = Date.now()) {
+      const e = entry(req, now);
+      if (value === null || value === undefined) {
+        e.count += 1;
+      } else {
+        const normalized = String(value);
+        if (!e.values.has(normalized)) {
+          e.values.add(normalized);
+          e.count += 1;
+        }
+      }
+      return e.count;
     },
     reset() {
       hits.clear();

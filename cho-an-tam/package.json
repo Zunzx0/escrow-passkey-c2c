@@ -23,6 +23,7 @@
     "test:notifications": "node test/notification-e2e.js",
     "test:checkout": "node test/checkout-e2e.js",
     "test:dispute-race": "node test/dispute-race-e2e.js",
+    "test:username-enumeration": "node test/username-enumeration-e2e.js",
     "test:all": "node test/e2e.js && node test/market-e2e.js && node test/security-e2e.js && node test/hybrid-e2e.js && node test/payment-e2e.js && node test/reconcile-e2e.js",
     "reconcile": "node scripts/reconcile.js",
     "cleanup:challenges": "node scripts/cleanup-challenges.js",
