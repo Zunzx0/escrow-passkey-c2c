@@ -63,6 +63,28 @@ async function getInvariants(adminToken) {
   return api('/api/admin/invariants', { token: adminToken });
 }
 
+/**
+ * Kiểm chặt phản hồi của BÊN THUA trong cuộc đua phân xử.
+ *
+ * `allowed` là tập {mã lỗi -> status HTTP đúng của nó} — hai bên gọi dưới đây truyền tập khác
+ * nhau vì R1 có đúng MỘT kết quả hợp lệ (xem lý do ở lời gọi), còn R2 có hai kết quả hợp lệ do
+ * phụ thuộc thời điểm. Dù tập nào, CONSTRAINT_VIOLATION (lỗi chung, không nói rõ lý do nghiệp
+ * vụ) không bao giờ được coi là hợp lệ — kiểm riêng để lần sau có ai nới `allowed` ra cũng
+ * không vô tình nhét lỗi mơ hồ vào.
+ */
+function assertLoserOutcome(res, allowed, label) {
+  const code = res.data && res.data.error;
+  assert(code !== 'CONSTRAINT_VIOLATION', `${label}: không rơi vào lỗi mơ hồ CONSTRAINT_VIOLATION (nhận ${res.status} ${code})`);
+  const expectedStatus = allowed[code];
+  assert(
+    expectedStatus !== undefined,
+    `${label}: mã lỗi nằm trong tập đã định nghĩa {${Object.keys(allowed).join(', ')}} (thực tế: ${res.status} ${code})`
+  );
+  if (expectedStatus !== undefined) {
+    assert(res.status === expectedStatus, `${label}: status HTTP khớp đúng mã lỗi ${code} (kỳ vọng ${expectedStatus}, nhận ${res.status})`);
+  }
+}
+
 /** Mở một đơn mới ở đúng trạng thái WAIT_CONFIRM + LOCKED, sẵn sàng để mở tranh chấp. */
 async function setupDisputableOrder(buyer, seller, label) {
   const listing = await api('/api/listings', {
@@ -118,8 +140,14 @@ async function main() {
   console.log(`  [R1] refund -> ${refundRes.status} ${refundRes.data.error || refundRes.data.transaction?.status}`);
   console.log(`  [R1] release -> ${releaseRes.status} ${releaseRes.data.error || releaseRes.data.transaction?.status}`);
 
-  const oneWon1 = (refundRes.status === 200) !== (releaseRes.status === 200); // XOR: đúng một request thành công
-  assert(oneWon1, 'Đúng một trong hai quyết định thành công, cái kia bị từ chối');
+  const succeeded1 = [refundRes, releaseRes].filter((r) => r.status === 200);
+  assert(succeeded1.length === 1, `Đúng một trong hai quyết định thành công (thực tế: ${succeeded1.length})`);
+  const loser1 = refundRes.status === 200 ? releaseRes : refundRes;
+  // R1: hai quyết định dùng HAI phiếu khác nhau — phiếu của bên thua không hề bị bên thắng tiêu
+  // thụ, nên bên thua LUÔN thất bại ở đúng một chỗ: bước tiêu thụ hồ sơ tranh chấp nguyên tử
+  // (UPDATE disputes ... WHERE status='OPEN'), không phụ thuộc thời điểm. Đúng MỘT mã lỗi hợp
+  // lệ, không phải một tập.
+  assertLoserOutcome(loser1, { DISPUTE_NOT_OPEN: 409 }, 'R1 bên thua');
 
   const buyerAfter1 = await wallet(buyer.token);
   const sellerAfter1 = await wallet(seller.token);
@@ -160,8 +188,17 @@ async function main() {
   console.log(`  [R2] request A -> ${resA.status} ${JSON.stringify(resA.data).slice(0, 160)}`);
   console.log(`  [R2] request B -> ${resB.status} ${JSON.stringify(resB.data).slice(0, 160)}`);
 
-  const succeeded2 = [resA, resB].filter((r) => r.status === 200).length;
-  assert(succeeded2 === 1, `Đúng một trong hai request thành công (thực tế: ${succeeded2})`);
+  const succeeded2 = [resA, resB].filter((r) => r.status === 200);
+  assert(succeeded2.length === 1, `Đúng một trong hai request thành công (thực tế: ${succeeded2.length})`);
+  const loser2 = resA.status === 200 ? resB : resA;
+  // R2: cả hai request dùng CÙNG một phiếu cho CÙNG một quyết định — bên thua có thể bị chặn ở
+  // một trong hai chỗ tuỳ thời điểm: (a) bước tiêu thụ hồ sơ tranh chấp nguyên tử, nếu bên thắng
+  // đã commit xong trước khi bên thua đọc được trạng thái hồ sơ; (b) bước tra phiếu uỷ quyền,
+  // nếu bên thắng đã tiêu thụ phiếu trước khi bên thua tra tới. CẢ HAI là hành vi đúng theo
+  // thiết kế — nhưng không được là bất kỳ mã lỗi nào khác, đặc biệt không phải lỗi chung
+  // CONSTRAINT_VIOLATION (đây chính là lỗi đã quan sát được TRƯỚC KHI sửa, dựng lại bằng
+  // DEBUG_RACE_DELAY_MS — xem chú thích đầu tệp).
+  assertLoserOutcome(loser2, { DISPUTE_NOT_OPEN: 409, REAUTH_REQUIRED: 401 }, 'R2 bên thua');
 
   const buyerAfter2 = await wallet(buyer.token);
   const buyerDelta2 = buyerAfter2.availableBalance - buyerBefore2.availableBalance;
