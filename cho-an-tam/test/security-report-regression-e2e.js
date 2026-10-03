@@ -12,7 +12,7 @@
  *   SR04  amount kiểu chuỗi/mảng/boolean/null/số thực/ngoài khoảng đều bị từ chối (L3)
  *   SR05  Giới hạn số yêu cầu nạp đang PENDING, kể cả khi nhiều request đua nhau (M3)
  *   SR06  Giới hạn tổng nạp trong 24 giờ, và giới hạn số dư ví dự kiến (M3)
- *   SR07  Một phiếu uỷ quyền không thực hiện thành công hai thao tác (M1)
+ *   SR07  Một phiếu CHANGE_PASSWORD không thực hiện thành công hai lần, kể cả với token mới (M1)
  *   SR08  Đăng xuất thu hồi phiên tại máy chủ — access token cũ dùng lại bị 401 (L4)
  *   SR09  /health ở production chỉ trả {status:"OK"}, không lộ cấu hình nội bộ (L1)
  *   SR10  Body JSON hỏng trả lỗi chung, không lộ thông báo của parser (L2)
@@ -260,57 +260,44 @@ async function main() {
   }
 
   // =======================================================================================
-  section('SR07: Một phiếu uỷ quyền không thực hiện thành công hai thao tác');
+  section('SR07: Một phiếu CHANGE_PASSWORD không thực hiện thành công hai lần, kể cả với token mới');
   // =======================================================================================
   {
-    const listing = await api('/api/listings', {
-      method: 'POST', token: seller.token,
-      body: { title: `SR07 ${rand}`, category: 'SACH', price: 65000, location: 'Hà Nội' },
-    });
-    const order = await api('/api/transactions/orders', { method: 'POST', token: buyer.token, body: { listingId: listing.data.id } });
-    const txnId = order.data.id;
-    await api(`/api/transactions/${txnId}/secure`, { method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID() } });
-    await api(`/api/transactions/${txnId}/ship`, { method: 'POST', token: seller.token });
-    await api(`/api/transactions/${txnId}/wait-confirm`, { method: 'POST', token: buyer.token });
+    // Dùng CHANGE_PASSWORD thay vì giải ngân: phiếu loại này không gắn giao dịch, hồ sơ hay quyết
+    // định nào, và lần gọi thứ hai đi bằng token MỚI của CHÍNH phiên đã xác thực lại. Vì vậy mọi
+    // lý do từ chối khác (sai transactionId, sai action, trạng thái giao dịch, token phiên cũ bị
+    // thu hồi) đều bị loại — nếu lần hai bị từ chối thì chỉ có thể do phiếu đã được tiêu thụ.
+    // Dùng tài khoản riêng vì đổi mật khẩu thu hồi các phiên khác của chính tài khoản đó.
+    const pw = await flows.registerUser({ username: `sr_pw_${rand}`, displayName: 'SR Password' });
+    const grantRes = await flows.accountGrant(pw.token, pw.auth, 'CHANGE_PASSWORD');
+    const grant = grantRes.data.reauthGrant;
+    assert(grantRes.status === 200 && !!grant && grantRes.data.action === 'CHANGE_PASSWORD',
+      `Cấp được phiếu CHANGE_PASSWORD (nhận ${grantRes.status})`);
 
-    const opt = await api(`/api/transactions/${txnId}/reauth/options`, { method: 'POST', token: buyer.token });
-    const assertion = buyer.auth.authenticate({
-      rpId: process.env.WEBAUTHN_RP_ID || 'localhost',
-      origin: process.env.WEBAUTHN_ORIGIN || BASE,
-      challenge: opt.data.options.challenge,
+    const first = await api('/api/users/me/password', {
+      method: 'POST', token: pw.token, body: { newPassword: `MatKhau-Moi-1-${rand}`, reauthGrant: grant },
     });
-    const verify = await api(`/api/transactions/${txnId}/reauth/verify`, {
-      method: 'POST', token: buyer.token,
-      body: { reauthSessionId: opt.data.reauthSessionId, response: assertion },
-    });
-    const grant = verify.data.reauthGrant;
-    assert(!!grant, 'Cấp được phiếu uỷ quyền giải ngân');
+    assert(first.status === 200 && !!first.data.token, `Đổi mật khẩu lần đầu bằng phiếu thành công (nhận ${first.status} ${first.data.error || ''})`);
+    const freshToken = first.data.token;
 
-    const sellerBefore = await balanceOf(seller.user.id);
-    const first = await api(`/api/transactions/${txnId}/release`, {
-      method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID(), reauthGrant: grant },
-    });
-    assert(first.status === 200 && first.data.status === 'COMPLETED', `Lần giải ngân đầu bằng phiếu thành công (nhận ${first.status})`);
+    // Token mới phải còn dùng được — nếu không, lần gọi thứ hai có thể bị chặn vì token chứ không
+    // phải vì phiếu, và bài kiểm thử sẽ chứng minh sai điều.
+    const stillValid = await api('/api/wallets/me', { token: freshToken });
+    assert(stillValid.status === 200, `Access token mới sau khi đổi mật khẩu còn hiệu lực (nhận ${stillValid.status})`);
 
-    // Dùng LẠI đúng phiếu đó cho một requestId KHÁC (không phải gửi lại y nguyên — đó là
-    // idempotency replay, đã kiểm ở market-e2e M13). Ở đây kiểm riêng: phiếu đã TIÊU THỤ rồi thì
-    // không dùng lại được cho một thao tác MỚI, kể cả trên đúng giao dịch đó.
-    const listing2 = await api('/api/listings', {
-      method: 'POST', token: seller.token,
-      body: { title: `SR07b ${rand}`, category: 'SACH', price: 40000, location: 'Hà Nội' },
+    const second = await api('/api/users/me/password', {
+      method: 'POST', token: freshToken, body: { newPassword: `MatKhau-Moi-2-${rand}`, reauthGrant: grant },
     });
-    const order2 = await api('/api/transactions/orders', { method: 'POST', token: buyer.token, body: { listingId: listing2.data.id } });
-    const txn2 = order2.data.id;
-    await api(`/api/transactions/${txn2}/secure`, { method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID() } });
-    await api(`/api/transactions/${txn2}/ship`, { method: 'POST', token: seller.token });
-    await api(`/api/transactions/${txn2}/wait-confirm`, { method: 'POST', token: buyer.token });
-    const reuseOtherTxn = await api(`/api/transactions/${txn2}/release`, {
-      method: 'POST', token: buyer.token, body: { requestId: crypto.randomUUID(), reauthGrant: grant },
-    });
-    assert(reuseOtherTxn.status === 401, `Phiếu đã dùng không giải ngân được giao dịch KHÁC (nhận ${reuseOtherTxn.status})`);
+    assert(second.status === 401 && second.data.error === 'REAUTH_REQUIRED',
+      `Dùng lại ĐÚNG phiếu đó với token mới, mật khẩu hợp lệ khác bị 401 REAUTH_REQUIRED (nhận ${second.status} ${second.data.error})`);
 
-    const sellerAfter = await balanceOf(seller.user.id);
-    assert(sellerAfter - sellerBefore === 65000, 'Người bán chỉ nhận đúng tiền của giao dịch đầu, không nhận thêm từ lần dùng lại phiếu');
+    // Đối chứng ở tầng dữ liệu: máy chủ chỉ lưu SHA-256 của phiếu, tra theo băm đó.
+    const tokenHash = crypto.createHash('sha256').update(grant, 'utf8').digest('hex');
+    const row = await db.prepare('SELECT used_at FROM reauth_grants WHERE token_hash = ?').get(tokenHash);
+    assert(!!row && row.used_at !== null, `Phiếu trong DB đã có used_at (nhận ${row ? row.used_at : 'không tìm thấy'})`);
+
+    const login = await flows.loginPassword(`sr_pw_${rand}`, `MatKhau-Moi-1-${rand}`);
+    assert(login.status === 200, `Mật khẩu vẫn là mật khẩu của lần đổi ĐẦU — lần hai không có tác dụng (đăng nhập nhận ${login.status})`);
   }
 
   // =======================================================================================
@@ -334,11 +321,26 @@ async function main() {
   await (async () => {
     const PORT = 3177;
     const dbPath = process.env.DATABASE_URL ? null : path.join('data', 'test', `health-check-${Date.now()}.db`);
-    const env = { ...process.env, APP_ENV: 'production', PORT: String(PORT) };
+    // Server con chỉ để quan sát /health. Trên PostgreSQL nó dùng CHUNG cơ sở dữ liệu test với
+    // server chính, nên phải tắt mọi tác vụ nền (khoảng chạy = 0 nghĩa là không khởi động — xem
+    // lib/backgroundJobs.js): một worker đối soát thứ hai chạy song song sẽ tự tất toán yêu cầu
+    // nạp tiền mà các bộ khác đang điều khiển. Biến ADMIN_BOOTSTRAP_* bị gỡ để server con không
+    // tạo tài khoản quản trị nào. Việc duy nhất nó còn chạm tới DB là bước khởi tạo lúc khởi
+    // động: migration đã áp thì bỏ qua, ví SYSTEM_ESCROW đã có thì ON CONFLICT DO NOTHING.
+    const env = {
+      ...process.env,
+      APP_ENV: 'production',
+      PORT: String(PORT),
+      RECONCILE_INTERVAL_SECONDS: '0',
+      CHALLENGE_CLEANUP_INTERVAL_SECONDS: '0',
+    };
     if (dbPath) env.DB_PATH = dbPath;
-    delete env.FAULT_INJECT;
+    for (const k of Object.keys(env)) {
+      if (k.startsWith('ADMIN_BOOTSTRAP_') || k === 'FAULT_INJECT' || k === 'FAULT_INJECT_MODE') delete env[k];
+    }
 
     const child = spawn(process.execPath, ['src/server.js'], { cwd: ROOT, env });
+    const exited = new Promise((resolve) => child.once('exit', resolve));
     let out = '';
     child.stdout.on('data', (d) => { out += d; });
     child.stderr.on('data', (d) => { out += d; });
@@ -356,13 +358,29 @@ async function main() {
         assert(keys.length === 1 && keys[0] === 'status' && body.status === 'OK',
           `/health production CHỈ có field "status" (thực tế: ${JSON.stringify(body)})`);
       }
+      assert(/Đối soát thanh toán: TẮT/.test(out) && /Dọn challenge: TẮT/.test(out),
+        'Server con khởi động với đối soát và dọn challenge ĐỀU TẮT');
+      assert(!/\[reconcile\]|\[cleanup\]|\[admin-bootstrap\]/.test(out),
+        'Server con không chạy đối soát, dọn challenge hay khởi tạo quản trị viên');
     } finally {
-      child.kill();
+      // Chờ tiến trình con THỰC SỰ thoát rồi mới đi tiếp, để các bộ sau không chạy song song với
+      // nó. Không thoát trong 5 giây thì buộc dừng (SIGKILL) và chờ thêm một lần.
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+        const timedOut = await Promise.race([
+          exited.then(() => false),
+          new Promise((r) => setTimeout(() => r(true), 5000)),
+        ]);
+        if (timedOut) {
+          child.kill('SIGKILL');
+          await Promise.race([exited, new Promise((r) => setTimeout(r, 5000))]);
+        }
+      }
+      assert(child.exitCode !== null || child.signalCode !== null, 'Server con đã thoát hẳn trước khi chạy bước tiếp theo');
       if (dbPath) {
-        // Windows không nhả khoá file ngay khi process vừa bị kill — chờ một nhịp ngắn, và
-        // không để lỗi dọn dẹp (EBUSY) làm hỏng cả bài kiểm thử: đây chỉ là file tạm, dọn
-        // không được thì bỏ qua, không phải một khẳng định cần đúng.
-        await new Promise((r) => setTimeout(r, 400));
+        // Windows có thể chưa nhả khoá file ngay cả khi process đã thoát — chờ một nhịp ngắn, và
+        // không để lỗi dọn dẹp (EBUSY) làm hỏng bài kiểm thử: đây chỉ là file tạm.
+        await new Promise((r) => setTimeout(r, 200));
         const candidates = [dbPath, dbPath.replace(/\.db$/, '') + '.mock-provider.db'];
         for (const base of candidates) {
           for (const suffix of ['', '-wal', '-shm']) {
