@@ -191,7 +191,10 @@ const App = (() => {
       throw new Error('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại');
     }
     if (!res.ok) {
-      const err = new Error(data.message || data.error || `Lỗi HTTP ${res.status}`);
+      const message = data.error === 'LISTING_STATE_CONFLICT'
+        ? 'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.'
+        : (data.message || data.error || `Lỗi HTTP ${res.status}`);
+      const err = new Error(message);
       err.code = data.error;
       err.status = res.status;
       throw err;
