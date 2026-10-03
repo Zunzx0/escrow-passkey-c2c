@@ -1,4 +1,4 @@
-/* Chợ An Tâm — bộ icon.
+/* Enclave — bộ icon.
  *
  * Dùng hình của Lucide (outline, stroke 2, không tô). Project có ràng buộc "không build,
  * không CDN", nên nội tuyến đúng những path cần dùng thay vì nạp gói từ CDN.

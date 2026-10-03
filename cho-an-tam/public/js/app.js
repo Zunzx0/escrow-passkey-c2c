@@ -1,4 +1,4 @@
-/* Chợ An Tâm — sàn mua bán C2C có ký quỹ (Escrow) và Passkey.
+/* Enclave — sàn mua bán C2C có ký quỹ (Escrow) và Passkey.
    Frontend SPA thuần JS, không build, không CDN. Router bằng location.hash; mọi thao tác gọi
    REST API ở /api/*.
 

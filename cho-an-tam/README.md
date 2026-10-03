@@ -1,4 +1,4 @@
-# Chợ An Tâm — Sàn mua bán C2C (Escrow + Passkeys)
+# Enclave — Sàn mua bán C2C (Escrow + Passkeys)
 
 Website mô phỏng một **sàn thương mại điện tử C2C**, nơi cá nhân đăng bán đồ đã qua sử dụng và cá
 nhân khác đặt mua, trong đó:
@@ -15,8 +15,7 @@ Chạy bằng **một server Node.js duy nhất** + **SQLite** (chỉ là 1 file
 Giao diện là HTML/CSS/JS thuần — **không cần build, không có thư viện JS ngoài, không CDN, không
 webfont** (dùng font hệ thống), nên chạy được hoàn toàn offline.
 
-> Tên "Chợ An Tâm" là tên tạm cho đồ án; đổi tên chỉ cần sửa `public/index.html` và vài chuỗi
-> trong `public/js/app.js`.
+> Enclave là tên sản phẩm hiển thị trên website và trong tài liệu sử dụng.
 
 ### Giao diện tham khảo các chợ lớn theo từng phần
 
@@ -96,7 +95,7 @@ qua quy trình xin và duyệt, còn quản trị viên đầu tiên được t�
 npm start
 ```
 
-Thấy dòng `Chợ An Tâm — sàn mua bán C2C … đang chạy tại: http://localhost:3000` là thành công.
+Thấy dòng `Enclave — sàn mua bán C2C … đang chạy tại: http://localhost:3000` là thành công.
 **Để cửa sổ Terminal này mở** (đóng lại là server tắt).
 
 Mở trình duyệt (Chrome/Edge khuyến nghị) tại đúng địa chỉ:
