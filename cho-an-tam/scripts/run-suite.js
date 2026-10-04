@@ -69,6 +69,7 @@ const SUITES = [
   'dispute-race-e2e', 'security-report-regression-e2e',
   'username-enumeration-e2e',
   'listing-lifecycle-e2e',
+  'passkey-registration-race-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');
 
