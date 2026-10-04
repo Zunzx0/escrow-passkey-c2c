@@ -54,6 +54,7 @@ const { AppError } = require('../lib/errors');
 const { logSecurityEvent, EVENTS } = require('../lib/securityEvents');
 const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounter');
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
+const { isProvenAdmin } = require('../lib/adminProvenance');
 
 const router = express.Router();
 
@@ -291,6 +292,12 @@ router.post(
 
       const { credential } = verification.registrationInfo;
       const user = await loadUserRow(req.user.id);
+      // Bước kích hoạt BỎ QUA việc mở ví cho role='ADMIN'. Nếu tin riêng role, một tài khoản mua
+      // đang chờ Passkey bị sửa role='ADMIN' sẽ thành "quản trị viên" không ví — lọt qua dấu hiệu
+      // ví của PR #13. Chỉ admin có dấu nguồn gốc bootstrap mới được kích hoạt theo nhánh này.
+      if (user.role === 'ADMIN' && !(await isProvenAdmin(db, user.id))) {
+        throw new AppError(403, 'ADMIN_IDENTITY_INVALID', 'Tài khoản này không có nguồn gốc quản trị hợp lệ.');
+      }
       const { deviceName } = JSON.parse(challengeRow.context_data || '{}');
       const now = nowIso();
 

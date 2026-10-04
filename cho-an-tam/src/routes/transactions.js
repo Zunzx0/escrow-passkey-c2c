@@ -264,6 +264,12 @@ router.get('/', requireAuth, async (req, res) => {
   } else if (perspective === 'SELLER') {
     where.push('t.seller_id = ?');
     params.push(req.user.id);
+  } else if (perspective !== 'ADMIN') {
+    // Mặc định là CHẶT: chỉ quản trị viên đã chứng minh nguồn gốc (lib/auth.js) mới thấy mọi đơn.
+    // Trước đây mọi role không phải BUYER/SELLER đều rơi vào nhánh "không lọc" — một tài khoản bị
+    // sửa role='ADMIN' (nay mang role nội bộ ADMIN_UNVERIFIED) sẽ đọc được toàn bộ giao dịch.
+    where.push('(t.buyer_id = ? OR t.seller_id = ?)');
+    params.push(req.user.id, req.user.id);
   }
   if (status) {
     const wanted = String(status).split(',').map((s) => s.trim()).filter(Boolean);

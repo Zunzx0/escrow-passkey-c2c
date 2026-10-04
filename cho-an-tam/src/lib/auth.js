@@ -1,6 +1,7 @@
 const jwt = require('jsonwebtoken');
 const { db } = require('../db');
 const { createSession, getSession, sessionProblem, touchSession, setRefreshCookie } = require('./session');
+const { isProvenAdmin, UNVERIFIED_ADMIN_ROLE } = require('./adminProvenance');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'CHANGE_ME_dev_only_not_secure';
 const ACCESS_TOKEN_TTL_SECONDS = parseInt(process.env.ACCESS_TOKEN_TTL_SECONDS || '900', 10);
@@ -86,11 +87,18 @@ async function loadUserFromToken(token) {
   const claimed = payload.scp === SCOPE_FULL ? SCOPE_FULL : SCOPE_ENROLL;
   const scope = allowed === SCOPE_FULL && claimed === SCOPE_FULL ? SCOPE_FULL : SCOPE_ENROLL;
 
+  // role='ADMIN' trong CSDL CHƯA đủ để là quản trị viên: phải có dấu nguồn gốc độc lập
+  // (lib/adminProvenance.js). Thiếu dấu thì req.user mang một role nội bộ không khớp vai trò nào,
+  // nên mọi phép kiểm theo role — ở /api/admin lẫn ở các lối đọc khác như assertOwnership — đều tự
+  // từ chối, kể cả những phép kiểm viết về sau. Chỉ tốn thêm một truy vấn cho tài khoản ADMIN.
+  let role = row.role;
+  if (role === 'ADMIN' && !(await isProvenAdmin(db, row.id))) role = UNVERIFIED_ADMIN_ROLE;
+
   return {
     id: row.id,
     username: row.username,
     displayName: row.display_name,
-    role: row.role,
+    role,
     accountStatus: row.account_status,
     tokenVersion: row.token_version,
     sessionId: session.id,

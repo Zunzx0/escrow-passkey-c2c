@@ -317,6 +317,9 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  // Nguồn gốc quyền quản trị: bảng + backfill một lần, trigger ở mọi lần khởi động.
+  // Đặt ở đây chứ không ở schema.sql để backfill chỉ chạy đúng lúc bảng được tạo lần đầu.
+  require('./lib/adminProvenance').migrateSqlite(db);
 
   // Seed: chỉ ví SYSTEM_ESCROW duy nhất (lý do không seed Admin: xem ghi chú cuối tệp).
   const existingEscrow = db.prepare("SELECT id FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'").get();
@@ -340,6 +343,7 @@ function openSqlite() {
 // không bao giờ sửa phần tử đã chạy trên cơ sở dữ liệu thật.
 const PG_MIGRATIONS = [
   { version: 1, name: 'initial-schema', file: 'schema.pg.sql' },
+  { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
 ];
 
 function installPgTypeParsers(pg) {
