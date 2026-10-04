@@ -193,7 +193,9 @@ const App = (() => {
     if (!res.ok) {
       const message = data.error === 'LISTING_STATE_CONFLICT'
         ? 'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.'
-        : (data.message || data.error || `Lỗi HTTP ${res.status}`);
+        : data.error === 'DISPUTE_NOT_OPEN'
+          ? 'Tranh chấp này đã được xử lý ở nơi khác. Danh sách sẽ được cập nhật.'
+          : (data.message || data.error || `Lỗi HTTP ${res.status}`);
       const err = new Error(message);
       err.code = data.error;
       err.status = res.status;
@@ -2222,9 +2224,15 @@ const App = (() => {
     if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
     const picked = document.querySelector('input[name="payMethod"]:checked');
     state.topupMethod = picked ? picked.value : 'CARD';
-    const pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
-    await loadTopupHistory();
-    await openCheckout(pr.id, pr.providerRef);
+    await guard('topup-create', btn, async () => {
+      const pr = await api('/payments/topup', { method: 'POST', body: { amount } });
+      try {
+        await loadTopupHistory();
+      } catch (_) {
+        toast('Đã tạo yêu cầu nạp tiền nhưng chưa tải được lịch sử. Bạn có thể mở lại trang ví để xem.', 'err');
+      }
+      await openCheckout(pr.id, pr.providerRef);
+    });
   }
 
   async function openCheckout(paymentRequestId, providerRef) {
@@ -2266,11 +2274,18 @@ const App = (() => {
   async function payCheckout(el) {
     const { id, ref, outcome } = el.dataset;
     const deliverWebhook = el.dataset.deliver === '1';
-    await guard('checkout:' + ref, el, () => providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
-      method: 'POST', body: { outcome, deliverWebhook },
-    }));
-    closeModal();
-    await waitForTopupResult(id);
+    await guard('checkout:' + ref, el, async () => {
+      try {
+        await providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
+          method: 'POST', body: { outcome, deliverWebhook },
+        });
+      } catch (e) {
+        // Một tab khác có thể đã chốt kết quả; hỏi lại máy chủ thay vì báo thanh toán thất bại.
+        if (e.code !== 'ALREADY_SETTLED') throw e;
+      }
+      closeModal();
+      await waitForTopupResult(id);
+    });
   }
 
   /** Hỏi máy chủ trạng thái yêu cầu nạp tiền trong vài giây. Không tự đoán kết quả. */
@@ -2807,20 +2822,25 @@ const App = (() => {
    */
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
-    await guard('adm:' + disputeId, btn, async () => {
-      const { reauthSessionId, options } = await api(`/admin/disputes/${disputeId}/reauth/options`, {
-        method: 'POST', body: { decision },
-      });
-      const assertion = await webauthn('reauth', () =>
-        SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
-      const { reauthGrant } = await api(`/admin/disputes/${disputeId}/reauth/verify`, {
-        method: 'POST', body: { reauthSessionId, response: assertion },
-      });
-      return api(`/admin/disputes/${disputeId}/${kind}`, {
-        method: 'POST', body: { requestId: newRequestId(), reauthGrant },
-      });
-    }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
-    route();
+    try {
+      const result = await guard('adm:' + disputeId, btn, async () => {
+        const { reauthSessionId, options } = await api(`/admin/disputes/${disputeId}/reauth/options`, {
+          method: 'POST', body: { decision },
+        });
+        const assertion = await webauthn('reauth', () =>
+          SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
+        const { reauthGrant } = await api(`/admin/disputes/${disputeId}/reauth/verify`, {
+          method: 'POST', body: { reauthSessionId, response: assertion },
+        });
+        return api(`/admin/disputes/${disputeId}/${kind}`, {
+          method: 'POST', body: { requestId: newRequestId(), reauthGrant },
+        });
+      }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
+      if (result !== undefined) route();
+    } catch (e) {
+      if (e.code !== 'DISPUTE_NOT_OPEN') throw e;
+      route();
+    }
   }
 
   // ---------- Quản trị: người dùng ----------
