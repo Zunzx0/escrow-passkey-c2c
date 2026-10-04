@@ -1,4 +1,4 @@
-/* Chợ An Tâm — sàn mua bán C2C có ký quỹ (Escrow) và Passkey.
+/* Enclave — sàn mua bán C2C có ký quỹ (Escrow) và Passkey.
    Frontend SPA thuần JS, không build, không CDN. Router bằng location.hash; mọi thao tác gọi
    REST API ở /api/*.
 
@@ -762,6 +762,12 @@ const App = (() => {
     SACH: 'book-open', THE_THAO: 'bike', SUU_TAM: 'gem',
   };
   function categoryIcon(key) { const c = categoryOf(key); return (c && c.icon) || CATEGORY_ICON_FALLBACK[key] || 'package'; }
+  function productIcon(l) {
+    const title = String((l && l.title) || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    if (/\bnoi chien\b/.test(title)) return 'air-fryer';
+    if (/\bao khoac\b/.test(title)) return 'coat';
+    return categoryIcon(l && l.category);
+  }
 
   // Mỗi ngành hàng một tông màu riêng cho khung ảnh placeholder — thay cho ô xám đồng loạt,
   // để lưới sản phẩm trông có sức sống dù chưa có ảnh thật. Màu chỉ mang tính trang trí/phân
@@ -807,7 +813,7 @@ const App = (() => {
   function productImage(l, { sold = false, size = 56, tinted = true } = {}) {
     const label = sold ? listingStatus(l).label : '';
     const tintClass = tinted ? categoryTintClass(l && l.category) : '';
-    return `<div class="pimg ${tintClass} ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
+    return `<div class="pimg ${tintClass} ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(productIcon(l), size)}</div>`;
   }
 
   /** Trạng thái của một tin đăng theo góc nhìn người mua. */
