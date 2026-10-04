@@ -298,6 +298,22 @@ router.post(
       // Đây là chỗ bất biến "tài khoản ACTIVE luôn có ít nhất một Passkey" được tạo ra: không
       // có khoảnh khắc nào tài khoản đã ACTIVE mà chưa có credential.
       await db.transaction(async () => {
+        // Chiếm quyền kích hoạt NGUYÊN TỬ, là câu lệnh ĐẦU TIÊN của giao dịch. Hai request đăng ký
+        // Passkey đầu tiên cho cùng một tài khoản (hai tab, hai thiết bị, mỗi bên một challenge
+        // riêng) đều qua được requireAccountStatus('PENDING_PASSKEY') vì cùng đọc trạng thái trước
+        // khi bên kia commit. Trước đây bên thua chạy tiếp tới INSERT ví, vấp UNIQUE(wallets.user_id)
+        // và trả 500 chung chung. Nay bên thua dừng ngay ở đây, trước khi ghi credential hay ví, và
+        // nhận ĐÚNG mã lỗi mà requireAccountStatus trả khi nó đến sau — một phản hồi duy nhất bất
+        // kể thời điểm. Cập nhật ở đầu giao dịch thay vì cuối không đổi kết quả: mọi bước sau đều
+        // cùng commit hoặc cùng rollback, nên vẫn không có lúc nào tài khoản ACTIVE mà chưa có
+        // credential.
+        const activated = await db
+          .prepare(`UPDATE users SET account_status = 'ACTIVE', updated_at = ? WHERE id = ? AND account_status = 'PENDING_PASSKEY'`)
+          .run(now, user.id);
+        if (activated.changes !== 1) {
+          throw new AppError(409, 'INVALID_ACCOUNT_STATUS', 'Tài khoản không ở đúng bước của luồng thiết lập.');
+        }
+
         // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì
         // chỉ một request đổi được used_at (bước kiểm used_at ở trên nằm trước một lần await).
         const consumed = await db
@@ -351,8 +367,6 @@ router.post(
             );
           }
         }
-
-        await db.prepare(`UPDATE users SET account_status = 'ACTIVE', updated_at = ? WHERE id = ?`).run(now, user.id);
       })();
 
       await logSecurityEvent(req, {
