@@ -755,7 +755,13 @@ const App = (() => {
     return (state.meta && (state.meta.categories || []).find((c) => c.key === key)) || null;
   }
   function categoryLabel(key) { const c = categoryOf(key); return c ? c.label : (key || '—'); }
-  function categoryIcon(key) { const c = categoryOf(key); return (c && c.icon) || 'package'; }
+  // Bản xem trước Vercel vẫn hiện icon đúng loại hàng khi API metadata bị chặn theo origin.
+  const CATEGORY_ICON_FALLBACK = {
+    DIEN_THOAI: 'smartphone', MAY_TINH: 'laptop', DIEN_TU: 'headphones',
+    MAY_ANH: 'camera', THOI_TRANG: 'shirt', GIA_DUNG: 'sofa',
+    SACH: 'book-open', THE_THAO: 'bike', SUU_TAM: 'gem',
+  };
+  function categoryIcon(key) { const c = categoryOf(key); return (c && c.icon) || CATEGORY_ICON_FALLBACK[key] || 'package'; }
 
   // Mỗi ngành hàng một tông màu riêng cho khung ảnh placeholder — thay cho ô xám đồng loạt,
   // để lưới sản phẩm trông có sức sống dù chưa có ảnh thật. Màu chỉ mang tính trang trí/phân
