@@ -935,6 +935,34 @@ const App = (() => {
       </a>`;
   }
 
+  // Bản xem trước chỉ xuất hiện khi chưa có tin thật. Không gắn id hoặc đường mua hàng:
+  // khách không thể đặt mua một sản phẩm chưa tồn tại trong cơ sở dữ liệu.
+  const CATALOG_PREVIEW = [
+    { title: 'iPhone 13 128GB xanh, pin 89%', category: 'DIEN_THOAI', price: 9800000, location: 'Hà Nội' },
+    { title: 'MacBook Air M1 2020 8GB/256GB', category: 'MAY_TINH', price: 13500000, location: 'TP. Hồ Chí Minh' },
+    { title: 'Tai nghe Sony WH-1000XM4 chống ồn', category: 'DIEN_TU', price: 3900000, location: 'Hà Nội' },
+    { title: 'Máy ảnh Fujifilm X-T30 kèm lens 15-45mm', category: 'MAY_ANH', price: 14200000, location: 'Đà Nẵng' },
+    { title: 'Áo khoác da nam size L, đã mặc 3 lần', category: 'THOI_TRANG', price: 1150000, location: 'TP. Hồ Chí Minh' },
+    { title: 'Nồi chiên không dầu Philips 4.1L', category: 'GIA_DUNG', price: 1250000, location: 'Hải Phòng' },
+    { title: 'Trọn bộ Harry Potter 7 tập bản đặc biệt', category: 'SACH', price: 850000, location: 'Hà Nội' },
+    { title: 'Xe đạp thể thao Giant ATX 27.5', category: 'THE_THAO', price: 5600000, location: 'Cần Thơ' },
+  ];
+
+  function previewProductCard(l) {
+    return `
+      <article class="pcard pcard-preview" aria-label="Sản phẩm minh họa: ${esc(l.title)}">
+        <div class="pcard-media">
+          ${productImage(l)}
+          <span class="tag tag-primary pcard-badge">Minh họa</span>
+        </div>
+        <div class="pcard-body">
+          <div class="pcard-title">${esc(l.title)}</div>
+          <div class="pcard-price-row"><span class="pcard-price">${money(l.price)}</span></div>
+          <div class="pcard-foot"><span class="pcard-meta">${ico('map-pin', 12)} ${esc(l.location)}</span></div>
+        </div>
+      </article>`;
+  }
+
   function statusTag(t) {
     const ui = STATUS_UI[t.status] || { label: t.status, tone: '' };
     return `<span class="tag ${ui.tone}">${esc(ui.label)}</span>`;
@@ -1219,12 +1247,16 @@ const App = (() => {
 
       if (listings.length === 0) {
         const filtered = f.q || f.category || f.condition || f.location;
-        grid.innerHTML = empty(
-          'search',
-          filtered ? 'Không có tin đăng nào khớp' : 'Chợ đang trống',
-          filtered ? 'Thử bỏ bớt bộ lọc hoặc tìm với từ khoá khác.' : 'Chưa ai đăng tin bán. Mở cửa hàng để đăng tin đầu tiên.',
-          filtered ? '<button class="btn" data-act="clear-filters">Xoá bộ lọc</button>' : ''
-        );
+        grid.innerHTML = filtered
+          ? empty('search', 'Không có tin đăng nào khớp', 'Thử bỏ bớt bộ lọc hoặc tìm với từ khoá khác.',
+            '<button class="btn" data-act="clear-filters">Xoá bộ lọc</button>')
+          : `<div class="catalog-preview-head">
+               <p><b>8 sản phẩm minh họa</b> để xem giao diện. Hiện chưa có tin đăng thật; các thẻ này không thể đặt mua.</p>
+               ${state.user && state.user.role === 'SELLER'
+                 ? `<a class="btn btn-sm" href="#/shop">${ico('store', 16)} Quản lý tin đăng</a>`
+                 : ''}
+             </div>
+             <div class="grid">${CATALOG_PREVIEW.map(previewProductCard).join('')}</div>`;
         $('#loadMore').innerHTML = '';
         return;
       }
@@ -3053,7 +3085,12 @@ const App = (() => {
     'reload': () => route(),
     'open-sell': () => openSell(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
-    'clear-filters': () => { state.filters = { q: '', category: '', condition: '', location: '', sort: 'new' }; goHome(); },
+    'clear-filters': () => {
+      state.filters = { q: '', category: '', condition: '', location: '', sort: 'new' };
+      const searchInput = $('#topSearchInput');
+      if (searchInput) searchInput.value = '';
+      goHome();
+    },
     'load-more': () => { state.homeLimit += HOME_PAGE_SIZE; renderListingPage(); },
     'scroll-products': () => { const el = $('#products'); if (el) el.scrollIntoView({ behavior: 'smooth' }); },
 
