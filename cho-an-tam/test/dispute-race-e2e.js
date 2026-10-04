@@ -25,8 +25,11 @@
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
 const crypto = require('crypto');
+const jwt = require('jsonwebtoken');
 const { createAuthenticator } = require('./softwareAuthenticator');
 const { flows, createAdmin, createSeller } = require('./helpers/accounts');
+const { db } = require('../src/db');
+const { ACTIONS, issueGrant } = require('../src/lib/reauth');
 
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
 const RP_ID = process.env.WEBAUTHN_RP_ID || 'localhost';
@@ -118,6 +121,96 @@ async function main() {
   // =======================================================================================
   const txn1 = await setupDisputableOrder(buyer, seller, 'R1');
   const disputeId1 = await openDispute(txn1, seller.token, 'R1: kiểm tra race hai quyết định');
+
+  // Giả lập một lỗ hổng KHÁC đã nâng role trong DB cho chính buyer/seller. Đọc role từ DB
+  // và yêu cầu Passkey vẫn chưa đủ: người này sở hữu Passkey của tài khoản vừa được nâng.
+  // Ví USER tồn tại từ lúc đăng ký là dấu hiệu nguồn gốc độc lập với role.
+  // Phiếu được cấp trực tiếp trong test để kiểm riêng điểm cuối chuyển tiền, kể cả khi kẻ
+  // tấn công đã có một phiếu hợp lệ từ trước hoặc qua một đường cấp phiếu khác.
+  section('R0: Bên của giao dịch không thể tự phân xử dù đã bị nâng role lên ADMIN');
+  const buyerBeforeR0 = await wallet(buyer.token);
+  const sellerBeforeR0 = await wallet(seller.token);
+  for (const { actor, originalRole, decision, endpoint } of [
+    { actor: buyer, originalRole: 'BUYER', decision: 'REFUND', endpoint: 'refund' },
+    { actor: seller, originalRole: 'SELLER', decision: 'RELEASE', endpoint: 'release' },
+  ]) {
+    const actorId = actor.user.id;
+    await db.prepare("UPDATE users SET role = 'ADMIN' WHERE id = ?").run(actorId);
+    try {
+      const adminList = await api('/api/admin/disputes', { token: actor.token });
+      assert(adminList.status === 403 && adminList.data.error === 'ADMIN_IDENTITY_INVALID',
+        `${originalRole} bị nâng role vẫn không xem được các hồ sơ quản trị`);
+
+      const options = await api(`/api/admin/disputes/${disputeId1}/reauth/options`, {
+        method: 'POST', token: actor.token, body: { decision },
+      });
+      assert(options.status === 403 && options.data.error === 'ADMIN_IDENTITY_INVALID',
+        `${originalRole} đã mang role ADMIN vẫn không xin được challenge phân xử của mình`);
+
+      const verify = await api(`/api/admin/disputes/${disputeId1}/reauth/verify`, {
+        method: 'POST', token: actor.token, body: { reauthSessionId: crypto.randomUUID(), response: { id: 'invalid' } },
+      });
+      assert(verify.status === 403 && verify.data.error === 'ADMIN_IDENTITY_INVALID',
+        `${originalRole} đã mang role ADMIN vẫn không xác minh được challenge phân xử của mình`);
+
+      const sessionId = jwt.decode(actor.token).sid;
+      const grant = await issueGrant({
+        userId: actorId, sessionId, transactionId: txn1, disputeId: disputeId1,
+        action: ACTIONS.ADJUDICATE, decision,
+      });
+      const decisionResult = await api(`/api/admin/disputes/${disputeId1}/${endpoint}`, {
+        method: 'POST', token: actor.token,
+        body: { requestId: crypto.randomUUID(), reauthGrant: grant.rawToken },
+      });
+      assert(decisionResult.status === 403 && decisionResult.data.error === 'ADMIN_IDENTITY_INVALID',
+        `${originalRole} đã mang role ADMIN và có grant vẫn không chuyển được tiền về mình`);
+    } finally {
+      await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(originalRole, actorId);
+    }
+  }
+
+  // Kiểm riêng hàng rào xung đột lợi ích trên một ADMIN thật (không có ví). Chỉ thay
+  // buyer_id trong DB test trong khoảnh khắc gọi API, rồi khôi phục trước mọi giao dịch tiền.
+  await db.prepare('UPDATE transactions SET buyer_id = ? WHERE id = ?').run(admin.user.id, txn1);
+  try {
+    const selfOptions = await api(`/api/admin/disputes/${disputeId1}/reauth/options`, {
+      method: 'POST', token: admin.token, body: { decision: 'REFUND' },
+    });
+    assert(selfOptions.status === 403 && selfOptions.data.error === 'ADJUDICATOR_CONFLICT',
+      'ADMIN thật cũng không thể xin quyền phân xử khi chính mình là bên mua');
+
+    const grant = await issueGrant({
+      userId: admin.user.id, sessionId: jwt.decode(admin.token).sid,
+      transactionId: txn1, disputeId: disputeId1, action: ACTIONS.ADJUDICATE, decision: 'REFUND',
+    });
+    const selfRefund = await api(`/api/admin/disputes/${disputeId1}/refund`, {
+      method: 'POST', token: admin.token,
+      body: { requestId: crypto.randomUUID(), reauthGrant: grant.rawToken },
+    });
+    assert(selfRefund.status === 403 && selfRefund.data.error === 'ADJUDICATOR_CONFLICT',
+      'ADMIN thật cũng không thể tự hoàn tiền khi là một bên giao dịch');
+  } finally {
+    await db.prepare('UPDATE transactions SET buyer_id = ? WHERE id = ?').run(buyer.user.id, txn1);
+  }
+
+  const deniedPrivilegeEvents = await db.prepare(
+    "SELECT COUNT(*) AS n FROM security_events WHERE event_type = 'FORBIDDEN' AND detail LIKE '%ADMIN_IDENTITY_INVALID%'"
+  ).get();
+  const deniedSelfReviewEvents = await db.prepare(
+    "SELECT COUNT(*) AS n FROM security_events WHERE event_type = 'FORBIDDEN' AND detail LIKE '%ADJUDICATOR_CONFLICT%'"
+  ).get();
+  assert(Number(deniedPrivilegeEvents.n) >= 8 && Number(deniedSelfReviewEvents.n) >= 2,
+    'Các lần thử leo quyền và tự phân xử được ghi vào nhật ký an toàn');
+
+  const disputeAfterR0 = await db.prepare('SELECT status FROM disputes WHERE id = ?').get(disputeId1);
+  const txnAfterR0 = await db.prepare('SELECT status, escrow_status FROM transactions WHERE id = ?').get(txn1);
+  const buyerAfterR0 = await wallet(buyer.token);
+  const sellerAfterR0 = await wallet(seller.token);
+  assert(disputeAfterR0.status === 'OPEN' && txnAfterR0.status === 'DISPUTED' && txnAfterR0.escrow_status === 'FROZEN',
+    'Tranh chấp và tiền ký quỹ vẫn bị đóng băng sau các lần thử leo quyền');
+  assert(buyerAfterR0.availableBalance === buyerBeforeR0.availableBalance &&
+    sellerAfterR0.availableBalance === sellerBeforeR0.availableBalance,
+  'Số dư hai bên không đổi sau các lần thử leo quyền');
 
   const grantRefund = await flows.adjudicationGrant(admin.token, admin.auth, disputeId1, 'REFUND');
   const grantRelease = await flows.adjudicationGrant(admin.token, admin.auth, disputeId1, 'RELEASE');

@@ -41,7 +41,24 @@ const {
 } = require('../lib/walletOps');
 
 const router = express.Router();
-router.use(requireAuth, requireRole('ADMIN'));
+
+// ROLE không phải chứng cứ duy nhất về nguồn gốc tài khoản quản trị. Buyer/Seller luôn có
+// ví USER, còn tài khoản ADMIN chỉ được tạo bằng bootstrap và không có ví. Nếu một lỗi ở
+// nơi khác nâng role của tài khoản mua/bán thành ADMIN, ví cũ vẫn tồn tại và mọi tuyến
+// quản trị phải đóng lại. Đây là hàng rào độc lập với role và Passkey của chính kẻ tấn công.
+async function requireAdminIdentity(req, res, next) {
+  try {
+    const wallet = await db.prepare("SELECT 1 FROM wallets WHERE user_id = ? AND wallet_type = 'USER' LIMIT 1").get(req.user.id);
+    if (wallet) {
+      throw new AppError(403, 'ADMIN_IDENTITY_INVALID', 'Tài khoản có ví người dùng không được thực hiện chức năng quản trị.');
+    }
+    next();
+  } catch (e) {
+    next(e);
+  }
+}
+
+router.use(requireAuth, requireRole('ADMIN'), requireAdminIdentity);
 
 function serializeTxn(t) {
   if (!t) return null;
@@ -170,14 +187,23 @@ function parseDecision(raw) {
   return decision;
 }
 
+// Vai trò ADMIN có thể bị cấp nhầm hoặc bị leo thang. Bên mua/bán không được tự phân xử
+// giao dịch của chính mình, kể cả khi tài khoản của họ đã mang vai trò ADMIN.
+function assertIndependentAdjudicator(txn, actorId) {
+  if (txn.buyer_id === actorId || txn.seller_id === actorId) {
+    throw new AppError(403, 'ADJUDICATOR_CONFLICT', 'Một bên của giao dịch không được tự phân xử tranh chấp.');
+  }
+}
+
 /** Nạp hồ sơ tranh chấp cùng giao dịch, và kiểm cặp trạng thái bắt buộc của luồng phân xử. */
-async function loadOpenDisputeForAdjudication(disputeId) {
+async function loadOpenDisputeForAdjudication(disputeId, actorId) {
   const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(disputeId);
   if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND', 'Không tìm thấy hồ sơ tranh chấp');
   if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp phải đang mở');
 
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ?').get(dispute.transaction_id);
   if (!txn) throw new AppError(404, 'TRANSACTION_NOT_FOUND', 'Không tìm thấy giao dịch');
+  assertIndependentAdjudicator(txn, actorId);
   if (txn.status !== 'DISPUTED' || txn.escrow_status !== 'FROZEN') {
     throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở DISPUTED + FROZEN');
   }
@@ -187,7 +213,7 @@ async function loadOpenDisputeForAdjudication(disputeId) {
 router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, next) => {
   try {
     const decision = parseDecision((req.body || {}).decision);
-    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
+    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id, req.user.id);
 
     const credentials = await db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản quản trị chưa có Passkey');
@@ -226,7 +252,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
     }
 
-    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
+    const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id, req.user.id);
 
     const challengeRow = await db
       .prepare(`SELECT * FROM auth_challenges WHERE id = ? AND purpose = 'REAUTH' AND transaction_id = ? AND user_id = ?`)
@@ -324,7 +350,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
  * ĐỊNH; (6) ngữ cảnh hiện tại khớp ngữ cảnh đã uỷ quyền.
  */
 async function authorizeAdjudication(req, decision) {
-  const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id);
+  const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id, req.user.id);
 
   const grant = await requireGrant({
     userId: req.user.id,
@@ -351,6 +377,9 @@ router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => 
 
     const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
+    const parties = await db.prepare('SELECT buyer_id, seller_id FROM transactions WHERE id = ?').get(dispute.transaction_id);
+    if (!parties) throw new AppError(404, 'TRANSACTION_NOT_FOUND');
+    assertIndependentAdjudicator(parties, req.user.id);
     if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
 
     const fingerprint = fingerprintRequest({
@@ -458,6 +487,9 @@ router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) =>
 
     const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
+    const parties = await db.prepare('SELECT buyer_id, seller_id FROM transactions WHERE id = ?').get(dispute.transaction_id);
+    if (!parties) throw new AppError(404, 'TRANSACTION_NOT_FOUND');
+    assertIndependentAdjudicator(parties, req.user.id);
     if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
 
     const fingerprint = fingerprintRequest({
