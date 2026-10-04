@@ -963,6 +963,16 @@ const App = (() => {
       </article>`;
   }
 
+  function catalogPreview() {
+    return `<div class="catalog-preview-head">
+              <p><b>8 sản phẩm minh họa</b> để xem giao diện. Đây không phải tin đăng thật và không thể đặt mua.</p>
+              ${state.user && state.user.role === 'SELLER'
+                ? `<a class="btn btn-sm" href="#/shop">${ico('store', 16)} Quản lý tin đăng</a>`
+                : ''}
+            </div>
+            <div class="grid">${CATALOG_PREVIEW.map(previewProductCard).join('')}</div>`;
+  }
+
   function statusTag(t) {
     const ui = STATUS_UI[t.status] || { label: t.status, tone: '' };
     return `<span class="tag ${ui.tone}">${esc(ui.label)}</span>`;
@@ -1250,19 +1260,20 @@ const App = (() => {
         grid.innerHTML = filtered
           ? empty('search', 'Không có tin đăng nào khớp', 'Thử bỏ bớt bộ lọc hoặc tìm với từ khoá khác.',
             '<button class="btn" data-act="clear-filters">Xoá bộ lọc</button>')
-          : `<div class="catalog-preview-head">
-               <p><b>8 sản phẩm minh họa</b> để xem giao diện. Hiện chưa có tin đăng thật; các thẻ này không thể đặt mua.</p>
-               ${state.user && state.user.role === 'SELLER'
-                 ? `<a class="btn btn-sm" href="#/shop">${ico('store', 16)} Quản lý tin đăng</a>`
-                 : ''}
-             </div>
-             <div class="grid">${CATALOG_PREVIEW.map(previewProductCard).join('')}</div>`;
+          : catalogPreview();
         $('#loadMore').innerHTML = '';
         return;
       }
       renderListingPage();
     } catch (e) {
-      if (grid) grid.innerHTML = empty('frown', 'Không tải được danh sách tin', e.message);
+      if (!grid) return;
+      // Origin preview của Vercel có thể không nằm trong danh sách CORS của API.
+      // Vẫn cho xem giao diện mẫu nhưng báo rõ API không kết nối được.
+      const previewHost = /\.vercel\.app$/.test(window.location.hostname);
+      const filtered = f.q || f.category || f.condition || f.location;
+      grid.innerHTML = previewHost && !filtered
+        ? `<div class="note note-warning mb-3">Bản xem trước chưa kết nối được API. Các thẻ bên dưới chỉ minh họa giao diện, không thể đặt mua.</div>${catalogPreview()}`
+        : empty('frown', 'Không tải được danh sách tin', e.message);
     }
   }
 
