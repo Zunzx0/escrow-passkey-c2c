@@ -104,6 +104,7 @@ const PROVIDER_UNAVAILABLE = () => new AppError(
  * giữ quyền còn hạn (đang gửi), không gửi lần nữa: trả trạng thái hiện tại (SUBMITTING) để client chờ.
  */
 async function replayExisting(res, existing, amount) {
+  if (existing.provider !== 'MOCK') throw new AppError(409, 'PAYMENT_PROVIDER_MISMATCH', 'Yêu cầu này không thuộc cổng thanh toán mô phỏng');
   if (existing.amount !== amount) {
     throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'requestId này đã dùng cho một yêu cầu nạp tiền khác số tiền');
   }

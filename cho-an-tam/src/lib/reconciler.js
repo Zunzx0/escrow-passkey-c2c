@@ -58,10 +58,10 @@ async function reconcileOnce({
 } = {}) {
   const cutoff = new Date(Date.now() - minAgeSeconds * 1000).toISOString();
   const pending = paymentRequestId
-    ? await db.prepare(`SELECT * FROM payment_requests WHERE id = ? AND status = 'PENDING' AND created_at <= ?`)
+    ? await db.prepare(`SELECT * FROM payment_requests WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING' AND created_at <= ?`)
       .all(paymentRequestId, cutoff)
     : await db.prepare(
-      `SELECT * FROM payment_requests WHERE status = 'PENDING' AND created_at <= ?
+      `SELECT * FROM payment_requests WHERE provider = 'MOCK' AND status = 'PENDING' AND created_at <= ?
        ORDER BY created_at ASC LIMIT ?`
     ).all(cutoff, limit);
 

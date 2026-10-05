@@ -39,7 +39,7 @@ const { db } = require('../src/db');
 
 const ROOT = path.join(__dirname, '..');
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
-const CHILD_PORT = 3182;
+const CHILD_PORT = Number(process.env.TEST_CHILD_PORT_BASE || '3180') + 2;
 const CHILD_BASE = `http://localhost:${CHILD_PORT}`;
 const PRICE = 200000;
 

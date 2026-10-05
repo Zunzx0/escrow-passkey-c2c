@@ -43,32 +43,37 @@ function settledOutcome(currentStatus, incomingStatus) {
  * Chỉ ném lỗi khi đầu vào sai hoặc yêu cầu không tồn tại. Thắng/thua trong cuộc đua tất toán
  * KHÔNG phải lỗi — đó là kết quả DUPLICATE/CONFLICT để từng kênh tự quyết cách phản hồi.
  */
-async function applyProviderResult({ paymentRequestId, providerRef, status, amount, source }, { req = null } = {}) {
+async function applyProviderResult({ paymentRequestId, providerRef, status, amount, source }, { req = null, expectedProvider = 'MOCK' } = {}) {
+  // This option is supplied only by trusted server code, never from webhook JSON.
+  if (expectedProvider !== 'MOCK') {
+    throw new AppError(409, 'PAYPAL_INTEGRATION_NOT_READY', 'Luồng tất toán PayPal chưa được kích hoạt');
+  }
   if (!FINAL_STATUSES.has(status)) {
     throw new AppError(400, 'VALIDATION_ERROR', 'Kết quả từ provider phải là SUCCEEDED hoặc FAILED');
   }
   if (!SOURCES.has(source)) throw new Error(`Nguồn kết quả không hợp lệ: ${source}`);
 
-  const pr = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(paymentRequestId);
-  if (!pr) throw new AppError(404, 'PAYMENT_REQUEST_NOT_FOUND', 'Không tìm thấy yêu cầu nạp tiền');
-  if (pr.provider_ref !== providerRef) {
-    return { outcome: 'CONFLICT', status: pr.status, reason: 'providerRef không khớp yêu cầu nạp tiền' };
-  }
-  if (pr.amount !== amount) {
-    return { outcome: 'CONFLICT', status: pr.status, reason: 'Số tiền từ provider không khớp yêu cầu nạp tiền' };
-  }
-  if (pr.status !== 'PENDING') return settledOutcome(pr.status, status);
-
+  let pr;
   let applied = false;
+  let earlyOutcome = null;
   await db.transaction(async () => {
+    pr = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(paymentRequestId);
+    if (!pr) throw new AppError(404, 'PAYMENT_REQUEST_NOT_FOUND', 'Không tìm thấy yêu cầu nạp tiền');
+    if (pr.provider !== expectedProvider) {
+      earlyOutcome = { outcome: 'CONFLICT', status: pr.status, reason: 'Provider không khớp yêu cầu nạp tiền' };
+      return;
+    }
+    if (pr.provider_ref !== providerRef || pr.amount !== amount) {
+      earlyOutcome = { outcome: 'CONFLICT', status: pr.status, reason: 'providerRef hoặc số tiền không khớp yêu cầu nạp tiền' };
+      return;
+    }
+    if (pr.status !== 'PENDING') { earlyOutcome = settledOutcome(pr.status, status); return; }
     const now = nowIso();
-    const claim = await db
-      .prepare(
-        `UPDATE payment_requests
-         SET status = ?, version = version + 1, resolved_at = ?, resolved_by = ?, updated_at = ?
-         WHERE id = ? AND status = 'PENDING' AND version = ?`
-      )
-      .run(status, now, source, now, pr.id, pr.version);
+    const claim = await db.prepare(
+      `UPDATE payment_requests
+       SET status = ?, version = version + 1, resolved_at = ?, resolved_by = ?, updated_at = ?
+       WHERE id = ? AND provider = ? AND status = 'PENDING' AND version = ?`
+    ).run(status, now, source, now, pr.id, expectedProvider, pr.version);
     if (claim.changes !== 1) return;
 
     if (status === 'SUCCEEDED') {
@@ -98,6 +103,7 @@ async function applyProviderResult({ paymentRequestId, providerRef, status, amou
     applied = true;
   })();
 
+  if (earlyOutcome) return earlyOutcome;
   if (!applied) {
     // Thua trong cuộc đua tất toán — đọc lại trạng thái mới nhất, xử lý như "đã tất toán".
     const latest = await db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(pr.id);
@@ -163,7 +169,7 @@ async function claimSubmission(pr, { recoverUnknown = false } = {}) {
   const r = await db.prepare(
     `UPDATE payment_requests
      SET submission_status = 'SUBMITTING', submit_claim = ?, submit_claimed_at = ?, updated_at = ?
-     WHERE id = ? AND status = 'PENDING' AND ${guard.sql}`
+     WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING' AND ${guard.sql}`
   ).run(token, now, now, pr.id, ...guard.args);
   return r.changes === 1 ? token : null;
 }
@@ -176,7 +182,7 @@ async function claimSubmission(pr, { recoverUnknown = false } = {}) {
  */
 async function lostLease(pr, error = null) {
   const provider = require('./mockPaymentProvider');
-  const cur = await db.prepare('SELECT status, submission_status FROM payment_requests WHERE id = ?').get(pr.id);
+  const cur = await db.prepare("SELECT status, submission_status FROM payment_requests WHERE id = ? AND provider = 'MOCK'").get(pr.id);
   if (cur && cur.status === 'FAILED') {
     try { await provider.settlePayment(pr.provider_ref, 'FAILED', { onlyFromPending: true }); } catch (_) { /* chưa có khoản nào ở provider */ }
     return { submitted: false, error: new AppError(409, 'PAYMENT_REQUEST_CLOSED', 'Yêu cầu nạp tiền đã đóng') };
@@ -190,12 +196,15 @@ async function lostLease(pr, error = null) {
  * @returns {{ submitted: boolean, busy?: boolean, error?: Error }}
  */
 async function submitToProvider(pr, token) {
+  const current = await db.prepare("SELECT * FROM payment_requests WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING' AND submit_claim = ?").get(pr.id, token);
+  if (!current) return { submitted: false, busy: true };
+  pr = current;
   const provider = require('./mockPaymentProvider');
   const release = (status, error) => db.prepare(
     `UPDATE payment_requests
      SET submission_status = ?, submit_attempts = submit_attempts + 1, last_submit_error = ?,
          submit_claim = NULL, submit_claimed_at = NULL, updated_at = ?
-     WHERE id = ? AND submit_claim = ? AND status = 'PENDING'`
+     WHERE id = ? AND provider = 'MOCK' AND submit_claim = ? AND status = 'PENDING'`
   ).run(status, error, nowIso(), pr.id, token);
 
   try {
@@ -217,6 +226,9 @@ async function submitToProvider(pr, token) {
  * @returns {{ outcome: 'EXPIRED'|'SUBMITTED'|'SKIPPED' }}
  */
 async function expireUnsubmitted(pr) {
+  const current = await db.prepare("SELECT * FROM payment_requests WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING'").get(pr.id);
+  if (!current) return { outcome: 'SKIPPED' };
+  pr = current;
   const provider = require('./mockPaymentProvider');
   try {
     await provider.queryStatus(pr.provider_ref);
@@ -227,7 +239,7 @@ async function expireUnsubmitted(pr) {
   // Provider ĐÃ có khoản này: lần gửi trước thật ra đã tới. Ghi nhận và chờ kết quả như thường.
   await db.prepare(
     `UPDATE payment_requests SET submission_status = 'SUBMITTED', last_submit_error = NULL, updated_at = ?
-     WHERE id = ? AND status = 'PENDING'`
+     WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING'`
   ).run(nowIso(), pr.id);
   return { outcome: 'SUBMITTED' };
 }
@@ -240,7 +252,7 @@ async function closeUnsubmitted(pr) {
       `UPDATE payment_requests
        SET status = 'FAILED', version = version + 1, resolved_at = ?, resolved_by = 'RECONCILER',
            last_reconcile_error = ?, submit_claim = NULL, submit_claimed_at = NULL, updated_at = ?
-       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'
+       WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING' AND submission_status <> 'SUBMITTED'
          AND submit_attempts >= ? AND (submit_claim IS NULL OR submit_claimed_at < ?)`
     ).run(now, `SUBMIT_EXHAUSTED: provider không nhận yêu cầu sau ${maxSubmitAttempts()} lần gửi`, now,
       pr.id, maxSubmitAttempts(), leaseCutoffIso());

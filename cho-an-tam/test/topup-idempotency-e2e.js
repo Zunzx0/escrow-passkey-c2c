@@ -38,7 +38,7 @@ const { claimSubmission, submitToProvider } = require('../src/lib/paymentService
 
 const ROOT = path.join(__dirname, '..');
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
-const CHILD_PORT = 3184;
+const CHILD_PORT = Number(process.env.TEST_CHILD_PORT_BASE || '3180') + 4;
 const CHILD_BASE = `http://localhost:${CHILD_PORT}`;
 const MAX_SUBMIT_ATTEMPTS = 3;
 

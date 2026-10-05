@@ -70,7 +70,11 @@ async function sqliteFixture() {
   };
   const setup = open();
   setup.raw.exec(fs.readFileSync(path.join(ROOT, 'src', 'schema.sql'), 'utf8'));
-  for (const sql of proposedSchema('sqlite')) setup.raw.exec(sql);
+  const hasProvider = setup.raw.prepare('PRAGMA table_info(payment_requests)').all().some(c => c.name === 'provider');
+  for (const sql of proposedSchema('sqlite')) {
+    if (hasProvider && sql.startsWith('ALTER TABLE payment_requests ADD COLUMN provider')) continue;
+    setup.raw.exec(sql);
+  }
   await setup.close();
   return {
     dialect: 'sqlite',

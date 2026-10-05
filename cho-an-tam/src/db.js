@@ -191,6 +191,7 @@ function openSqlite() {
     const paymentCols = new Set(db.prepare('PRAGMA table_info(payment_requests)').all().map((c) => c.name));
     if (paymentCols.size > 0) {
       const add = [
+        ['provider', "TEXT NOT NULL DEFAULT 'MOCK' CHECK (provider IN ('MOCK','PAYPAL_SANDBOX'))"],
         ['resolved_by', 'TEXT'],
         ['reconcile_attempts', 'INTEGER NOT NULL DEFAULT 0'],
         ['last_reconciled_at', 'TEXT'],
@@ -205,6 +206,9 @@ function openSqlite() {
         ['submit_claimed_at', 'TEXT'],
       ].filter(([name]) => !paymentCols.has(name));
       for (const [name, type] of add) db.exec(`ALTER TABLE payment_requests ADD COLUMN ${name} ${type}`);
+      db.exec(`CREATE TRIGGER IF NOT EXISTS payment_provider_immutable
+        BEFORE UPDATE OF provider ON payment_requests
+        WHEN NEW.provider <> OLD.provider BEGIN SELECT RAISE(ABORT, 'PAYMENT_PROVIDER_IMMUTABLE'); END`);
       if (add.length) console.log(`[migrate] payment_requests: đã thêm cột ${add.map(([n]) => n).join(', ')}.`);
       db.exec(
         `CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_requests_client_request
@@ -329,6 +333,7 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
   // Nguồn gốc quyền quản trị: bảng + backfill một lần, trigger ở mọi lần khởi động.
   // Đặt ở đây chứ không ở schema.sql để backfill chỉ chạy đúng lúc bảng được tạo lần đầu.
   require('./lib/adminProvenance').migrateSqlite(db);
@@ -359,6 +364,8 @@ const PG_MIGRATIONS = [
   // Runner áp đúng số chưa có, theo thứ tự mảng; không đánh số lại migration đã áp.
   { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
   { version: 3, name: 'topup-request-idempotency', file: 'schema.pg.003-topup-idempotency.sql' },
+  { version: 4, name: 'payment-provider-isolation', file: 'schema.pg.004-payment-provider.sql' },
+  { version: 5, name: 'paypal-durable-bindings', file: 'schema.pg.005-paypal-bindings.sql' },
 ];
 
 function installPgTypeParsers(pg) {
