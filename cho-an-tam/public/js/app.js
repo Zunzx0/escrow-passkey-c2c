@@ -32,7 +32,6 @@ const App = (() => {
     homeLimit: HOME_PAGE_SIZE,  // số tin đang hiện ở trang chủ
     homeListings: [],           // kết quả tìm gần nhất, để "Xem thêm" không phải gọi lại API
     orderTab: null,             // 'sell' | 'buy' — chỉ người bán có hai tab
-    topupMethod: 'CARD',        // phương thức nạp tiền (mô phỏng) đang chọn
     adminTab: 'disputes',       // 'disputes' | 'seller-requests' | 'users' | 'invariants' | 'security-events'
     secEventsType: '',          // bộ lọc loại sự kiện của tab "Sự kiện bảo mật"
     orderFilter: 'active',      // 'active' | 'all' | 'done'
@@ -319,8 +318,11 @@ const App = (() => {
   // dismissible=false dùng cho màn hình hoàn tất thiết lập tài khoản: bỏ nút đóng và bỏ
   // việc bấm ra ngoài để tắt, vì phiên lúc đó chưa gọi được chức năng nào — đóng modal chỉ
   // dẫn người dùng tới một màn hình trống rồi lỗi 403.
+  let modalDismissible = true;
+
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
     closeModal();
+    modalDismissible = dismissible;
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
@@ -338,7 +340,11 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() { $('#modalRoot').innerHTML = ''; }
+  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; }
+
+  // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
+  // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
+  function dismissModal() { if (modalDismissible) closeModal(); }
 
   // =====================================================================
   // Phiên đăng nhập
@@ -1394,7 +1400,6 @@ const App = (() => {
           <b>${esc(name)}</b>
           <div class="small muted">${publicId ? accountLabel(publicId) : ''}
             ${seller ? `${publicId ? ' · ' : ''}Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
-          <div class="small text-trust mt-2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
         </div>
       </div>
       ${seller ? `
@@ -2098,7 +2103,7 @@ const App = (() => {
 
   const ENTRY_LABEL = {
     DEMO_TOPUP: 'Số dư khởi tạo (demo)',
-    TOPUP_CREDIT: 'Nạp tiền qua cổng thanh toán',
+    TOPUP_CREDIT: 'Nạp tiền qua cổng mô phỏng',
     ESCROW_LOCK_DEBIT: 'Thanh toán đơn — chuyển vào ký quỹ',
     ESCROW_LOCK_CREDIT: 'Ký quỹ nhận tiền',
     ESCROW_RELEASE_DEBIT: 'Ký quỹ giải ngân',
@@ -2106,12 +2111,6 @@ const App = (() => {
     ESCROW_REFUND_DEBIT: 'Ký quỹ hoàn tiền',
     ESCROW_REFUND_CREDIT: 'Nhận hoàn tiền',
   };
-
-  const PAY_METHODS = [
-    { key: 'CARD', icon: 'credit-card', label: 'Thẻ ATM nội địa', note: 'Mô phỏng' },
-    { key: 'EWALLET', icon: 'smartphone', label: 'Ví điện tử', note: 'Mô phỏng' },
-    { key: 'BANK', icon: 'landmark', label: 'Chuyển khoản ngân hàng', note: 'Mô phỏng' },
-  ];
 
   async function viewWallet() {
     if (!state.user) return requireLogin('Đăng nhập để xem ví của bạn.');
@@ -2190,7 +2189,6 @@ const App = (() => {
   const TOPUP_PRESETS = [100000, 200000, 500000, 1000000, 2000000];
 
   function topupCard() {
-    const method = state.topupMethod || 'CARD';
     return `
       <div class="card">
         <div class="card-head"><h2>Nạp tiền vào ví</h2><span class="tag tag-navy">${ico('shield-check', 12)} Cổng thanh toán mô phỏng</span></div>
@@ -2201,17 +2199,10 @@ const App = (() => {
               `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
             <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
           </div>
-          <div class="field">
-            <label>Phương thức thanh toán</label>
-            <div class="radio-cards">
-              ${PAY_METHODS.map((m) => `
-                <label class="radio-card">
-                  <input type="radio" name="payMethod" value="${m.key}" ${method === m.key ? 'checked' : ''}>
-                  ${ico(m.icon, 20)}
-                  <span>${esc(m.label)}<small>${esc(m.note)}</small></span>
-                </label>`).join('')}
-            </div>
-            <span class="hint">Cả ba phương thức đều đi qua cùng một cổng thanh toán mô phỏng — đồ án không nối cổng thật.</span>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Đây là <b>thanh toán mô phỏng</b>: không dùng thẻ, ví điện tử hay tài khoản ngân hàng thật và không chuyển
+              tiền thật. Hệ thống chưa nối PayPal hay cổng thanh toán thật nào.</span>
           </div>
           <div class="note">
             ${ico('info', 18)}
@@ -2276,8 +2267,6 @@ const App = (() => {
   async function createTopup(btn) {
     const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
     if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
-    const picked = document.querySelector('input[name="payMethod"]:checked');
-    state.topupMethod = picked ? picked.value : 'CARD';
     const pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
     await loadTopupHistory();
     await openCheckout(pr.id, pr.providerRef);
@@ -2291,7 +2280,6 @@ const App = (() => {
       return toast(e.code === 'NOT_FOUND' ? 'Cổng thanh toán mô phỏng đang tắt (MOCK_PROVIDER_CHECKOUT=0).' : e.message, 'err');
     }
     const settled = page.status !== 'PENDING';
-    const m = PAY_METHODS.find((x) => x.key === (state.topupMethod || 'CARD')) || PAY_METHODS[0];
     openModal({
       title: 'Cổng thanh toán (mô phỏng)',
       body: `
@@ -2300,7 +2288,7 @@ const App = (() => {
           <span>Đây là trang của <b>cổng thanh toán</b>, không phải của sàn. Trong demo, bạn chọn kết quả thanh toán;
             cổng sẽ gửi webhook đã ký về máy chủ của sàn.</span>
         </div>
-        <div class="price-row"><span>Phương thức</span><span>${ico(m.icon, 16)} ${esc(m.label)}</span></div>
+        <div class="price-row"><span>Phương thức</span><span>${ico('shield-check', 16)} Thanh toán mô phỏng</span></div>
         <div class="price-row"><span>Mã giao dịch tại cổng</span><span class="mono">${esc(shortId(page.providerRef))}</span></div>
         <div class="price-row total"><span>Số tiền thanh toán</span><span class="val">${money(page.amount)}</span></div>
         ${settled ? `<div class="note note-success mt-4">${ico('circle-check', 18)}<span>Cổng thanh toán
@@ -2800,10 +2788,16 @@ const App = (() => {
     route();
   }
 
+  // Tranh chấp của lần tải gần nhất, để bước xem lại đọc đúng dữ liệu máy chủ đã trả thay vì
+  // tin vào chữ trên nút.
+  const disputeCache = new Map();
+
   async function loadDisputes() {
     const { disputes } = await api('/admin/disputes');
     const list = $('#adminPanel');
     if (!list) return;
+    disputeCache.clear();
+    disputes.forEach((d) => disputeCache.set(d.id, d));
 
     if (disputes.length === 0) {
       list.innerHTML = empty('shield-check', 'Không có tranh chấp nào', 'Mọi đơn hàng đang diễn ra suôn sẻ.');
@@ -2861,6 +2855,39 @@ const App = (() => {
    * không dùng được cho "giải ngân". Nếu thiếu ràng buộc này thì lần xác thực lại chỉ chứng
    * minh quản trị viên có mặt, chứ không chứng minh đã chấp thuận điều gì.
    */
+  /**
+   * Bước xem lại TRƯỚC khi xác thực Passkey: nói rõ hành động, người nhận tiền và số tiền để
+   * quản trị viên không bấm nhầm hai nút liền kề. Xác nhận ở đây chỉ mở đường tới bước
+   * Passkey; phiếu uỷ quyền và quyền của máy chủ không đổi.
+   */
+  function openDisputeConfirm(kind, disputeId) {
+    const d = disputeCache.get(disputeId);
+    if (!d) return toast('Không tìm thấy tranh chấp — hãy tải lại trang.', 'err');
+    const t = d.transaction || {};
+    const refund = kind === 'refund';
+    const recipient = refund ? 'Người mua' : 'Người bán';
+    const recipientName = refund ? t.buyerName : t.sellerName;
+    openModal({
+      title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: giải ngân cho người bán',
+      body: `
+        <div class="stack">
+          <div class="note note-warning">
+            ${ico('triangle-alert', 18)}
+            <span>Quyết định này <b>không thể hoàn tác</b>: tiền rời ví ký quỹ và được ghi vĩnh viễn vào nhật ký của đơn.</span>
+          </div>
+          <div class="price-row"><span>Đơn hàng</span><span>${esc(t.itemName || 'Đơn hàng')}</span></div>
+          <div class="price-row"><span>Hành động</span><span><b>${refund ? 'Hoàn toàn bộ tiền' : 'Chuyển toàn bộ tiền'}</b></span></div>
+          <div class="price-row"><span>${recipient} nhận tiền</span><span><b>${esc(recipientName || '—')}</b></span></div>
+          <div class="price-row total"><span>Số tiền</span><span class="val">${money(t.amount || 0)}</span></div>
+          <p class="small muted m-0">Sau khi bấm xác nhận, bạn sẽ được yêu cầu xác thực lại bằng Passkey.</p>
+        </div>`,
+      footer: `
+        <button class="btn" data-act="modal-close">Huỷ</button>
+        <button class="btn btn-primary" data-act="admin-confirm" data-kind="${refund ? 'refund' : 'release'}"
+          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận giải ngân'} và dùng Passkey</button>`,
+    });
+  }
+
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
     await guard('adm:' + disputeId, btn, async () => {
@@ -2876,6 +2903,7 @@ const App = (() => {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
       });
     }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
+    closeModal();
     route();
   }
 
@@ -3105,7 +3133,7 @@ const App = (() => {
     'add-device': (el) => addDevice(el),
     'del-device': (el) => deleteDevice(el.dataset.id, el),
     'logout': () => logout(),
-    'modal-close': () => closeModal(),
+    'modal-close': () => dismissModal(),
     'reload': () => route(),
     'open-sell': () => openSell(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
@@ -3138,8 +3166,9 @@ const App = (() => {
     'do-delete-listing': (el) => doDeleteListing(el.dataset.id, el),
     'seed-demo': (el) => seedDemo(el),
 
-    'admin-refund': (el) => adminResolve('refund', el.dataset.id, el),
-    'admin-release': (el) => adminResolve('release', el.dataset.id, el),
+    'admin-refund': (el) => openDisputeConfirm('refund', el.dataset.id),
+    'admin-release': (el) => openDisputeConfirm('release', el.dataset.id),
+    'admin-confirm': (el) => adminResolve(el.dataset.kind, el.dataset.id, el),
 
     'audit-load': () => loadAudit($('#auditTxId').value.trim()),
     'audit-verify': (el) => verifyAudit(el),
@@ -3159,7 +3188,7 @@ const App = (() => {
     const act = el.dataset.act;
 
     if (act === 'modal-backdrop') {
-      if (e.target === el) closeModal();
+      if (e.target === el) dismissModal();
       return;
     }
     const handler = HANDLERS[act];
@@ -3174,7 +3203,7 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
     window.addEventListener('hashchange', route);
     const topSearch = $('#topSearch');
     if (topSearch) topSearch.addEventListener('submit', (e) => {
