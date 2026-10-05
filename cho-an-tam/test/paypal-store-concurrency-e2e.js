@@ -9,9 +9,13 @@
  * <url> phải trỏ tới một CSDL có tên kết thúc bằng "_store_test" (ví dụ enclave_paypal_store_test):
  * bộ test XOÁ schema app/mock_provider của CSDL đó rồi dựng lại từ schema.pg.sql. Tạo CSDL nếu chưa có.
  *
- * Mỗi nền dùng HAI kết nối độc lập (hai SqliteAsyncDatabase trên cùng file / hai pool PostgreSQL) để
- * mô phỏng hai tiến trình backend. Thứ tự các bước được điều khiển tường minh (barrier): bước mạng tới
- * PayPal được thay bằng khoảng giữa claim và finish.
+ * Mức đồng thời:
+ *   - SQLite: hai store dùng CHUNG một kết nối (hai kết nối đồng bộ trong một process Node khoá chết nhau);
+ *     đồng thời là các lời gọi async đan xen.
+ *   - PostgreSQL: hai pool trong MỘT process Node (không phải hai process).
+ *   - K5: HAI process Node thật, mỗi process một kết nối, bắt đầu cùng lúc bằng file barrier — cả hai nền.
+ * Thứ tự các bước được điều khiển tường minh bằng promise/barrier: POST capture tới PayPal là một
+ * promise chỉ hoàn tất khi test cho phép; không dùng sleep ngẫu nhiên.
  *
  * Phạm vi: CHỈ store và lược đồ đề xuất. Chưa chứng minh luồng ghi ví tích hợp (route, adapter,
  * applyProviderResult) — các bài P8 chỉ mô phỏng bước credit bằng một UPDATE trong cùng transaction.
@@ -70,6 +74,7 @@ async function sqliteFixture() {
   await setup.close();
   return {
     dialect: 'sqlite',
+    childTarget: { dialect: 'sqlite', file },
     // Hai kết nối SQLite ĐỒNG BỘ trong cùng một process Node sẽ khoá chết nhau: BEGIN IMMEDIATE của
     // kết nối thứ hai chặn event loop trong lúc transaction async của kết nối thứ nhất cần event loop
     // để commit. SQLite chạy một process duy nhất, nên ở đây hai store dùng CHUNG một kết nối và tính
@@ -108,6 +113,7 @@ async function pgFixture(url) {
   const pools = [];
   return {
     dialect: 'pg',
+    childTarget: { dialect: 'pg', url },
     open() {
       const pool = new pg.Pool({ connectionString: url, ssl, max: 4, allowExitOnIdle: true });
       pool.on('connect', (c) => { c.query('SET search_path TO app, public').catch(() => {}); });
@@ -116,6 +122,76 @@ async function pgFixture(url) {
     },
     async cleanup() { /* CSDL thử nghiệm riêng được giữ để soi lại; lần chạy sau tự dựng lại */ },
   };
+}
+
+// ------------------------------------------------------------------------------------------
+// Hai process con thật: mỗi process mở kết nối riêng, chờ file "go", rồi giành quyền capture trên
+// cùng danh sách request. Barrier là file — cả hai bắt đầu sau khi CẢ HAI đã báo sẵn sàng.
+const CHILD_SCRIPT = `
+  const fs = require('fs');
+  const t = JSON.parse(process.env.PPS_TARGET);
+  const ids = JSON.parse(process.env.PPS_IDS);
+  const { SqliteAsyncDatabase, PgAsyncDatabase } = require('./src/lib/asyncDb');
+  const { createPayPalPaymentStore } = require('./src/lib/paypalPaymentStore');
+  let db;
+  if (t.dialect === 'sqlite') {
+    const Database = require('./src/lib/sqlite');
+    const raw = new Database(t.file); raw.pragma('busy_timeout = 10000'); raw.pragma('foreign_keys = ON');
+    db = new SqliteAsyncDatabase(raw);
+  } else {
+    const pg = require('pg');
+    pg.types.setTypeParser(20, (v) => v === null ? null : Number(v));
+    const pool = new pg.Pool({ connectionString: t.url, ssl: /sslmode=disable/.test(t.url) ? false : { rejectUnauthorized: false }, max: 2 });
+    pool.on('connect', (c) => { c.query('SET search_path TO app, public').catch(() => {}); });
+    db = new PgAsyncDatabase(pool);
+  }
+  const store = createPayPalPaymentStore({ db });
+  (async () => {
+    await db.prepare('SELECT 1 AS ok').get();
+    fs.writeFileSync(process.env.PPS_READY, 'ready');
+    while (!fs.existsSync(process.env.PPS_GO)) await new Promise((r) => setImmediate(r));
+    const now = new Date().toISOString(); const cutoff = new Date(Date.now() - 60000).toISOString();
+    // Đảo thứ tự ở process thứ hai để hai process tranh nhau từ hai đầu danh sách.
+    const order = process.env.PPS_REVERSE === '1' ? ids.slice().reverse() : ids;
+    const got = await Promise.all(order.map((id) => store.claimCapture(id, null, 'proc-' + process.pid + '-' + id, now, cutoff)));
+    const byId = new Map(order.map((id, i) => [id, got[i].outcome]));
+    const outcomes = ids.map((id) => byId.get(id));
+    process.stdout.write(JSON.stringify({ pid: process.pid, outcomes }));
+    await db.close();
+  })().catch((e) => { process.stderr.write(String(e && e.stack || e)); process.exit(2); });
+`;
+
+function runTwoProcesses(target, ids) {
+  const { spawn } = require('child_process');
+  const dir = path.join(ROOT, 'data', 'test');
+  const tag = `${Date.now()}-${crypto.randomUUID().slice(0, 6)}`;
+  const go = path.join(dir, `pps-go-${tag}`);
+  const spawnOne = (n) => {
+    const ready = path.join(dir, `pps-ready-${tag}-${n}`);
+    const child = spawn(process.execPath, ['-e', CHILD_SCRIPT], {
+      cwd: ROOT,
+      env: { ...process.env, PPS_TARGET: JSON.stringify(target), PPS_IDS: JSON.stringify(ids), PPS_READY: ready, PPS_GO: go,
+        PPS_REVERSE: n === 2 ? '1' : '0' },
+    });
+    let out = ''; let err = '';
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    const done = new Promise((resolve) => child.on('close', (code) => {
+      let parsed = {};
+      try { parsed = JSON.parse(out); } catch (_) { /* báo lỗi qua err */ }
+      try { fs.unlinkSync(ready); } catch (_) { /* file tạm */ }
+      resolve({ code, err: err.slice(0, 300), ...parsed });
+    }));
+    return { ready, done };
+  };
+  const a = spawnOne(1); const b = spawnOne(2);
+  return (async () => {
+    for (let i = 0; i < 3000 && !(fs.existsSync(a.ready) && fs.existsSync(b.ready)); i++) await new Promise((r) => setTimeout(r, 10));
+    fs.writeFileSync(go, 'go');
+    const res = await Promise.all([a.done, b.done]);
+    try { fs.unlinkSync(go); } catch (_) { /* file tạm */ }
+    return res;
+  })();
 }
 
 // ------------------------------------------------------------------------------------------
@@ -273,6 +349,8 @@ async function runSuite(fx) {
     const tA = iso(-120000);
     const a = await A.claimCapture(id, users.owner, 'holder-A', tA, iso(-600000));
     assert(a.outcome === 'CLAIMED', 'A giành quyền');
+    // A đã gửi POST capture rồi im lặng (hợp đồng: ghi dấu ngay trước khi POST).
+    if (typeof A.markCapturePostSent === 'function') await A.markCapturePostSent(id, 'holder-A', tA);
     // B đến khi lease của A đã quá hạn (cutoff sau thời điểm A claim).
     const b = await B.claimCapture(id, null, 'holder-B', iso(), iso(-60000));
     assert(b.outcome === 'CLAIMED' && b.mustVerifyFirst === true && b.previousState === 'IN_FLIGHT',
@@ -382,6 +460,126 @@ async function runSuite(fx) {
       if (!f.ok) throw new Error('mất quyền');
     })().then(() => false).catch(() => true);
     assert(lost && (await reqRow(stale)).status === 'PENDING', 'Người giữ quyền cũ: finish báo mất quyền, credit rollback theo');
+  });
+
+  // Một "PayPal" giả trong test: POST capture là một promise chỉ hoàn tất khi test cho phép (barrier),
+  // GET trả trạng thái do test quyết định. Không có sleep ngẫu nhiên.
+  const deferred = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+  const hasPostMarker = typeof A.markCapturePostSent === 'function';
+
+  // =====================================================================================
+  await group('K1: POST của A treo, lease hết, B GET thấy PENDING -> không được đóng; POST A thành công muộn vẫn được ghi nhận', async () => {
+    const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
+    const a = await A.claimCapture(id, users.owner, 'holder-A', iso(-120000), iso(-600000));
+    assert(a.outcome === 'CLAIMED', 'A giành quyền');
+    if (hasPostMarker) assert((await A.markCapturePostSent(id, 'holder-A', iso(-119000))).ok, 'A ghi dấu đã gửi POST capture');
+    const postA = deferred();                                  // POST của A đang treo trên mạng
+    const aFlight = postA.p.then(async (resp) => {
+      const fin = await A.finishCaptureAttempt(id, 'holder-A', { state: 'VERIFIED', captureId: resp.captureId });
+      const mark = fin.ok ? fin : await A.markCaptureVerified(id, resp.captureId);
+      return { fin, mark };
+    });
+
+    const b = await B.claimCapture(id, null, 'holder-B', iso(), iso(-60000));   // lease của A đã hết hạn
+    assert(b.outcome === 'CLAIMED' && b.mustVerifyFirst === true, 'B tiếp quản và được yêu cầu GET trước');
+    // B GET order -> PayPal vẫn báo APPROVED/PENDING. Đó KHÔNG phải bằng chứng chưa thu tiền.
+    const bReady = await B.finishCaptureAttempt(id, 'holder-B', { state: 'READY' });
+    assert(!bReady.ok && bReady.reason === 'CAPTURE_OUTCOME_UNRESOLVED',
+      `B không được đưa về READY chỉ vì GET thấy PENDING (nhận ${JSON.stringify(bReady)})`);
+    if (!bReady.ok) await B.finishCaptureAttempt(id, 'holder-B', { state: 'UNKNOWN', errorCode: 'POST_OUTCOME_UNKNOWN' });
+    const close = await B.closeUncaptured(id, { nowIso: iso(), reason: 'ORDER_EXPIRED' });
+    assert(!close.closed && (await reqRow(id)).status === 'PENDING', `Đóng hết hạn không thắng (nhận ${JSON.stringify(close)})`);
+
+    postA.resolve({ captureId: `CAP-LATE-${id}` });            // POST của A hoàn tất muộn: PayPal ĐÃ thu tiền
+    const { fin, mark } = await aFlight;
+    assert(!fin.ok && fin.reason === 'STALE_CLAIM', 'Token A đã hết hiệu lực: finish của A không ghi đè');
+    assert(mark.ok === true, `Bằng chứng thu tiền của A vẫn được ghi nhận qua markCaptureVerified (nhận ${JSON.stringify(mark)})`);
+    const fr = await raw(id);
+    assert(fr.capture_state === 'VERIFIED' && fr.capture_id === `CAP-LATE-${id}` && (await reqRow(id)).status === 'PENDING',
+      'Kết quả: VERIFIED với capture của A, request PENDING chờ settlement (không FAILED)');
+  });
+
+  await group('K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối', async () => {
+    const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
+    await A.claimCapture(id, users.owner, 'holder-A', iso(-120000), iso(-600000));
+    if (hasPostMarker) await A.markCapturePostSent(id, 'holder-A', iso(-119000));
+    const b = await B.claimCapture(id, null, 'holder-B', iso(), iso(-60000));
+    assert(b.outcome === 'CLAIMED', 'B đang giữ quyền');
+    const finA = await A.finishCaptureAttempt(id, 'holder-A', { state: 'VERIFIED', captureId: `CAPA-${id}` });
+    assert(!finA.ok && (await raw(id)).capture_claim === 'holder-B', 'finish của A không ghi đè token của B');
+    assert((await A.markCaptureVerified(id, `CAPA-${id}`)).ok, 'Bằng chứng của A ghi nhận được');
+    const finB = await B.finishCaptureAttempt(id, 'holder-B', { state: 'UNKNOWN' });
+    assert(!finB.ok && (await raw(id)).capture_state === 'VERIFIED', 'B ghi UNKNOWN sau đó: bị từ chối, VERIFIED giữ nguyên');
+  });
+
+  await group('K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại', async () => {
+    const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
+    assert((await A.closeUncaptured(id, { nowIso: iso(), reason: 'ORDER_EXPIRED' })).closed, 'Request đóng FAILED (chưa từng capture)');
+    const late = await A.markCaptureVerified(id, `CAPF-${id}`);
+    assert(late.ok === false && late.outcome === 'RECOVERY_REQUIRED', `Không báo thành công giả: RECOVERY_REQUIRED (nhận ${JSON.stringify(late)})`);
+    const r1 = await raw(id);
+    assert(r1.capture_id === `CAPF-${id}` && r1.capture_state === 'RECOVERY_REQUIRED', 'Capture ID được lưu bền làm bằng chứng');
+    assert((await reqRow(id)).status === 'FAILED', 'Request vẫn FAILED: store không tự mở lại hay ghi ví');
+    const again = await B.markCaptureVerified(id, `CAPF-${id}`);
+    assert(again.ok === false && again.outcome === 'RECOVERY_REQUIRED', 'Replay cùng capture: vẫn RECOVERY_REQUIRED (idempotent)');
+    const other = await B.markCaptureVerified(id, `CAPF2-${id}`);
+    assert(other.ok === false && other.reason === 'CAPTURE_ID_CONFLICT' && (await raw(id)).capture_id === `CAPF-${id}`,
+      'Capture khác: CAPTURE_ID_CONFLICT, bằng chứng đầu giữ nguyên');
+    assert(/CAPF2-/.test((await raw(id)).last_capture_error || ''), 'Capture xung đột cũng được ghi lại để đối soát');
+    const cl = await A.claimCapture(id, users.owner, uid(), iso(), iso(-60000));
+    assert(cl.outcome === 'RECOVERY_REQUIRED', `claimCapture trên request cần phục hồi: RECOVERY_REQUIRED (nhận ${cl.outcome})`);
+
+    const p = await newPayPal(); await A.bindOrder(p, `ORD-${p}`);
+    assert((await A.markCaptureVerified(p, `CAPP-${p}`)).ok === true, 'Request PENDING bình thường: VERIFIED như cũ');
+
+    // Holder đang capture thì request bị đóng bởi một đường khác (lỗi ở nơi khác): finish VERIFIED -> cần phục hồi.
+    const q = await newPayPal(); await A.bindOrder(q, `ORD-${q}`);
+    await A.claimCapture(q, users.owner, 'holder-Q', iso(), iso(-60000));
+    if (hasPostMarker) await A.markCapturePostSent(q, 'holder-Q', iso());
+    await dbA.prepare("UPDATE payment_requests SET status = 'FAILED' WHERE id = ?").run(q);
+    const fq = await A.finishCaptureAttempt(q, 'holder-Q', { state: 'VERIFIED', captureId: `CAPQ-${q}` });
+    const rq = await raw(q);
+    assert(fq.ok === false && fq.reason === 'RECOVERY_REQUIRED' && rq.capture_id === `CAPQ-${q}` && rq.capture_state === 'RECOVERY_REQUIRED',
+      `finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận ${JSON.stringify(fq)})`);
+  });
+
+  await group('K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ', async () => {
+    if (!hasPostMarker) { assert(false, 'Bản cũ không phân biệt chưa gửi POST / đã gửi POST'); return; }
+    const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
+    await A.claimCapture(id, users.owner, 'h1', iso(), iso(-60000));
+    await A.markCapturePostSent(id, 'h1', iso());
+    assert(!!(await rejectsWith(() => A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'ORDER_APPROVED' }), 'VALIDATION_ERROR')),
+      'APPROVED không phải bằng chứng kết thúc: bị từ chối');
+    assert((await A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'ORDER_VOIDED' })).ok, 'Order VOIDED: NOT_CAPTURED');
+    assert((await B.closeUncaptured(id, { nowIso: iso(), reason: 'ORDER_VOIDED' })).closed, 'Sau NOT_CAPTURED: đóng được');
+
+    const n = await newPayPal(); await A.bindOrder(n, `ORD-${n}`);
+    await A.claimCapture(n, users.owner, 'dead', iso(-120000), iso(-600000));   // giữ quyền rồi chết TRƯỚC khi POST
+    const t = await B.claimCapture(n, null, 'next', iso(), iso(-60000));
+    assert(t.outcome === 'CLAIMED' && t.mustVerifyFirst === false, 'Người trước chưa từng POST: không bắt buộc GET trước');
+    assert((await B.finishCaptureAttempt(n, 'next', { state: 'READY' })).ok, 'Chưa từng POST: nhả về READY hợp lệ');
+    assert((await B.closeUncaptured(n, { nowIso: iso(), reason: 'ORDER_EXPIRED' })).closed, 'Chưa từng POST: đóng được');
+    assert(await rejects(() => dbA.prepare('UPDATE paypal_payment_bindings SET capture_post_sent_at = NULL WHERE payment_request_id = ?').run(id)),
+      'Dấu đã gửi POST không xoá được bằng UPDATE trực tiếp');
+  });
+
+  // =====================================================================================
+  await group('K5: HAI process Node thật cùng giành quyền capture (barrier bằng file)', async () => {
+    const ids = [];
+    for (let i = 0; i < 5; i++) { const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`); ids.push(id); }
+    const results = await runTwoProcesses(fx.childTarget, ids);
+    const ok = results.every((r) => r.code === 0 && Array.isArray(r.outcomes));
+    assert(ok, `Hai process con chạy xong (exit ${results.map((r) => r.code).join('/')})${ok ? '' : ' ' + results.map((r) => r.err).join(' | ')}`);
+    if (!ok) return;
+    let exactlyOne = true;
+    for (let i = 0; i < ids.length; i++) {
+      const outs = [results[0].outcomes[i], results[1].outcomes[i]];
+      if (outs.filter((o) => o === 'CLAIMED').length !== 1 || outs.filter((o) => o === 'BUSY').length !== 1) exactlyOne = false;
+    }
+    console.log(`  [K5] pid ${results[0].pid}: ${results[0].outcomes.join(' ')} | pid ${results[1].pid}: ${results[1].outcomes.join(' ')}`);
+    assert(results[0].pid !== results[1].pid && exactlyOne, 'Mỗi request: đúng một process CLAIMED, process kia BUSY');
+    const attempts = await Promise.all(ids.map(async (id) => Number((await raw(id)).capture_attempts)));
+    assert(attempts.every((n) => n === 1), `capture_attempts = 1 cho mọi request (thực tế ${attempts.join(',')})`);
   });
 
   // =====================================================================================
