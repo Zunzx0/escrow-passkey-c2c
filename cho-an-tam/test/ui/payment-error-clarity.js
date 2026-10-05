@@ -170,6 +170,10 @@ async function main() {
   const refundBtn = p.d.querySelector('[data-act="admin-refund"]');
   ok(!!refundBtn, 'Admin thấy nút hoàn tiền của tranh chấp đang mở');
   p.click(refundBtn);
+  await sleep(200);
+  // Nếu giao diện có bước xem lại trước Passkey (PR #18) thì phải xác nhận mới có yêu cầu nào được gửi.
+  const confirmBtn = p.d.querySelector('[data-act="admin-confirm"]');
+  if (confirmBtn) p.click(confirmBtn);
   await sleep(500);
   const tAdmin = p.toasts();
   ok(tAdmin.length === 1 && /không còn ở trạng thái chờ xử lý/.test(tAdmin[0].text) && !/Dispute phải OPEN/.test(tAdmin[0].text),
