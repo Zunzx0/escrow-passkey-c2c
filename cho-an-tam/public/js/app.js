@@ -38,6 +38,11 @@ const App = (() => {
     busy: new Set(),            // id các nút đang chạy, để khoá double-click
     unread: 0,                  // số thông báo chưa đọc — hỏi lại định kỳ (polling), không WebSocket
     topupPoll: null,            // hẹn giờ đang chờ kết quả một yêu cầu nạp tiền
+    topupPollGen: 0,            // tăng mỗi lần bắt đầu/dừng theo dõi; vòng theo dõi cũ thấy số khác thì tự thoát
+    topupPollWake: null,        // hàm đánh thức lượt chờ đang treo, để huỷ theo dõi cũng kết thúc Promise đang đợi
+    sessionEpoch: 0,            // tăng mỗi khi PHIÊN đổi (đăng xuất, đăng nhập mới, đổi tài khoản); không tăng khi chỉ làm mới token
+    topupIntent: null,          // bản nhớ trong bộ nhớ của ý định nạp tiền chưa rõ kết quả (bản lưu nằm ở localStorage)
+    topupNotice: null,          // thông báo trạng thái nạp tiền đang hiện trên trang ví
   };
 
   const ROLE_LABEL = { BUYER: 'Người mua', SELLER: 'Người bán', ADMIN: 'Quản trị viên' };
@@ -206,6 +211,11 @@ const App = (() => {
     REAUTH_REQUIRED: () =>
       'Thao tác này cần xác thực lại bằng Passkey. Phiếu xác thực đã hết hạn hoặc đã được dùng; bạn vẫn đang đăng nhập — ' +
       'hãy bắt đầu lại thao tác và xác thực Passkey khi được yêu cầu.',
+    // 503 của POST /payments/topup: yêu cầu ĐÃ được lưu ở máy chủ, chỉ chưa gửi được sang cổng. Gửi lại bằng cùng
+    // requestId là an toàn (không tạo trùng).
+    PROVIDER_UNAVAILABLE: () =>
+      'Cổng thanh toán tạm thời không nhận yêu cầu. Yêu cầu nạp tiền của bạn đã được lưu, chưa bị mất — hãy bấm "Thử lại cùng yêu cầu" ' +
+      'sau ít phút (hệ thống cũng sẽ tự gửi lại).',
     DISPUTE_NOT_OPEN: () =>
       'Tranh chấp này không còn ở trạng thái chờ xử lý — có thể đã được xử lý ở nơi khác. Không có khoản tiền nào được chuyển thêm; ' +
       'danh sách sẽ được tải lại.',
@@ -296,7 +306,18 @@ const App = (() => {
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
 
-    const { res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
+    // Request này có thể được phát đi dưới một phiên đã kết thúc (đăng xuất, đăng nhập lại, đổi tài khoản) trong lúc chờ.
+    // Khi đó bỏ cả phản hồi lẫn lỗi: không làm mới phiên, không thử lại bằng token của người dùng MỚI, không báo lỗi cho họ.
+    const epoch = state.sessionEpoch;
+    const oldSession = () => Object.assign(new Error('Phản hồi của phiên cũ'), { silent: true, stale: true });
+    let res;
+    let data;
+    try {
+      ({ res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined }));
+    } catch (e) {
+      throw state.sessionEpoch !== epoch ? oldSession() : e;
+    }
+    if (state.sessionEpoch !== epoch) throw oldSession();
 
     if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
       if (!retried && await refreshSession()) return api(path, { method, body }, true);
@@ -338,7 +359,8 @@ const App = (() => {
       if (successMsg) toast(successMsg, 'ok');
       return result;
     } catch (e) {
-      toast(e.message, 'err');
+      // Lỗi của một phản hồi cũ (phiên đã đổi) mang cờ silent: không được hiện thông báo cho người đang dùng phiên mới.
+      if (!(e && e.silent)) toast(e.message, 'err');
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
       // một thao tác sẽ lại bị từ chối.
       if (e && e.code === 'DISPUTE_NOT_OPEN') {
@@ -468,10 +490,17 @@ const App = (() => {
   // =====================================================================
 
   function setSession(token, user) {
+    // Phiên MỚI = chưa có phiên, hoặc đổi sang tài khoản khác. Làm mới token của cùng một phiên (refreshSession)
+    // thì KHÔNG phải phiên mới, nếu không mọi thao tác đang chạy sẽ bị coi là "cũ" oan mỗi lần token được gia hạn.
+    const fresh = !state.token || !state.user || !user || state.user.id !== user.id;
     state.token = token;
     state.user = user;
     localStorage.setItem(STORAGE_TOKEN, token);
     localStorage.setItem(STORAGE_USER, JSON.stringify(user));
+    if (fresh) {
+      state.sessionEpoch++;
+      resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
+    }
   }
 
   function clearSession() {
@@ -482,6 +511,11 @@ const App = (() => {
     state.unread = 0;
     localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_USER);
+    // Mọi phản hồi còn đang bay của phiên này trở thành "cũ" ngay (kể cả khi đăng nhập lại cùng tài khoản).
+    state.sessionEpoch++;
+    // Dừng theo dõi và bỏ trạng thái trong bộ nhớ. Bản lưu theo từng người dùng vẫn còn để chính người đó
+    // phục hồi một lần nạp chưa rõ khi quay lại.
+    resetTopupFlow();
   }
 
   async function refreshWallet() {
@@ -1240,6 +1274,7 @@ const App = (() => {
     }
 
     const head = parts[0] || '';
+    if (head !== 'wallet') stopTopupPoll(); // rời trang ví: không còn gì để theo dõi
     try {
       if (head === '') return await viewHome();
       if (head === 'listing') return await viewListing(parts[1]);
@@ -2251,6 +2286,8 @@ const App = (() => {
         </div>
       </div>`;
 
+    renderTopupIntent();
+
     const [wallet, buying, selling] = await Promise.all([
       api('/wallets/me'),
       api('/transactions?as=buyer').catch(() => ({ transactions: [] })),
@@ -2317,6 +2354,7 @@ const App = (() => {
               `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
             <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
           </div>
+          <div id="topupIntent" aria-live="polite"></div>
           <div class="note">
             ${ico('info', 18)}
             <span>Đây là <b>thanh toán mô phỏng</b>: không dùng thẻ, ví điện tử hay tài khoản ngân hàng thật và không chuyển
@@ -2330,6 +2368,23 @@ const App = (() => {
           <div><button class="btn btn-primary btn-lg" data-act="topup-create">${ico('wallet', 18)} Tiếp tục thanh toán</button></div>
         </div>
       </div>`;
+  }
+
+  /**
+   * Nút ở dòng lịch sử. Chỉ SUBMITTED (cổng đã nhận yêu cầu) mới mở được cổng thanh toán. Dòng không có
+   * trường submissionStatus (dữ liệu cũ) được coi là đã gửi, đúng như máy chủ quy ước.
+   */
+  function historyAction(p) {
+    if (p.status !== 'PENDING') return '';
+    const sub = p.submissionStatus || 'SUBMITTED';
+    if (sub === 'SUBMITTING') return '<span class="muted small">Đang gửi sang cổng thanh toán…</span>';
+    if (sub === 'SUBMIT_FAILED') {
+      const intent = loadIntent();
+      return intent && p.requestId && intent.requestId === p.requestId
+        ? '<button class="btn btn-sm" data-act="topup-retry">Thử lại cùng yêu cầu</button>'
+        : '<span class="muted small">Chưa gửi được sang cổng — hệ thống sẽ tự gửi lại</span>';
+    }
+    return `<button class="btn btn-sm" data-act="checkout-open" data-id="${esc(p.id)}" data-ref="${esc(p.providerRef)}">Mở lại cổng thanh toán</button>`;
   }
 
   async function loadTopupHistory() {
@@ -2353,9 +2408,7 @@ const App = (() => {
               <td class="muted small">${p.resolvedAt
                 ? `${fmtDateTime(p.resolvedAt)} · ${esc(RESOLVED_BY_LABEL[p.resolvedBy] || '')}`
                 : 'Chờ cổng thanh toán trả kết quả'}</td>
-              <td>${p.status === 'PENDING'
-                ? `<button class="btn btn-sm" data-act="checkout-open" data-id="${esc(p.id)}" data-ref="${esc(p.providerRef)}">Mở lại cổng thanh toán</button>`
-                : ''}</td>
+              <td>${historyAction(p)}</td>
             </tr>`;
         }).join('')}
         </tbody>
@@ -2382,28 +2435,441 @@ const App = (() => {
     return data;
   }
 
+  // ---------- Ý định nạp tiền và requestId ----------
+  //
+  // Một lần bấm "nạp" = MỘT ý định = MỘT requestId, sinh một lần rồi giữ nguyên cho mọi lần gửi lại. Nhờ vậy
+  // bấm đúp, thử lại sau timeout/mất kết nối/503 hay tải lại trang đều dẫn tới cùng một yêu cầu ở máy chủ,
+  // không bao giờ tạo thêm một khoản nạp thứ hai. Máy chủ bảo đảm điều đó (POST /api/payments/topup).
+  //
+  // Ý định chỉ sống trong lúc kết quả CHƯA RÕ (chưa nhận được một yêu cầu đã SUBMITTED hay đã kết thúc). Lưu theo
+  // id người dùng; chỉ chứa mã yêu cầu và số tiền, KHÔNG chứa token hay bí mật. Khi chưa rõ, số tiền bị khoá: đổi
+  // số tiền mà giữ cùng khoá sẽ bị máy chủ từ chối (409) và là một ý định khác về bản chất — người dùng phải chủ
+  // động bắt đầu lần nạp mới.
+  //
+  // Chính sách tài khoản: khoá localStorage theo id người dùng CHỈ để giao diện không dùng chéo ý định giữa các
+  // tài khoản — nó không phải cơ chế bảo mật (mã JS nào cùng origin cũng đọc được localStorage). Vì thế ý định của
+  // một tài khoản KHÔNG bị tự xoá khi tài khoản khác đăng nhập: chủ của nó quay lại vẫn phục hồi được, và tài khoản
+  // khác không bao giờ đọc hay dùng nó (loadIntent kiểm userId). Nội dung chỉ là mã yêu cầu ngẫu nhiên và số tiền.
+  //
+  // Phản hồi đến muộn: mọi thao tác nạp tiền mang một "ngữ cảnh" (phiên, người dùng, ý định) lấy lúc bắt đầu và kiểm
+  // lại sau MỖI await. Phản hồi của phiên đã đăng xuất / đổi tài khoản / bị thay bằng ý định khác không được mở cổng,
+  // báo thông báo, đọc ví hay sửa ý định của phiên đang dùng.
+
+  const INTENT_PREFIX = 'cat_topup_intent:';
+  const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{8,100}$/;
+  const PAYMENT_STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED'];
+  const SUBMISSION_STATUSES = ['SUBMITTING', 'SUBMITTED', 'SUBMIT_FAILED'];
+  // Theo dõi có hạn, giãn dần: tổng ~8 giây rồi dừng và đưa nút "Kiểm tra lại" cho người dùng.
+  const POLL_DELAYS_MS = [1000, 1500, 2250, 3400];
+
+  function validIntent(v, userId) {
+    return !!v && typeof v === 'object' && v.userId === userId && REQUEST_ID_RE.test(String(v.requestId))
+      && Number.isSafeInteger(v.amount) && v.amount > 0;
+  }
+
+  function loadIntent() {
+    const user = state.user;
+    if (!user || !user.id) return null;
+    if (validIntent(state.topupIntent, user.id)) return state.topupIntent;
+    try {
+      const v = JSON.parse(localStorage.getItem(INTENT_PREFIX + user.id) || 'null');
+      if (validIntent(v, user.id)) { state.topupIntent = v; return v; }
+    } catch (_) { /* không đọc được: coi như không có ý định nào */ }
+    return null;
+  }
+
+  function saveIntent(intent) {
+    state.topupIntent = intent;
+    try { localStorage.setItem(INTENT_PREFIX + intent.userId, JSON.stringify(intent)); } catch (_) { /* vẫn giữ trong bộ nhớ */ }
+  }
+
+  function clearIntent() {
+    const user = state.user;
+    state.topupIntent = null;
+    if (!user || !user.id) return;
+    try { localStorage.removeItem(INTENT_PREFIX + user.id); } catch (_) { /* không có gì để xoá */ }
+  }
+
+  /**
+   * Ngữ cảnh của một thao tác nạp tiền: dấu phiên + người dùng + ý định lúc bắt đầu. `requestId` null với thao tác
+   * không gắn ý định (ví dụ theo dõi sau khi thanh toán ở cổng, hoặc mở lại cổng từ lịch sử).
+   */
+  function topupCtx(requestId) {
+    return { epoch: state.sessionEpoch, userId: state.user ? state.user.id : null, requestId: requestId || null, released: false };
+  }
+
+  /** Thao tác này còn thuộc phiên và ý định đang dùng không? So cả epoch (đăng xuất rồi đăng nhập lại cùng tài khoản), không chỉ userId. */
+  function ctxAlive(ctx) {
+    if (!ctx || state.sessionEpoch !== ctx.epoch || !state.token || !state.user || state.user.id !== ctx.userId) return false;
+    if (ctx.requestId && !ctx.released) {
+      const cur = loadIntent();
+      if (!cur || cur.requestId !== ctx.requestId) return false;
+    }
+    return true;
+  }
+
+  /** Chính thao tác này kết thúc ý định của mình: xoá bản lưu và đánh dấu để các bước sau chỉ còn kiểm phiên. */
+  function releaseIntent(ctx) {
+    clearIntent();
+    ctx.released = true;
+  }
+
+  const staleError = () => Object.assign(new Error('Phản hồi của phiên cũ'), { silent: true, stale: true });
+
+  function stopTopupPoll() {
+    state.topupPollGen++;
+    if (state.topupPoll) { clearTimeout(state.topupPoll); state.topupPoll = null; }
+    // Đánh thức lượt chờ đang treo để vòng theo dõi cũ thoát ngay (thấy số thế hệ đã đổi) thay vì treo mãi.
+    const wake = state.topupPollWake;
+    state.topupPollWake = null;
+    if (wake) wake();
+  }
+
+  function resetTopupFlow() {
+    stopTopupPoll();
+    state.topupIntent = null;
+    state.topupNotice = null;
+  }
+
+  function startIntent(amount) {
+    const intent = { userId: state.user.id, requestId: 'topup-' + newRequestId(), amount, createdAt: new Date().toISOString() };
+    saveIntent(intent);
+    return intent;
+  }
+
+  /** Một dòng yêu cầu nạp từ máy chủ có đủ và đúng dữ liệu để dựa vào không? Thiếu/sai thì KHÔNG coi là thành công. */
+  function validPaymentRow(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return false;
+    if (typeof r.id !== 'string' || !r.id) return false;
+    if (!PAYMENT_STATUSES.includes(r.status) || !SUBMISSION_STATUSES.includes(r.submissionStatus)) return false;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0) return false;
+    if (typeof r.providerRef !== 'string' || !r.providerRef) return false;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return false;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return false;
+    return true;
+  }
+
+  /**
+   * Mức kiểm nhẹ hơn cho dòng đọc lại bằng GET (theo dõi, kiểm tra trạng thái): cần id, trạng thái và số tiền hợp lệ;
+   * thiếu submissionStatus thì coi là SUBMITTED, đúng quy ước của máy chủ. Khi biết trước id / số tiền / requestId của
+   * yêu cầu đang theo dõi thì dòng đọc về phải KHỚP — sai id, sai số tiền hay requestId khác (kể cả null) đều bị từ chối.
+   * Trả về dòng đã chuẩn hoá hoặc null. Phản hồi TẠO yêu cầu (POST) bị kiểm đủ mọi trường bằng validPaymentRow.
+   */
+  function readPaymentState(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    if (typeof r.id !== 'string' || !r.id || !PAYMENT_STATUSES.includes(r.status)) return null;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0) return null;
+    if (r.submissionStatus !== undefined && !SUBMISSION_STATUSES.includes(r.submissionStatus)) return null;
+    if (expect && expect.id !== undefined && r.id !== expect.id) return null;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return null;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return null;
+    return { ...r, submissionStatus: r.submissionStatus || 'SUBMITTED' };
+  }
+
+  /** Từ chối dứt khoát của máy chủ (trước khi ghi gì): bỏ ý định để lần sau nhập số tiền khác được. */
+  function isDefiniteRejection(e) {
+    const st = e && e.status;
+    if (!st || st < 400 || st >= 500) return false;
+    return st !== 401 && st !== 408 && (e && e.code) !== 'IDEMPOTENCY_KEY_REUSED';
+  }
+
+  function setTopupNotice(notice) {
+    state.topupNotice = notice;
+    renderTopupIntent();
+  }
+
+  function renderTopupIntent() {
+    const intent = loadIntent();
+    // Còn ý định mà chưa có thông báo cụ thể (ví dụ vừa tải lại trang): coi là chưa rõ kết quả.
+    const notice = state.topupNotice || (intent ? { kind: 'unknown' } : null);
+    const input = $('#topupAmount');
+    if (input) {
+      input.disabled = !!intent;
+      if (intent) input.value = String(intent.amount);
+    }
+    document.querySelectorAll('[data-act="topup-preset"]').forEach((c) => { c.disabled = !!intent; });
+    const box = $('#topupIntent');
+    if (!box) return;
+    if (!notice) { box.innerHTML = ''; return; }
+
+    const amountText = intent ? money(intent.amount) : '';
+    const retry = '<button class="btn btn-sm btn-primary" data-act="topup-retry">Thử lại cùng yêu cầu</button>';
+    const check = '<button class="btn btn-sm" data-act="topup-check">Kiểm tra trạng thái</button>';
+    const fresh = '<button class="btn btn-sm btn-ghost" data-act="topup-new">Bắt đầu lần nạp mới</button>';
+    const idAttr = notice.paymentId ? ` data-id="${esc(notice.paymentId)}"` : '';
+    const box2 = (tone, icon, text, buttons) =>
+      `<div class="note ${tone}">${ico(icon, 18)}<span>${text}${buttons ? `<span class="row mt-2px">${buttons}</span>` : ''}</span></div>`;
+
+    switch (notice.kind) {
+      case 'submitting':
+        box.innerHTML = box2('', 'loader-circle',
+          `<b>Đang gửi yêu cầu nạp ${amountText} sang cổng thanh toán…</b> Đây không phải lỗi: hệ thống đang theo dõi và sẽ mở cổng thanh toán khi cổng đã nhận. Số dư chưa đổi.`, '');
+        break;
+      case 'retryable':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Yêu cầu nạp ${amountText} đã được lưu nhưng chưa gửi được sang cổng thanh toán.</b> Số dư chưa đổi. Bấm thử lại: hệ thống dùng cùng mã yêu cầu nên không tạo khoản nạp thứ hai.`,
+          retry + fresh);
+        break;
+      case 'notfound':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa thấy yêu cầu nạp nào với mã này</b>, nên có thể nó chưa được tạo. Gửi lại cùng yêu cầu là an toàn — không tạo khoản nạp thứ hai.`,
+          retry + fresh);
+        break;
+      case 'unconfirmed':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa xác nhận được kết quả nạp ${amountText} từ máy chủ.</b> Giao diện chưa xác minh được trạng thái cuối cùng của yêu cầu này nên không báo thành công và không cập nhật số dư. Hãy kiểm tra lại.`,
+          `<button class="btn btn-sm btn-primary" data-act="topup-check"${idAttr}>Kiểm tra lại</button>`);
+        break;
+      case 'poll-timeout':
+        box.innerHTML = box2('note-warning', 'clock',
+          '<b>Chưa có kết quả mới từ cổng thanh toán.</b> Hệ thống vẫn tự đối soát; số dư chỉ đổi khi máy chủ xác nhận. Bạn có thể kiểm tra lại bất cứ lúc nào.',
+          `<button class="btn btn-sm" data-act="topup-check"${idAttr}>Kiểm tra lại</button>`);
+        break;
+      default: // 'unknown'
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa rõ yêu cầu nạp ${amountText} đã được tạo hay chưa.</b> Số tiền được khoá để tránh nạp trùng. Hãy kiểm tra trạng thái trước; gửi lại cùng yêu cầu thì an toàn.`,
+          check + retry + fresh);
+    }
+  }
+
   async function createTopup(btn) {
-    const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-    if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+    // Còn ý định chưa rõ thì GỬI LẠI chính nó (cùng khoá, cùng số tiền), bỏ qua ô nhập.
+    let intent = loadIntent();
+    if (!intent) {
+      const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
+      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      intent = startIntent(amount); // lưu TRƯỚC khi gửi: tải lại giữa chừng vẫn phục hồi được
+    }
+    const ctx = topupCtx(intent.requestId); // lấy dấu phiên + ý định lúc bắt đầu; không có await nào trước guard
     let pr;
     try {
-      pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
+      pr = await guard('topup-create', btn, async () => {
+        try {
+          return await api('/payments/topup', { method: 'POST', body: { amount: intent.amount, requestId: intent.requestId } });
+        } catch (e) {
+          // Lỗi của phiên/ý định cũ: không báo cho phiên mới. Riêng "hết phiên" của CHÍNH request này vẫn phải hiện.
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
     } catch (e) {
-      // Không rõ yêu cầu đã được tạo hay chưa: nạp lại danh sách để người dùng thấy sự thật thay vì nạp trùng.
-      if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      if ((e && e.stale) || !ctxAlive(ctx)) return; // phiên đã kết thúc: không đụng vào ý định/thông báo nào nữa
+      if (isDefiniteRejection(e)) {
+        releaseIntent(ctx);
+        setTopupNotice(null);
+      } else if (e && e.code === 'PROVIDER_UNAVAILABLE') {
+        setTopupNotice({ kind: 'retryable' });
+      } else {
+        setTopupNotice({ kind: 'unknown' });
+        // Không rõ yêu cầu đã được tạo hay chưa: nạp lại danh sách để người dùng thấy sự thật thay vì nạp trùng.
+        if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      }
       return;
     }
     if (!pr) return; // lần bấm lặp khi yêu cầu đầu còn chạy
-    await loadTopupHistory();
-    await openCheckout(pr.id, pr.providerRef);
+    if (!ctxAlive(ctx)) return; // phản hồi đến sau khi đăng xuất / đổi tài khoản / bỏ ý định
+    if (!validPaymentRow(pr, { amount: intent.amount, requestId: intent.requestId })) {
+      // 200 nhưng thân thiếu/sai: không phải bằng chứng thành công. Giữ ý định, bảo người dùng kiểm tra.
+      setTopupNotice({ kind: 'unknown' });
+      toast('Máy chủ trả về dữ liệu không đầy đủ nên chưa rõ yêu cầu nạp đã được tạo hay chưa. Hãy bấm "Kiểm tra trạng thái".', 'err');
+      await loadTopupHistory().catch(() => {});
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settleRow(pr, { ctx, openOnSubmitted: true, fromGet: false });
   }
 
-  async function openCheckout(paymentRequestId, providerRef) {
+  /**
+   * Xác nhận một kết quả KẾT THÚC bằng GET /payments/:id. Chỉ trả về dòng khi GET thành công, hợp lệ, cùng id / số tiền /
+   * requestId với yêu cầu đang theo dõi và nói đúng trạng thái kết thúc đó. Lỗi, timeout, thân hỏng, không khớp, hay trạng
+   * thái khác (ví dụ POST nói SUCCEEDED mà GET nói PENDING) đều trả null — KHÔNG quay lại dùng dòng POST để báo thành công.
+   */
+  async function confirmTerminal(row, ctx) {
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(row.id)); } catch (_) { return null; }
+    if (!ctxAlive(ctx)) return null;
+    const fresh = readPaymentState(raw, { id: row.id, amount: row.amount, requestId: ctx.requestId || undefined });
+    return fresh && fresh.status === row.status ? fresh : null;
+  }
+
+  /**
+   * Xử lý một dòng yêu cầu nạp. `fromGet`: dòng đã được đọc bằng GET (theo dõi / kiểm tra) hay là phản hồi POST tạo yêu cầu.
+   *   kết thúc            -> (POST) phải được GET xác nhận trước; xác nhận được mới bỏ ý định và báo; không thì "chưa xác nhận"
+   *   PENDING + SUBMITTED -> cổng đã nhận: bỏ ý định, mở cổng thanh toán (nếu được phép)
+   *   PENDING + SUBMITTING-> đang gửi: giữ ý định, theo dõi có hạn, KHÔNG mở cổng, KHÔNG báo lỗi
+   *   PENDING + SUBMIT_FAILED -> giữ ý định, cho thử lại cùng khoá
+   * Sau mỗi await kiểm ctxAlive: phản hồi của phiên/ý định cũ không được làm gì cả.
+   */
+  async function settleRow(row, { ctx, openOnSubmitted, fromGet }) {
+    if (!ctxAlive(ctx)) return;
+    const intent = ctx.requestId && !ctx.released ? loadIntent() : null;
+    if (intent && row.id && intent.paymentId !== row.id) saveIntent({ ...intent, paymentId: row.id });
+
+    if (row.status !== 'PENDING') {
+      const confirmed = fromGet ? row : await confirmTerminal(row, ctx);
+      if (!ctxAlive(ctx)) return;
+      if (!confirmed) {
+        // Giữ ý định: kết quả chưa được máy chủ xác nhận, người dùng có thể kiểm tra lại. Không báo thành công.
+        setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+        toast('Chưa xác nhận được kết quả nạp tiền từ máy chủ. Hãy bấm "Kiểm tra lại".');
+        return;
+      }
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      setTopupNotice(null);
+      await announceTerminal(confirmed, ctx);
+      return;
+    }
+    if (row.submissionStatus === 'SUBMITTED') {
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      if (!openOnSubmitted) return; // đang theo dõi sau khi thanh toán: vẫn chờ, không mở lại cổng
+      setTopupNotice(null);
+      await openCheckout(row.id, row.providerRef, ctx);
+      return;
+    }
+    if (row.submissionStatus === 'SUBMITTING') {
+      setTopupNotice({ kind: 'submitting', paymentId: row.id });
+      const result = await pollPayment(row.id, (r) => r.status !== 'PENDING' || r.submissionStatus !== 'SUBMITTING', ctx);
+      if (result.cancelled || !ctxAlive(ctx)) return;
+      if (result.done) return settleRow(result.row, { ctx, openOnSubmitted, fromGet: true });
+      setTopupNotice({ kind: 'poll-timeout', paymentId: row.id });
+      return;
+    }
+    // SUBMIT_FAILED
+    setTopupNotice({ kind: 'retryable', paymentId: row.id });
+  }
+
+  /** Báo kết quả KẾT THÚC đã được máy chủ xác nhận. Không tự cộng tiền ở giao diện: chỉ đọc lại ví từ máy chủ. */
+  async function announceTerminal(row, ctx) {
+    if (!ctxAlive(ctx)) return;
+    if (row.status === 'SUCCEEDED') {
+      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[row.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[row.resolvedBy] : ''}: ${money(row.amount)} đã vào ví.`, 'ok');
+      await refreshWallet();
+    } else if (row.status === 'FAILED') {
+      toast('Yêu cầu nạp này đã thất bại. Ví của bạn không thay đổi.', 'err');
+    }
+    if (!ctxAlive(ctx)) return;
+    if (currentHead() === 'wallet') route(); else renderChrome();
+  }
+
+  /**
+   * Hỏi máy chủ trạng thái một yêu cầu nạp, có hạn và giãn dần. Dừng khi: đạt điều kiện, hết lượt, người dùng rời
+   * trang ví, đăng xuất / đổi tài khoản, hoặc có vòng theo dõi mới/bị dừng — nên không bao giờ thành vòng lặp vô hạn
+   * hay spam API. Huỷ cũng đánh thức lượt chờ đang treo (stopTopupPoll), nên Promise luôn kết thúc.
+   */
+  async function pollPayment(paymentId, until, ctx) {
+    const owner = ctx || topupCtx(null);
+    stopTopupPoll(); // vòng cũ (nếu có) thoát; sau đó lấy số thế hệ của vòng này
+    const gen = state.topupPollGen;
+    const stale = () => gen !== state.topupPollGen || !ctxAlive(owner) || currentHead() !== 'wallet';
+    let last = null;
+    for (const delay of POLL_DELAYS_MS) {
+      await new Promise((resolve) => {
+        state.topupPollWake = resolve;
+        state.topupPoll = setTimeout(() => { state.topupPoll = null; state.topupPollWake = null; resolve(); }, delay);
+      });
+      if (stale()) return { cancelled: true, row: last };
+      try {
+        const row = readPaymentState(await api('/payments/' + encodeURIComponent(paymentId)), { id: paymentId });
+        if (stale()) return { cancelled: true, row: last };
+        if (row) {
+          last = row;
+          if (until(row)) return { done: true, row };
+        }
+      } catch (_) { /* thử lại ở lượt sau */ }
+    }
+    return { done: false, row: last };
+  }
+
+  /** Nút "Kiểm tra trạng thái / Kiểm tra lại". */
+  async function checkTopupStatus(btn) {
+    const intent = loadIntent();
+    const knownId = (btn && btn.dataset && btn.dataset.id) || (intent && intent.paymentId) || null;
+    if (!intent && !knownId) return;
+    const ctx = topupCtx(intent ? intent.requestId : null);
+    const lookup = async () => {
+      try {
+        if (knownId) return await api('/payments/' + encodeURIComponent(knownId));
+        // Chưa biết id (yêu cầu có thể chưa/đã được tạo): tìm theo mã yêu cầu trong danh sách của chính mình.
+        const { paymentRequests } = await api('/payments/me');
+        return (Array.isArray(paymentRequests) ? paymentRequests : []).find((r) => r && r.requestId === intent.requestId) || null;
+      } catch (e) {
+        if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+        throw e;
+      }
+    };
+    let raw;
+    try {
+      raw = await guard('topup-check', btn, lookup);
+    } catch (_) {
+      return; // lỗi đã được báo (hoặc là của phiên cũ, im lặng); giữ nguyên thông báo hiện tại
+    }
+    if (raw === undefined) return; // bấm lặp
+    if (!ctxAlive(ctx)) return;
+    if (raw === null) {
+      setTopupNotice({ kind: 'notfound' });
+      return;
+    }
+    const row = readPaymentState(raw, {
+      id: knownId || undefined,
+      requestId: intent ? intent.requestId : undefined,
+      amount: intent ? intent.amount : undefined,
+    });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không đầy đủ hoặc không khớp. Hãy thử kiểm tra lại sau ít phút.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    if (row.status === 'PENDING' && row.submissionStatus === 'SUBMITTED' && !intent) {
+      toast('Yêu cầu nạp vẫn đang chờ cổng thanh toán xác nhận. Số dư chưa đổi.');
+      return;
+    }
+    await settleRow(row, { ctx, openOnSubmitted: !!intent, fromGet: true });
+  }
+
+  /** Bắt đầu lần nạp mới: bỏ ý định cũ chưa rõ kết quả. Phải xác nhận vì khoản cũ có thể đã được tạo. */
+  function askNewTopup() {
+    openModal({
+      title: 'Bắt đầu lần nạp mới?',
+      body: `
+        <div class="stack">
+          <div class="note note-warning">${ico('triangle-alert', 18)}<span>Lần nạp trước <b>chưa rõ kết quả</b> và có thể đã được tạo.
+            Nếu bạn bắt đầu lần mới, giao diện sẽ không còn theo dõi lần cũ; nếu cả hai đều được thanh toán ở cổng, ví có thể được nạp hai lần.
+            Hãy bấm "Kiểm tra trạng thái" trước nếu chưa chắc.</span></div>
+        </div>`,
+      footer: `<button class="btn" data-act="modal-close">Giữ lần nạp cũ</button>
+        <button class="btn btn-danger" data-act="topup-new-confirm">Bắt đầu lần nạp mới</button>`,
+    });
+  }
+
+  function confirmNewTopup() {
+    stopTopupPoll();
+    clearIntent();
+    state.topupNotice = null;
+    closeModal();
+    renderTopupIntent();
+    const input = $('#topupAmount');
+    if (input) { input.value = ''; input.focus(); }
+    toast('Đã bỏ lần nạp cũ. Nhập số tiền để bắt đầu lần nạp mới.');
+  }
+
+  async function openCheckout(paymentRequestId, providerRef, ctx) {
+    const owner = ctx || topupCtx(null); // mở từ lịch sử: chỉ ràng buộc phiên
+    if (!ctxAlive(owner)) return;
+    if (typeof paymentRequestId !== 'string' || !paymentRequestId || typeof providerRef !== 'string' || !providerRef) {
+      return toast('Thiếu mã yêu cầu hoặc mã giao dịch tại cổng nên chưa mở cổng thanh toán.', 'err');
+    }
     let page;
     try {
       page = await providerApi('/checkout/' + encodeURIComponent(providerRef));
     } catch (e) {
+      if (!ctxAlive(owner)) return;
       return toast(e.code === 'NOT_FOUND' ? 'Cổng thanh toán mô phỏng đang tắt (MOCK_PROVIDER_CHECKOUT=0).' : e.message, 'err');
+    }
+    if (!ctxAlive(owner)) return; // đăng xuất / đổi tài khoản trong lúc chờ cổng trả lời: không mở modal cho phiên mới
+    if (!page || typeof page.providerRef !== 'string' || !Number.isSafeInteger(page.amount) || typeof page.status !== 'string') {
+      return toast('Cổng thanh toán trả về dữ liệu không hợp lệ nên chưa mở cổng. Hãy kiểm tra lại trạng thái.', 'err');
     }
     const settled = page.status !== 'PENDING';
     openModal({
@@ -2436,11 +2902,18 @@ const App = (() => {
   async function payCheckout(el) {
     const { id, ref, outcome } = el.dataset;
     const deliverWebhook = el.dataset.deliver === '1';
+    const ctx = topupCtx(null);
     try {
-      await guard('checkout:' + ref, el, () => providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
-        method: 'POST', body: { outcome, deliverWebhook },
-      }));
+      await guard('checkout:' + ref, el, async () => {
+        try {
+          return await providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, { method: 'POST', body: { outcome, deliverWebhook } });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
     } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
       // Mất kết nối giữa chừng: cổng có thể đã ghi nhận. Hỏi lại máy chủ — không coi là thất bại, không coi là thành công.
       if (e && e.unknownOutcome) {
         closeModal();
@@ -2448,28 +2921,31 @@ const App = (() => {
       }
       return;
     }
+    if (!ctxAlive(ctx)) return;
     closeModal();
     await waitForTopupResult(id);
   }
 
-  /** Hỏi máy chủ trạng thái yêu cầu nạp tiền trong vài giây. Không tự đoán kết quả. */
+  /** Hỏi máy chủ trạng thái yêu cầu nạp tiền sau khi thanh toán ở cổng. Có hạn, giãn dần; không tự đoán kết quả. */
   async function waitForTopupResult(paymentRequestId) {
+    const ctx = topupCtx(null);
     toast('Đang xử lý — chờ cổng thanh toán xác nhận…');
-    let p = null;
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      try { p = await api('/payments/' + encodeURIComponent(paymentRequestId)); } catch (_) { continue; }
-      if (p.status !== 'PENDING') break;
-    }
+    const result = await pollPayment(paymentRequestId, (r) => r.status !== 'PENDING', ctx);
+    if (result.cancelled || !ctxAlive(ctx)) return; // đã rời trang ví / đăng xuất / đổi tài khoản: không báo gì thay họ
+    const p = result.row;
     if (p && p.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công ${RESOLVED_BY_LABEL[p.resolvedBy] || ''}: ${money(p.amount)} đã vào ví.`, 'ok');
+      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[p.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[p.resolvedBy] : ''}: ${money(p.amount)} đã vào ví.`, 'ok');
       await refreshWallet();
+      if (!ctxAlive(ctx)) return;
+      setTopupNotice(null);
     } else if (p && p.status === 'FAILED') {
       toast('Cổng thanh toán báo thất bại. Ví của bạn không thay đổi.', 'err');
-    } else if (!p) {
-      toast('Chưa kiểm tra được trạng thái do lỗi kết nối. Hãy mở lại Lịch sử nạp tiền sau ít phút; số dư chỉ thay đổi khi có xác nhận.');
+      setTopupNotice(null);
     } else {
-      toast('Chưa có xác nhận từ cổng thanh toán. Hệ thống sẽ tự đối soát; số dư chỉ thay đổi khi có kết quả.');
+      toast(!p
+        ? 'Chưa kiểm tra được trạng thái do lỗi kết nối. Hãy mở lại Lịch sử nạp tiền sau ít phút; số dư chỉ thay đổi khi có xác nhận.'
+        : 'Chưa có xác nhận từ cổng thanh toán. Hệ thống sẽ tự đối soát; số dư chỉ thay đổi khi có kết quả.');
+      state.topupNotice = { kind: 'poll-timeout', paymentId: paymentRequestId };
     }
     if (currentHead() === 'wallet') route(); else renderChrome();
   }
@@ -3310,8 +3786,12 @@ const App = (() => {
     'audit-load': () => loadAudit($('#auditTxId').value.trim()),
     'audit-verify': (el) => verifyAudit(el),
 
-    'topup-preset': (el) => { const input = $('#topupAmount'); if (input) input.value = el.dataset.v; },
+    'topup-preset': (el) => { const input = $('#topupAmount'); if (input && !input.disabled) input.value = el.dataset.v; },
     'topup-create': (el) => createTopup(el),
+    'topup-retry': (el) => createTopup(el),
+    'topup-check': (el) => checkTopupStatus(el),
+    'topup-new': () => askNewTopup(),
+    'topup-new-confirm': () => confirmNewTopup(),
     'checkout-open': (el) => openCheckout(el.dataset.id, el.dataset.ref),
     'checkout-pay': (el) => payCheckout(el),
     'notif-open': (el) => openNotification(el),
