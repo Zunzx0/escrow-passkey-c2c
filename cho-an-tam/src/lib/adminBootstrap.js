@@ -27,6 +27,8 @@
 
 const { db, uuid, nowIso } = require('./../db');
 const { hashPassword, generateTemporaryPassword, assertPasswordPolicy } = require('./password');
+const { recordBootstrapProvenance } = require('./adminProvenance');
+const { normalizeUsername, isValidUsername, USERNAME_HINT } = require('./username');
 
 class BootstrapError extends Error {
   constructor(code, message) {
@@ -40,13 +42,13 @@ class BootstrapError extends Error {
  *
  * @returns {Promise<{ user: object, temporaryPassword: string, created: boolean }>}
  */
-async function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPassword } = {}) {
-  const username = String(usernameRaw || '').trim().toLowerCase();
+async function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPassword, source = 'BOOTSTRAP_CLI' } = {}) {
+  const username = normalizeUsername(usernameRaw);
   if (!username) throw new BootstrapError('MISSING_USERNAME', 'Thiếu tên đăng nhập.');
-  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+  if (!isValidUsername(username)) {
     throw new BootstrapError(
       'INVALID_USERNAME',
-      'Tên đăng nhập dài 3–32 ký tự, chỉ gồm chữ thường, số và . _ -'
+      USERNAME_HINT
     );
   }
 
@@ -68,10 +70,16 @@ async function createBootstrapAdmin({ username: usernameRaw, displayName, tempor
 
   // Quản trị viên không phải một bên của giao dịch nên KHÔNG có ví. Ví chỉ được mở ở bước
   // hoàn tất đăng ký Passkey, và bước đó bỏ qua việc mở ví với tài khoản role=ADMIN.
-  await db.prepare(
-    `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
-     VALUES (?, ?, ?, 'ADMIN', ?, 'PENDING_BOOTSTRAP', 0, ?, ?)`
-  ).run(id, username, name, hashPassword(tempPassword), now, now);
+  //
+  // Dấu nguồn gốc (lib/adminProvenance.js) được ghi trong CÙNG giao dịch với tài khoản: đây là một
+  // trong hai nơi duy nhất sinh ra nó. Thiếu dấu này thì role='ADMIN' không mở được quyền gì.
+  await db.transaction(async () => {
+    await db.prepare(
+      `INSERT INTO users (id, username, display_name, role, password_hash, account_status, token_version, created_at, updated_at)
+       VALUES (?, ?, ?, 'ADMIN', ?, 'PENDING_BOOTSTRAP', 0, ?, ?)`
+    ).run(id, username, name, hashPassword(tempPassword), now, now);
+    await recordBootstrapProvenance(db, { userId: id, username, source, now });
+  })();
 
   const user = await db
     .prepare('SELECT id, username, display_name, role, account_status FROM users WHERE id = ?')

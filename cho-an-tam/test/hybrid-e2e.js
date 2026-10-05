@@ -52,7 +52,25 @@ async function main() {
   const rand = crypto.randomBytes(4).toString('hex');
 
   const admin = await flows.createAdmin({ username: `hadm_${rand}`, displayName: 'Quan Tri Lai' });
-  const seller = await flows.createSeller(admin, { username: `hsel_${rand}`, displayName: 'Nguoi Ban Lai' });
+  const sellerEmail = `Seller.${rand}@Example.COM`;
+  const seller = await flows.createSeller(admin, { username: sellerEmail, displayName: 'Nguoi Ban Lai' });
+  assert(seller.user.username === sellerEmail.toLowerCase(), 'Email đăng ký được chuẩn hoá để đăng nhập không phân biệt chữ hoa');
+
+  const emailLogin = await flows.loginPassword(sellerEmail, seller.password);
+  assert(emailLogin.status === 200, 'Đăng nhập được bằng email dù nhập chữ hoa');
+  const duplicateEmail = await api('/api/passkeys/register/account', {
+    method: 'POST', body: { username: sellerEmail.toLowerCase(), displayName: 'Trùng email', password: seller.password },
+  });
+  assert(duplicateEmail.status === 409 && duplicateEmail.data.error === 'REGISTRATION_UNAVAILABLE',
+    'Email trùng khác kiểu chữ không tạo thêm tài khoản');
+  const invalidEmail = await api('/api/passkeys/register/account', {
+    method: 'POST', body: { username: `bad@@example.com`, displayName: 'Email sai', password: seller.password },
+  });
+  assert(invalidEmail.status === 400, 'Email sai định dạng bị từ chối');
+
+  const sellerProfile = await api(`/api/users/${seller.user.id}`);
+  assert(sellerProfile.status === 200 && sellerProfile.data.username === null,
+    'Hồ sơ công khai không lộ email đăng nhập của người bán');
 
   const listing = await api('/api/listings', {
     method: 'POST', token: seller.token,
@@ -63,6 +81,9 @@ async function main() {
   });
   if (listing.status !== 201) throw new Error(`Không đăng bán được: ${JSON.stringify(listing.data)}`);
   const listingId = listing.data.id;
+  const publicListing = await api(`/api/listings/${listingId}`);
+  assert(publicListing.status === 200 && publicListing.data.sellerUsername === null,
+    'Tin đăng công khai không lộ email đăng nhập của người bán');
 
   // ---------------------------------------------------------------- H01
   section('H01: Đăng ký hai bước — Passkey là bước bắt buộc để hoàn tất tài khoản');

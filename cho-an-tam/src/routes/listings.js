@@ -3,6 +3,7 @@ const express = require('express');
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth, optionalAuth, requireRole } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
+const { publicUsername } = require('../lib/username');
 const {
   CATEGORIES,
   CATEGORY_KEYS,
@@ -41,7 +42,7 @@ function serializeListing(row) {
     id: row.id,
     sellerId: row.seller_id,
     sellerName: row.seller_name,
-    sellerUsername: row.seller_username,
+    sellerUsername: publicUsername(row.seller_username),
     title: row.title,
     description: row.description,
     category: row.category,

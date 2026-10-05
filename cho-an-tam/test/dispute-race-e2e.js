@@ -30,6 +30,7 @@ const { createAuthenticator } = require('./softwareAuthenticator');
 const { flows, createAdmin, createSeller } = require('./helpers/accounts');
 const { db } = require('../src/db');
 const { ACTIONS, issueGrant } = require('../src/lib/reauth');
+const { forceRole } = require('./helpers/tamper');
 
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
 const RP_ID = process.env.WEBAUTHN_RP_ID || 'localhost';
@@ -135,7 +136,9 @@ async function main() {
     { actor: seller, originalRole: 'SELLER', decision: 'RELEASE', endpoint: 'release' },
   ]) {
     const actorId = actor.user.id;
-    await db.prepare("UPDATE users SET role = 'ADMIN' WHERE id = ?").run(actorId);
+    // CSDL nay tự chặn UPDATE role -> ADMIN (trigger, xem lib/adminProvenance.js); forceRole vượt
+    // qua trigger để kiểm lớp chặn lúc chạy trong kịch bản xấu nhất.
+    await forceRole(actorId, 'ADMIN');
     try {
       const adminList = await api('/api/admin/disputes', { token: actor.token });
       assert(adminList.status === 403 && adminList.data.error === 'ADMIN_IDENTITY_INVALID',
@@ -165,7 +168,7 @@ async function main() {
       assert(decisionResult.status === 403 && decisionResult.data.error === 'ADMIN_IDENTITY_INVALID',
         `${originalRole} đã mang role ADMIN và có grant vẫn không chuyển được tiền về mình`);
     } finally {
-      await db.prepare('UPDATE users SET role = ? WHERE id = ?').run(originalRole, actorId);
+      await forceRole(actorId, originalRole);
     }
   }
 
