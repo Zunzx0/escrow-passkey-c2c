@@ -120,6 +120,11 @@ const App = (() => {
       .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
 
+  function accountLabel(username) {
+    if (!username) return '';
+    return `${String(username).includes('@') ? '' : '@'}${esc(username)}`;
+  }
+
   function money(n) { return Number(n || 0).toLocaleString('vi-VN') + '₫'; }
 
   function fmtDay(ymd) {
@@ -448,8 +453,8 @@ const App = (() => {
           <div class="hr-text"><span>hoặc</span></div>
 
           <div class="field">
-            <label for="loginUsername">Tên đăng nhập</label>
-            <input id="loginUsername" type="text" autocomplete="username">
+            <label for="loginUsername">Tên đăng nhập hoặc email</label>
+            <input id="loginUsername" type="text" autocomplete="username" maxlength="254">
           </div>
           <div class="field">
             <label for="loginPassword">Mật khẩu</label>
@@ -464,13 +469,14 @@ const App = (() => {
       panel.innerHTML = `
         <div class="stack">
           <div class="field">
-            <label for="regUsername">Tên đăng nhập</label>
-            <input id="regUsername" type="text" autocomplete="username">
-            <span class="hint">3–32 ký tự, chữ thường, số và . _ -</span>
+            <label for="regUsername">Tên đăng nhập hoặc email</label>
+            <input id="regUsername" type="text" autocomplete="username" maxlength="254">
+            <span class="hint">Tên 3–32 ký tự (chữ, số, . _ -) hoặc email. Email chưa được xác minh.</span>
           </div>
           <div class="field">
             <label for="regDisplayName">Tên hiển thị</label>
             <input id="regDisplayName" type="text" autocomplete="name">
+            <span class="hint">Tên này hiển thị công khai; không nhập email nếu muốn giữ riêng tư.</span>
           </div>
           <div class="field">
             <label for="regPassword">Mật khẩu</label>
@@ -550,7 +556,7 @@ const App = (() => {
     const username = $('#regUsername').value.trim();
     const displayName = $('#regDisplayName').value.trim();
     const password = $('#regPassword').value;
-    if (!username || !displayName) return toast('Vui lòng nhập tên đăng nhập và tên hiển thị', 'err');
+    if (!username || !displayName) return toast('Vui lòng nhập tên đăng nhập hoặc email và tên hiển thị', 'err');
     if (!password) return toast('Vui lòng đặt mật khẩu', 'err');
 
     await guard('register', btn, async () => {
@@ -611,7 +617,7 @@ const App = (() => {
   async function doLoginPassword(btn) {
     const username = ($('#loginUsername').value || '').trim();
     const password = $('#loginPassword').value;
-    if (!username || !password) return toast('Nhập tên đăng nhập và mật khẩu', 'err');
+    if (!username || !password) return toast('Nhập tên đăng nhập hoặc email và mật khẩu', 'err');
 
     await guard('loginpw', btn, async () => {
       const result = await api('/passkeys/login/password', { method: 'POST', body: { username, password } });
@@ -1380,13 +1386,14 @@ const App = (() => {
 
   function sellerCard(l, seller) {
     const name = (seller && seller.displayName) || l.sellerName;
+    const publicId = (seller && seller.username) || l.sellerUsername;
     return `
       <div class="seller-card">
         <span class="avatar">${esc(initials(name))}</span>
         <div class="grow">
           <b>${esc(name)}</b>
-          <div class="small muted">@${esc((seller && seller.username) || l.sellerUsername)}
-            ${seller ? ` · Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
+          <div class="small muted">${publicId ? accountLabel(publicId) : ''}
+            ${seller ? `${publicId ? ' · ' : ''}Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
           <div class="small text-trust mt-2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
         </div>
       </div>
@@ -2725,7 +2732,7 @@ const App = (() => {
             <div class="grow">
               <h3>${esc(r.shopName)}</h3>
               <div class="muted small">
-                Người gửi <b>${esc(r.userName || '—')}</b> (@${esc(r.userUsername || '')})
+                Người gửi <b>${esc(r.userName || '—')}</b> (${accountLabel(r.userUsername)})
                 · Gửi lúc ${fmtDateTime(r.createdAt)}
               </div>
             </div>
@@ -2901,7 +2908,7 @@ const App = (() => {
           <tbody>${users.map((u) => `
             <tr>
               <td>${esc(u.displayName)}</td>
-              <td class="mono">@${esc(u.username)}</td>
+              <td class="mono">${accountLabel(u.username)}</td>
               <td><span class="tag ${u.role === 'ADMIN' ? 'tag-danger' : u.role === 'SELLER' ? 'tag-navy' : ''}">${esc(ROLE_LABEL[u.role])}</span></td>
               <td class="num">${u.role === 'SELLER' ? u.listingCount : '—'}</td>
               <td class="nowrap">${fmtDateTime(u.createdAt)}</td>
@@ -2960,7 +2967,7 @@ const App = (() => {
                     <span class="tag tag-mono">${esc(e.eventType)}</span>
                   </td>
                   <td><span class="tag ${e.outcome === 'ALLOWED' ? 'tag-success' : 'tag-danger'}">${e.outcome === 'ALLOWED' ? 'Cho phép' : 'Từ chối'}</span></td>
-                  <td>${e.username ? '@' + esc(e.username) : '<span class="muted">—</span>'}</td>
+                  <td>${e.username ? accountLabel(e.username) : '<span class="muted">—</span>'}</td>
                   <td class="mono small">${esc(e.ip || '—')}</td>
                   <td class="mono small">${esc(e.method || '')} ${esc(e.route || '')}</td>
                   <td class="num">${e.statusCode == null ? '—' : e.statusCode}</td>
