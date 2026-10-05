@@ -76,10 +76,11 @@ async function reconcileOnce({
    * Đã đủ số lần gửi và provider xác nhận không biết -> đóng FAILED. Trả về true nếu xử lý xong yêu
    * cầu trong lượt này; false nếu yêu cầu đã sẵn sàng để hỏi trạng thái.
    */
-  async function handleUnsubmitted(pr) {
-    const claim = await claimSubmission(pr);
+  async function handleUnsubmitted(pr, { recoverUnknown = false } = {}) {
+    const claim = await claimSubmission(pr, { recoverUnknown });
     if (!claim) {
-      // Tiến trình khác đang gửi (quyền còn hạn). Không chen vào — lượt sau xem lại.
+      // Tiến trình khác đã đổi trạng thái (đang gửi, hoặc vừa gửi xong) kể từ lúc đọc. Không chen vào —
+      // lượt sau đọc lại và quyết định trên trạng thái mới.
       summary.skipped += 1;
       return true;
     }
@@ -131,8 +132,9 @@ async function reconcileOnce({
       if (e.code === 'UNKNOWN_PAYMENT') {
         // Provider không hề biết yêu cầu này (dữ liệu trước khi có submission_status, hoặc lần gửi
         // trước báo thành công nhầm): coi như chưa gửi và gửi lại qua đúng đường có quyền gửi —
-        // thay vì ghi lỗi mãi mãi.
-        if (await handleUnsubmitted(pr)) continue;
+        // thay vì ghi lỗi mãi mãi. Đây là đường phục hồi duy nhất được giành quyền trên yêu cầu
+        // SUBMITTED, và chỉ khi trạng thái không đổi kể từ lúc đọc (xem claimSubmission).
+        if (await handleUnsubmitted(pr, { recoverUnknown: true })) continue;
         try {
           answer = await provider.queryStatus(pr.provider_ref);
         } catch (e2) {

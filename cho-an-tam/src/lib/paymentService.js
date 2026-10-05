@@ -144,17 +144,27 @@ function leaseCutoffIso() {
 }
 
 /**
- * Giành quyền gửi cho một yêu cầu PENDING. Trả về token nếu giành được; null nếu tiến trình khác
- * đang giữ quyền còn hạn — khi đó không gửi, để tiến trình kia làm.
+ * Giành quyền gửi cho một yêu cầu PENDING. Trả về token nếu giành được; null nếu không.
+ *
+ * Điều kiện được kiểm NGAY TRONG UPDATE, trên trạng thái mới nhất trong CSDL — không tin snapshot của
+ * người gọi (snapshot có thể đã cũ khi retry hoặc worker đến claim):
+ *  - gửi thường: chỉ khi yêu cầu đang SUBMITTING (lease hết hạn/chưa có claim) hoặc SUBMIT_FAILED. Một
+ *    yêu cầu đã SUBMITTED không bao giờ bị kéo về SUBMITTING qua đường này;
+ *  - phục hồi (recoverUnknown): dành riêng cho yêu cầu SUBMITTED mà provider đã báo UNKNOWN_PAYMENT.
+ *    Chỉ giành được khi submit_attempts vẫn đúng bằng giá trị đã đọc — mọi lần gửi/nhả quyền đều tăng
+ *    giá trị này, nên snapshot cũ không thể phục hồi đè lên một lần gửi mới đã diễn ra.
  */
-async function claimSubmission(pr) {
+async function claimSubmission(pr, { recoverUnknown = false } = {}) {
   const token = uuid();
   const now = nowIso();
+  const guard = recoverUnknown
+    ? { sql: `submission_status = 'SUBMITTED' AND submit_attempts = ? AND submit_claim IS NULL`, args: [Number(pr.submit_attempts)] }
+    : { sql: `submission_status IN ('SUBMITTING','SUBMIT_FAILED') AND (submit_claim IS NULL OR submit_claimed_at < ?)`, args: [leaseCutoffIso()] };
   const r = await db.prepare(
     `UPDATE payment_requests
      SET submission_status = 'SUBMITTING', submit_claim = ?, submit_claimed_at = ?, updated_at = ?
-     WHERE id = ? AND status = 'PENDING' AND (submit_claim IS NULL OR submit_claimed_at < ?)`
-  ).run(token, now, now, pr.id, leaseCutoffIso());
+     WHERE id = ? AND status = 'PENDING' AND ${guard.sql}`
+  ).run(token, now, now, pr.id, ...guard.args);
   return r.changes === 1 ? token : null;
 }
 

@@ -34,6 +34,7 @@ const { flows } = require('./helpers/accounts');
 const { checkInvariants } = require('../src/lib/invariants');
 const { db, DIALECT, uuid, nowIso } = require('../src/db');
 const provider = require('../src/lib/mockPaymentProvider');
+const { claimSubmission, submitToProvider } = require('../src/lib/paymentService');
 
 const ROOT = path.join(__dirname, '..');
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
@@ -49,7 +50,10 @@ function assert(cond, label) {
 function section(title) { console.log(`\n${title}`); }
 async function group(title, fn) {
   section(title);
-  try { await fn(); } catch (e) { assert(false, `Nhóm dừng giữa chừng vì lỗi: ${e.message}`); }
+  try { await fn(); } catch (e) {
+    console.log((e.stack || '').split('\n').slice(0, 4).join('\n'));
+    assert(false, `Nhóm dừng giữa chừng vì lỗi: ${e.message}`);
+  }
 }
 
 async function api(p, { method = 'GET', body, token, base = BASE } = {}, retried = false) {
@@ -132,6 +136,12 @@ function runReconcile(id, extraEnv = {}) {
 
 async function pay(token, providerRef) {
   return api(`/mock-provider/checkout/${providerRef}/pay`, { method: 'POST', token, body: { outcome: 'SUCCEEDED', deliverWebhook: true } });
+}
+
+// Số lệnh tạo thanh toán mà backend đã gửi tới provider cho một yêu cầu (đọc từ nhật ký của provider).
+function callsFor(log, merchantRef) {
+  if (!fs.existsSync(log)) return 0;
+  return fs.readFileSync(log, 'utf8').split('\n').filter((l) => l && JSON.parse(l).merchantRef === merchantRef).length;
 }
 
 async function main() {
@@ -405,6 +415,80 @@ async function main() {
       check.close();
       for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(file + s); } catch (_) { /* file tạm */ } }
     }
+  });
+
+  // Các bài B dùng hàm gửi/giành quyền TRỰC TIẾP (không qua HTTP) để điều khiển đúng thứ tự: retry đọc
+  // trạng thái trước, holder hoàn tất và nhả quyền, rồi retry mới gọi claim. Đây là barrier có kiểm soát.
+  const withCallLog = async (fn) => {
+    const log = path.join(ROOT, 'data', 'test', `barrier-calls-${Date.now()}-${crypto.randomUUID().slice(0, 6)}.log`);
+    const prev = process.env.MOCK_PROVIDER_CALL_LOG;
+    process.env.MOCK_PROVIDER_CALL_LOG = log;
+    try { return await fn(log); } finally {
+      if (prev === undefined) delete process.env.MOCK_PROVIDER_CALL_LOG; else process.env.MOCK_PROVIDER_CALL_LOG = prev;
+      try { fs.unlinkSync(log); } catch (_) { /* nhật ký tạm */ }
+    }
+  };
+  const insertRow = (fields) => {
+    const { id, ref, state, attempts, claim, claimedAt, key, amount = 119000 } = fields;
+    const now = nowIso();
+    return db.prepare(`INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, version, client_request_id,
+        submission_status, submit_attempts, submit_claim, submit_claimed_at, created_at, updated_at)
+      VALUES (?, ?, ?, 'PENDING', ?, 0, ?, ?, ?, ?, ?, ?, ?)`)
+      .run(id, third.user.id, amount, ref, key, state, attempts, claim, claimedAt, now, now);
+  };
+
+  await group('B1: Barrier — snapshot cũ không giành lại được quyền khi yêu cầu đã SUBMITTED', async () => {
+    await withCallLog(async (log) => {
+      const id = uuid(); const ref = uuid();
+      await insertRow({ id, ref, key: rid(), state: 'SUBMITTING', attempts: 0, claim: 'holder-A', claimedAt: nowIso() });
+      const snapshot = await prRow(id);                             // (1) retry đọc trạng thái lúc đang gửi
+      const sentA = await submitToProvider(snapshot, 'holder-A');   // (2) holder hoàn tất và nhả quyền
+      const afterA = await prRow(id);
+      assert(sentA.submitted === true && afterA.submission_status === 'SUBMITTED' && afterA.submit_claim === null,
+        `Holder hoàn tất: SUBMITTED, quyền đã nhả (thực tế ${afterA.submission_status}, claim=${afterA.submit_claim})`);
+      const stale = await claimSubmission(snapshot);                // (3) retry cầm snapshot cũ quay lại
+      assert(stale === null, `Snapshot cũ KHÔNG giành được quyền khi DB đã SUBMITTED (nhận ${stale})`);
+      const afterRetry = await prRow(id);
+      assert(afterRetry.submission_status === 'SUBMITTED' && afterRetry.submit_claim === null && Number(afterRetry.submit_attempts) === 1,
+        `Trạng thái không bị kéo về SUBMITTING, attempts vẫn 1 (thực tế ${afterRetry.submission_status}, attempts ${afterRetry.submit_attempts})`);
+      assert(callsFor(log, id) === 1, `Provider chỉ nhận đúng một lệnh tạo thanh toán (thực tế ${callsFor(log, id)})`);
+    });
+  });
+
+  await group('B2: Holder cũ có lease đã hết hạn không ghi đè holder mới', async () => {
+    await withCallLog(async () => {
+      const id = uuid(); const ref = uuid();
+      await insertRow({ id, ref, key: rid(), state: 'SUBMITTING', attempts: 0, claim: 'holder-A',
+        claimedAt: new Date(Date.now() - 3600 * 1000).toISOString() });
+      const snapshotA = await prRow(id);
+      const tokenB = await claimSubmission(snapshotA);              // B giành quyền đã hết hạn của A
+      assert(tokenB !== null, 'B giành được quyền sau khi lease của A đã hết hạn');
+      const sentA = await submitToProvider(snapshotA, 'holder-A');  // A chậm hoàn tất, cố nhả quyền
+      const mid = await prRow(id);
+      assert(sentA.busy === true && mid.submit_claim === tokenB && mid.submission_status === 'SUBMITTING',
+        `A không ghi đè quyền của B (busy=${sentA.busy}, claim của B=${mid.submit_claim === tokenB}, state=${mid.submission_status})`);
+      const sentB = await submitToProvider(mid, tokenB);
+      const fin = await prRow(id);
+      assert(sentB.submitted === true && fin.submission_status === 'SUBMITTED' && fin.submit_claim === null,
+        'B hoàn tất: SUBMITTED, quyền đã nhả');
+      assert(!!(await provider.findPayment(ref)), 'Provider có đúng một khoản cho yêu cầu này');
+    });
+  });
+
+  await group('B3: Phục hồi UNKNOWN_PAYMENT chỉ giành được khi trạng thái không đổi kể từ lúc đọc', async () => {
+    const id = uuid(); const ref = uuid();
+    await insertRow({ id, ref, key: rid(), state: 'SUBMITTED', attempts: 1, claim: null, claimedAt: null });
+    const snapshot = await prRow(id);
+    // Một tiến trình khác vừa gửi và nhả quyền -> submit_attempts đổi, snapshot đã cũ.
+    await db.prepare('UPDATE payment_requests SET submit_attempts = submit_attempts + 1 WHERE id = ?').run(id);
+    const stale = await claimSubmission(snapshot, { recoverUnknown: true });
+    assert(stale === null, 'Snapshot phục hồi cũ (attempts đã đổi) không giành được quyền');
+    const fresh = await prRow(id);
+    const token = await claimSubmission(fresh, { recoverUnknown: true });
+    assert(token !== null, 'Snapshot mới nhất giành được quyền phục hồi');
+    const sent = await submitToProvider(fresh, token);
+    assert(sent.submitted === true && !!(await provider.findPayment(ref)) && (await prRow(id)).submission_status === 'SUBMITTED',
+      'Phục hồi: provider nhận khoản, yêu cầu về SUBMITTED');
   });
 
   const inv = await checkInvariants(db);
