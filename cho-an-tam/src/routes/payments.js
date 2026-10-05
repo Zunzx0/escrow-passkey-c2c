@@ -3,8 +3,8 @@ const express = require('express');
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
-const { verifyProviderSignature, submitPayment } = require('../lib/mockPaymentProvider');
-const { applyProviderResult } = require('../lib/paymentService');
+const { verifyProviderSignature } = require('../lib/mockPaymentProvider');
+const { applyProviderResult, submitToProvider } = require('../lib/paymentService');
 const { getUserWallet } = require('../lib/walletOps');
 
 const router = express.Router();
@@ -68,44 +68,112 @@ function serializePaymentRequest(p) {
     resolvedBy: p.resolved_by || null,
     createdAt: p.created_at,
     resolvedAt: p.resolved_at,
+    // Khoá chống lặp client đã gửi (null nếu không gửi) và trạng thái bước gửi sang provider:
+    // SUBMITTING | SUBMITTED | SUBMIT_FAILED. Chỉ SUBMITTED mới mở được trang thanh toán.
+    requestId: p.client_request_id || null,
+    submissionStatus: p.submission_status || 'SUBMITTED',
   };
+}
+
+/**
+ * Khoá chống lặp do client gửi (tuỳ chọn). Chuỗi 8–100 ký tự [A-Za-z0-9._:-] — đủ cho UUID và
+ * các khoá dạng "topup-<uuid>"; không nhận số/boolean để hai client không vô tình trùng khoá.
+ */
+function parseClientRequestId(raw) {
+  if (raw === undefined || raw === null) return null;
+  if (typeof raw !== 'string' || !/^[A-Za-z0-9._:-]{8,100}$/.test(raw)) {
+    throw new AppError(400, 'VALIDATION_ERROR', 'requestId phải là chuỗi 8–100 ký tự gồm chữ, số và . _ : -');
+  }
+  return raw;
+}
+
+const loadByClientKey = (userId, key) =>
+  db.prepare('SELECT * FROM payment_requests WHERE user_id = ? AND client_request_id = ?').get(userId, key);
+
+const PROVIDER_UNAVAILABLE = () => new AppError(
+  503,
+  'PROVIDER_UNAVAILABLE',
+  'Cổng thanh toán tạm thời không nhận yêu cầu. Yêu cầu đã được lưu — hãy thử lại sau ít phút (gửi lại cùng requestId) hoặc hệ thống sẽ tự gửi lại.'
+);
+
+/**
+ * Trả lại yêu cầu đã có cho một lần gửi lặp (cùng người dùng, cùng requestId).
+ * Khác số tiền là dùng lại khoá cho một nghiệp vụ khác -> 409. Yêu cầu còn PENDING mà provider
+ * chưa nhận thì gửi lại provider ngay — đây là cách client tự gỡ một lần gửi hỏng.
+ */
+async function replayExisting(res, existing, amount) {
+  if (existing.amount !== amount) {
+    throw new AppError(409, 'IDEMPOTENCY_KEY_REUSED', 'requestId này đã dùng cho một yêu cầu nạp tiền khác số tiền');
+  }
+  let row = existing;
+  if (row.status === 'PENDING' && row.submission_status !== 'SUBMITTED') {
+    const sent = await submitToProvider(row);
+    row = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(row.id);
+    if (!sent.submitted && row.status === 'PENDING') throw PROVIDER_UNAVAILABLE();
+  }
+  res.status(200).json({ ...serializePaymentRequest(row), idempotentReplay: true });
 }
 
 // ---------- Tạo yêu cầu nạp tiền ----------
 //
 // Chỉ tạo bản ghi PENDING rồi gửi yêu cầu sang provider. KHÔNG chạm tới ví ở đây — ví chỉ đổi
 // khi có kết quả SUCCEEDED từ provider, qua lib/paymentService.js#applyProviderResult.
+//
+// Chống lặp: client gửi kèm `requestId` (khuyến nghị — giao diện nên sinh một lần cho mỗi lần bấm
+// "Nạp tiền" và giữ nguyên khi thử lại). Cùng người dùng + cùng requestId chỉ bao giờ có MỘT yêu
+// cầu: phép kiểm nằm trong cùng giao dịch ghi (tuần tự hoá) với lệnh INSERT, và chỉ mục duy nhất
+// (user_id, client_request_id) là lưới an toàn thứ hai. Không gửi requestId thì giữ hành vi cũ.
 router.post('/topup', requireAuth, async (req, res, next) => {
   try {
     const amount = parseAmount((req.body || {}).amount);
+    const clientRequestId = parseClientRequestId((req.body || {}).requestId);
+
+    if (clientRequestId) {
+      const existing = await loadByClientKey(req.user.id, clientRequestId);
+      if (existing) return await replayExisting(res, existing, amount);
+    }
 
     const id = uuid();
     // provider_ref mô phỏng mã do PHÍA PROVIDER cấp — độc lập với id nội bộ, đúng như một
     // provider thật sẽ làm. Ở đây tự sinh vì đang đóng luôn vai provider.
     const providerRef = uuid();
     const now = nowIso();
+    let replay = null;
     // Kiểm hạn mức và ghi yêu cầu trong CÙNG một giao dịch ghi của cơ sở dữ liệu, nên hai request
     // đồng thời không cùng lọt qua phép đếm rồi cùng ghi.
-    await db.transaction(async () => {
-      // Đọc ví BÊN TRONG giao dịch: đọc ở ngoài thì một webhook tất toán chen vào giữa sẽ làm số
-      // dư cũ đi trong khi pending_total đã giảm, khiến phép chiếu số dư đếm thiếu.
-      // Quản trị viên không phải một bên giao dịch nên không có ví — không có gì để nạp vào.
-      const wallet = await getUserWallet(req.user.id);
-      if (!wallet) throw new AppError(400, 'WALLET_NOT_FOUND', 'Tài khoản này không có ví để nạp tiền');
-      await assertTopupLimits(req.user.id, wallet, amount);
-      await db.prepare(
-        `INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, version, created_at, updated_at)
-         VALUES (?, ?, ?, 'PENDING', ?, 0, ?, ?)`
-      ).run(id, req.user.id, amount, providerRef, now, now);
-    })();
+    try {
+      await db.transaction(async () => {
+        if (clientRequestId) {
+          // Kiểm lại BÊN TRONG giao dịch: request cùng khoá chạy song song có thể đã ghi xong.
+          replay = await loadByClientKey(req.user.id, clientRequestId);
+          if (replay) return;
+        }
+        // Đọc ví BÊN TRONG giao dịch: đọc ở ngoài thì một webhook tất toán chen vào giữa sẽ làm số
+        // dư cũ đi trong khi pending_total đã giảm, khiến phép chiếu số dư đếm thiếu.
+        // Quản trị viên không phải một bên giao dịch nên không có ví — không có gì để nạp vào.
+        const wallet = await getUserWallet(req.user.id);
+        if (!wallet) throw new AppError(400, 'WALLET_NOT_FOUND', 'Tài khoản này không có ví để nạp tiền');
+        await assertTopupLimits(req.user.id, wallet, amount);
+        await db.prepare(
+          `INSERT INTO payment_requests
+             (id, user_id, amount, status, provider_ref, version, client_request_id, submission_status, created_at, updated_at)
+           VALUES (?, ?, ?, 'PENDING', ?, 0, ?, 'SUBMITTING', ?, ?)`
+        ).run(id, req.user.id, amount, providerRef, clientRequestId, now, now);
+      })();
+    } catch (e) {
+      // Một tiến trình khác (cùng CSDL) vừa ghi cùng khoá: chỉ mục duy nhất chặn — trả yêu cầu đó.
+      if (clientRequestId && db.isUniqueViolation(e)) replay = await loadByClientKey(req.user.id, clientRequestId);
+      if (!replay) throw e;
+    }
+    if (replay) return await replayExisting(res, replay, amount);
 
-    // Ghi yêu cầu ở phía ta TRƯỚC rồi mới gửi sang provider: nếu bước gửi hỏng, yêu cầu vẫn
-    // nằm ở PENDING và worker đối soát là nơi xử lý tiếp, không có tiền nào bị cộng sai.
-    await submitPayment({ providerRef, merchantRef: id, amount });
+    // Ghi yêu cầu ở phía ta TRƯỚC rồi mới gửi sang provider: nếu bước gửi hỏng, yêu cầu nằm ở
+    // PENDING + SUBMIT_FAILED (không phải im lặng PENDING), client nhận 503 rõ ràng, và việc gửi
+    // lại thuộc về client (cùng requestId) hoặc worker đối soát.
+    const sent = await submitToProvider({ id, provider_ref: providerRef, amount });
+    if (!sent.submitted) throw PROVIDER_UNAVAILABLE();
 
-    res.status(201).json(serializePaymentRequest({
-      id, amount, status: 'PENDING', provider_ref: providerRef, created_at: now, resolved_at: null,
-    }));
+    res.status(201).json(serializePaymentRequest(await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id)));
   } catch (e) {
     next(e);
   }

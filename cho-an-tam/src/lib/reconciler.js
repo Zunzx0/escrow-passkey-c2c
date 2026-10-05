@@ -13,9 +13,12 @@
 // Những gì worker KHÔNG làm, theo đúng thiết kế đã chốt:
 //   - không coi "provider vẫn PENDING" hay "đã chờ quá lâu" là FAILED — yêu cầu cứ giữ PENDING;
 //   - không coi "không hỏi được provider" là FAILED — lỗi được ghi lại, lần sau hỏi tiếp.
+// Ngoại lệ duy nhất: yêu cầu provider CHƯA TỪNG nhận (bước gửi hỏng). Worker gửi lại; gửi đủ
+// TOPUP_SUBMIT_MAX_ATTEMPTS lần mà provider vẫn không có bản ghi thì đóng FAILED — không có khoản
+// nào ở provider để người dùng thanh toán, nên giữ PENDING chỉ chiếm suất nạp tiền của họ mãi.
 const { db, nowIso } = require('../db');
 const provider = require('./mockPaymentProvider');
-const { applyProviderResult } = require('./paymentService');
+const { applyProviderResult, submitToProvider, expireUnsubmitted, maxSubmitAttempts } = require('./paymentService');
 const { logSecurityEvent, EVENTS } = require('./securityEvents');
 
 const DEFAULT_MIN_AGE_SECONDS = parseInt(process.env.RECONCILE_MIN_AGE_SECONDS || '30', 10);
@@ -62,20 +65,79 @@ async function reconcileOnce({
        ORDER BY created_at ASC LIMIT ?`
     ).all(cutoff, limit);
 
-  const summary = { scanned: pending.length, applied: 0, duplicate: 0, conflict: 0, stillPending: 0, errors: 0, results: [] };
+  const summary = {
+    scanned: pending.length, applied: 0, duplicate: 0, conflict: 0, stillPending: 0, errors: 0,
+    resubmitted: 0, expired: 0, results: [],
+  };
+
+  /**
+   * Yêu cầu mà provider chưa nhận (SUBMITTING / SUBMIT_FAILED, hoặc yêu cầu cũ provider báo không
+   * biết): gửi lại. Gửi được -> tiếp tục hỏi provider như thường. Vẫn hỏng và đã đủ số lần gửi ->
+   * đóng FAILED (expireUnsubmitted tự kiểm provider không có bản ghi). Trả về true nếu xử lý xong
+   * yêu cầu trong lượt này.
+   */
+  async function handleUnsubmitted(pr) {
+    const sent = await submitToProvider(pr);
+    if (sent.submitted) {
+      summary.resubmitted += 1;
+      return false;
+    }
+    const fresh = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(pr.id);
+    if (fresh.status === 'PENDING' && Number(fresh.submit_attempts) >= maxSubmitAttempts()) {
+      try {
+        const r = await expireUnsubmitted(fresh);
+        if (r.outcome === 'EXPIRED') {
+          summary.expired += 1;
+          summary.results.push({ id: pr.id, outcome: 'EXPIRED', status: 'FAILED' });
+          return true;
+        }
+        if (r.outcome === 'SUBMITTED') {
+          summary.resubmitted += 1;
+          return false;
+        }
+      } catch (e) {
+        await recordError(pr.id, `${e.code || 'EXPIRE_ERROR'}: ${e.message}`);
+      }
+    }
+    summary.errors += 1;
+    summary.results.push({ id: pr.id, outcome: 'SUBMIT_FAILED', error: sent.error && (sent.error.code || sent.error.message) });
+    return true;
+  }
 
   for (const pr of pending) {
     await markAttempt(pr.id);
     if (onQuery) onQuery(pr.id);
 
+    if (pr.submission_status && pr.submission_status !== 'SUBMITTED') {
+      if (await handleUnsubmitted(pr)) continue;
+    }
+
     let answer;
     try {
       answer = await provider.queryStatus(pr.provider_ref);
     } catch (e) {
-      await recordError(pr.id, `${e.code || 'PROVIDER_ERROR'}: ${e.message}`);
-      summary.errors += 1;
-      summary.results.push({ id: pr.id, outcome: 'PROVIDER_ERROR', error: e.code || e.message });
-      continue;
+      if (e.code === 'UNKNOWN_PAYMENT') {
+        // Provider không hề biết yêu cầu này (dữ liệu trước khi có submission_status, hoặc lần gửi
+        // trước báo thành công nhầm): coi như chưa gửi và gửi lại — thay vì ghi lỗi mãi mãi.
+        await db.prepare(
+          `UPDATE payment_requests SET submission_status = 'SUBMIT_FAILED', updated_at = ?
+           WHERE id = ? AND status = 'PENDING' AND submission_status = 'SUBMITTED'`
+        ).run(nowIso(), pr.id);
+        if (await handleUnsubmitted(pr)) continue;
+        try {
+          answer = await provider.queryStatus(pr.provider_ref);
+        } catch (e2) {
+          await recordError(pr.id, `${e2.code || 'PROVIDER_ERROR'}: ${e2.message}`);
+          summary.errors += 1;
+          summary.results.push({ id: pr.id, outcome: 'PROVIDER_ERROR', error: e2.code || e2.message });
+          continue;
+        }
+      } else {
+        await recordError(pr.id, `${e.code || 'PROVIDER_ERROR'}: ${e.message}`);
+        summary.errors += 1;
+        summary.results.push({ id: pr.id, outcome: 'PROVIDER_ERROR', error: e.code || e.message });
+        continue;
+      }
     }
     await clearError(pr.id);
 

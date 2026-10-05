@@ -1,4 +1,6 @@
-// Con đường DUY NHẤT làm thay đổi trạng thái của một yêu cầu nạp tiền và cộng tiền vào ví.
+// Con đường DUY NHẤT làm thay đổi trạng thái của một yêu cầu nạp tiền và cộng tiền vào ví
+// (ngoại lệ duy nhất là expireUnsubmitted ở cuối tệp: đóng FAILED một yêu cầu provider chưa từng
+// nhận, không bao giờ cộng ví).
 //
 // Kết quả từ provider đến qua hai kênh độc lập — webhook đã ký (routes/payments.js) và worker
 // đối soát tự đi hỏi (lib/reconciler.js). Cả hai gọi đúng hàm applyProviderResult() dưới đây,
@@ -114,4 +116,92 @@ async function applyProviderResult({ paymentRequestId, providerRef, status, amou
   return { outcome: 'APPLIED', status };
 }
 
-module.exports = { applyProviderResult };
+// ---------------------------------------------------------------------------------------
+// Bước GỬI yêu cầu sang provider (submission_status, xem schema.sql)
+// ---------------------------------------------------------------------------------------
+//
+// Yêu cầu được ghi PENDING + SUBMITTING TRƯỚC rồi mới gửi provider (để không bao giờ có khoản
+// provider biết mà phía ta không biết). Gửi hỏng thì yêu cầu không được nằm im: nó mang
+// SUBMIT_FAILED, client gửi lại cùng requestId hoặc worker đối soát sẽ gửi lại. Provider nhận
+// idempotent theo providerRef nên gửi lại bao nhiêu lần cũng chỉ một bản ghi.
+
+function maxSubmitAttempts() {
+  return Math.max(1, parseInt(process.env.TOPUP_SUBMIT_MAX_ATTEMPTS || '5', 10) || 5);
+}
+
+/**
+ * Gửi (hoặc gửi lại) một yêu cầu PENDING sang provider và ghi kết quả vào submission_status.
+ * @returns {{ submitted: boolean, error?: Error }}
+ */
+async function submitToProvider(pr) {
+  const provider = require('./mockPaymentProvider');
+  try {
+    await provider.submitPayment({ providerRef: pr.provider_ref, merchantRef: pr.id, amount: pr.amount });
+  } catch (e) {
+    await db.prepare(
+      `UPDATE payment_requests
+       SET submission_status = 'SUBMIT_FAILED', submit_attempts = submit_attempts + 1, last_submit_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'`
+    ).run(`${e.code || 'SUBMIT_ERROR'}: ${e.message}`.slice(0, 300), nowIso(), pr.id);
+    return { submitted: false, error: e };
+  }
+  const marked = await db.prepare(
+    `UPDATE payment_requests
+     SET submission_status = 'SUBMITTED', submit_attempts = submit_attempts + 1, last_submit_error = NULL, updated_at = ?
+     WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'`
+  ).run(nowIso(), pr.id);
+  if (marked.changes !== 1) {
+    // Hoặc đã SUBMITTED từ trước (bình thường), hoặc yêu cầu vừa bị đưa sang FAILED vì hết lượt
+    // gửi trong lúc lần gửi này đang chạy. Trường hợp sau: huỷ khoản vừa tạo ở provider để người
+    // dùng không thể thanh toán một yêu cầu mà phía ta đã đóng.
+    const cur = await db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(pr.id);
+    if (cur && cur.status === 'FAILED') {
+      try { await provider.settlePayment(pr.provider_ref, 'FAILED', { onlyFromPending: true }); } catch (_) { /* đã có kết quả */ }
+      return { submitted: false, error: new AppError(409, 'PAYMENT_REQUEST_CLOSED', 'Yêu cầu nạp tiền đã đóng') };
+    }
+  }
+  return { submitted: true };
+}
+
+/**
+ * Đóng một yêu cầu mà provider CHƯA TỪNG nhận được, sau khi đã gửi đủ TOPUP_SUBMIT_MAX_ATTEMPTS
+ * lần. Chỉ đóng khi provider xác nhận không có bản ghi nào cho providerRef — nếu có (một lần gửi
+ * trước thật ra đã tới), yêu cầu được đánh dấu SUBMITTED và tiếp tục chờ kết quả như thường.
+ * Không có tiền nào di chuyển: chỉ một yêu cầu SUCCEEDED mới từng cộng ví.
+ *
+ * @returns {{ outcome: 'EXPIRED'|'SUBMITTED'|'SKIPPED' }}
+ */
+async function expireUnsubmitted(pr) {
+  const provider = require('./mockPaymentProvider');
+  const atProvider = await provider.findPayment(pr.provider_ref);
+  if (atProvider) {
+    await db.prepare(
+      `UPDATE payment_requests SET submission_status = 'SUBMITTED', last_submit_error = NULL, updated_at = ?
+       WHERE id = ? AND status = 'PENDING'`
+    ).run(nowIso(), pr.id);
+    return { outcome: 'SUBMITTED' };
+  }
+
+  let expired = false;
+  await db.transaction(async () => {
+    const now = nowIso();
+    const r = await db.prepare(
+      `UPDATE payment_requests
+       SET status = 'FAILED', version = version + 1, resolved_at = ?, resolved_by = 'RECONCILER',
+           last_reconcile_error = ?, updated_at = ?
+       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED' AND submit_attempts >= ?`
+    ).run(now, `SUBMIT_EXHAUSTED: provider không nhận yêu cầu sau ${maxSubmitAttempts()} lần gửi`, now, pr.id, maxSubmitAttempts());
+    expired = r.changes === 1;
+  })();
+  if (!expired) return { outcome: 'SKIPPED' };
+
+  await logSecurityEvent(null, {
+    type: EVENTS.TOPUP_FAILED,
+    outcome: 'ALLOWED',
+    detail: { paymentRequestId: pr.id, amount: pr.amount, source: 'RECONCILER', reason: 'SUBMIT_EXHAUSTED' },
+  });
+  await onTopupResolved(pr, 'FAILED');
+  return { outcome: 'EXPIRED' };
+}
+
+module.exports = { applyProviderResult, submitToProvider, expireUnsubmitted, maxSubmitAttempts };

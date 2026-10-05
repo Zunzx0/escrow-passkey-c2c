@@ -71,6 +71,7 @@ const SUITES = [
   'listing-lifecycle-e2e',
   'passkey-registration-race-e2e',
   'topup-concurrency-e2e',
+  'topup-idempotency-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');
 
