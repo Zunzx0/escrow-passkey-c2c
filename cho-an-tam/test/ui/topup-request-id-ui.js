@@ -61,16 +61,22 @@ const row = (o = {}) => ({
   submissionStatus: 'SUBMITTED', ...o,
 });
 
-async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage = {} }) {
+async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage = {}, timeoutMs = TIMEOUT_MS }) {
   const html0 = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script\b[^>]*\bsrc=[^>]*><\/script>/g, '');
   const log = [];
+  const pending = new Map(); // id hẹn giờ -> số ms
   const table = { ...routes };
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/`,
     runScripts: 'outside-only',
     pretendToBeVisual: true,
     beforeParse(w) {
-      w.ENCLAVE_API_TIMEOUT_MS = TIMEOUT_MS;
+      w.ENCLAVE_API_TIMEOUT_MS = timeoutMs;
+      // Theo dõi các hẹn giờ đang chờ (để kiểm tra việc huỷ theo dõi thật sự dọn hẹn giờ).
+      const realSet = w.setTimeout.bind(w);
+      const realClear = w.clearTimeout.bind(w);
+      w.setTimeout = (fn, ms, ...a) => { const id = realSet((...x) => { pending.delete(id); fn(...x); }, ms, ...a); pending.set(id, ms); return id; };
+      w.clearTimeout = (id) => { pending.delete(id); realClear(id); };
       w.scrollTo = () => {};
       for (const [k, v] of Object.entries(storage)) w.localStorage.setItem(k, v);
       w.localStorage.setItem('cat_token', 'tok-test');
@@ -113,8 +119,29 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
     btn: () => d.querySelector('.card-body [data-act="topup-create"]'),
     notice: () => (d.querySelector('#topupIntent') || { textContent: '' }).textContent.replace(/\s+/g, ' ').trim(),
     modalText: () => (d.querySelector('.modal') || { textContent: '' }).textContent.replace(/\s+/g, ' ').trim(),
+    pollTimers: () => [...pending.values()].filter((ms) => [1000, 1500, 2250, 3400].includes(ms)).length,
     close: () => w.close(),
   };
+}
+
+const delay = (ms, value) => new Promise((r) => setTimeout(() => r(value), ms));
+
+/** Đăng xuất bằng nút trên giao diện. */
+async function logoutUi(p) {
+  p.routes['POST /api/passkeys/session/logout'] = () => json(200, { ok: true });
+  p.click(p.d.querySelector('[data-act="logout"]'));
+  await sleep(60);
+}
+
+/** Đăng nhập lại bằng mật khẩu qua giao diện (mock): có thể là cùng tài khoản hoặc tài khoản khác. */
+async function loginUi(p, user) {
+  p.routes['POST /api/passkeys/login/password'] = () => json(200, { token: 'tok-' + user.id, user });
+  p.click(p.d.querySelector('[data-act="open-auth"]'));
+  await sleep(150);
+  p.d.querySelector('#loginUsername').value = user.username;
+  p.d.querySelector('#loginPassword').value = 'mat-khau-gia';
+  p.click(p.d.querySelector('[data-act="do-login-password"]'));
+  await sleep(500);
 }
 
 const baseRoutes = (user = BUYER) => ({
@@ -130,7 +157,7 @@ const baseRoutes = (user = BUYER) => ({
 });
 
 /** Trang ví với bộ ghi các thân POST /api/payments/topup. `topup(body, n)` trả phản hồi cho lần gọi thứ n. */
-async function wallet({ topup, extra = {}, user = BUYER, storage = {}, amount = '150000' }) {
+async function wallet({ topup, extra = {}, user = BUYER, storage = {}, amount = '150000', timeoutMs }) {
   const bodies = [];
   const routes = {
     ...baseRoutes(user),
@@ -141,7 +168,7 @@ async function wallet({ topup, extra = {}, user = BUYER, storage = {}, amount = 
     },
     ...extra,
   };
-  const p = await openPage({ user, routes, storage });
+  const p = await openPage({ user, routes, storage, timeoutMs });
   p.bodies = bodies;
   if (p.amountInput() && !p.amountInput().disabled) p.amountInput().value = amount;
   return p;
@@ -320,7 +347,7 @@ async function main() {
   section('R5: FAILED / SUCCEEDED không mở cổng; HTTP 200 và idempotentReplay không phải bằng chứng thành công');
   p = await wallet({
     topup: (b) => json(200, row({ requestId: b.requestId, status: 'FAILED', resolvedAt: new Date().toISOString(), idempotentReplay: true })),
-    extra: { 'GET /api/payments/p1': () => json(200, row({ status: 'FAILED', resolvedAt: new Date().toISOString() })) },
+    extra: { 'GET /api/payments/p1': () => json(200, row({ status: 'FAILED', requestId: (p.bodies[0] || {}).requestId, resolvedAt: new Date().toISOString() })) },
   });
   await press(p, 700);
   const tf = p.toasts();
@@ -332,11 +359,11 @@ async function main() {
   // Thân POST nói SUCCEEDED nhưng GET (máy chủ) nói vẫn PENDING: KHÔNG được báo thành công.
   p = await wallet({
     topup: (b) => json(200, row({ requestId: b.requestId, status: 'SUCCEEDED', idempotentReplay: true })),
-    extra: { 'GET /api/payments/p1': () => json(200, row({ status: 'PENDING' })) },
+    extra: { 'GET /api/payments/p1': () => json(200, row({ status: 'PENDING', requestId: (p.bodies[0] || {}).requestId })) },
   });
   await press(p, 700);
   ok(p.toasts().every((t) => !/Nạp tiền thành công/.test(t.text) && t.kind !== 'ok'), 'POST nói SUCCEEDED nhưng máy chủ (GET) nói PENDING -> KHÔNG báo thành công');
-  ok(!p.d.querySelector('.modal'), 'SUCCEEDED trong thân POST: không mở cổng');
+  ok(!p.d.querySelector('.modal') && /Chưa xác nhận/.test(p.notice()), 'SUCCEEDED trong thân POST mà máy chủ nói khác: không mở cổng, hiện "chưa xác nhận"');
   p.close();
 
   // SUCCEEDED được máy chủ xác nhận bằng GET: báo thành công một lần, không mở cổng.
@@ -344,7 +371,7 @@ async function main() {
   p = await wallet({
     topup: (b) => json(200, row({ requestId: b.requestId, status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', idempotentReplay: true })),
     extra: {
-      'GET /api/payments/p1': () => json(200, row({ status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', resolvedAt: new Date().toISOString() })),
+      'GET /api/payments/p1': () => json(200, row({ status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', requestId: (p.bodies[0] || {}).requestId, resolvedAt: new Date().toISOString() })),
       'GET /api/wallets/me': () => { walletReads++; return json(200, WALLET); },
     },
   });
@@ -460,6 +487,189 @@ async function main() {
   ok(histOpen.length === 1 && histOpen[0] === 'h1', 'Lịch sử: CHỈ dòng SUBMITTED có nút "Mở lại cổng thanh toán"');
   const histText = p.d.querySelector('#topupHistory').textContent;
   ok(/Đang gửi sang cổng thanh toán/.test(histText) && /hệ thống sẽ tự gửi lại/.test(histText), 'Lịch sử: SUBMITTING báo đang gửi; SUBMIT_FAILED báo sẽ tự gửi lại (không có nút mở cổng)');
+  p.close();
+
+  // ------------------------------------------------------------------------------------------
+  section('R9: phản hồi đến chậm sau khi đăng xuất / đổi tài khoản không được tác động vào phiên mới');
+  const slowSubmitted = (ms) => (b) => delay(ms, json(201, row({ requestId: b.requestId })));
+  const allowedToasts = (p) => p.toasts().every((t) => /Đã đăng xuất|Xin chào/.test(t.text));
+
+  // R9.1: POST chậm + đăng xuất.
+  p = await wallet({ timeoutMs: 5000, topup: slowSubmitted(250) });
+  p.click(p.btn());
+  await sleep(20);
+  await logoutUi(p);
+  await sleep(600);
+  ok(p.w.localStorage.getItem('cat_token') === null, 'Đã đăng xuất (token đã xoá)');
+  ok(!p.d.querySelector('.modal') && p.count('GET /mock-provider/checkout/ref1') === 0,
+    'POST SUBMITTED đến sau đăng xuất: KHÔNG mở cổng thanh toán, không gọi checkout');
+  ok(allowedToasts(p), `Phản hồi cũ không sinh thông báo nào cho phiên mới (${JSON.stringify(p.toasts().map((t) => t.text))})`);
+  ok(!!p.store()[p.intentKey()], 'Phản hồi cũ không xoá ý định chưa rõ của tài khoản');
+  p.close();
+
+  // R9.2: POST chậm + đăng xuất rồi đăng nhập lại CÙNG tài khoản (không chỉ so userId).
+  p = await wallet({ timeoutMs: 5000, topup: slowSubmitted(700) });
+  p.click(p.btn());
+  await sleep(20);
+  const keySame = p.bodies[0].requestId;
+  await logoutUi(p);
+  await loginUi(p, BUYER);
+  p.w.location.hash = '#/wallet';
+  await sleep(1000);
+  ok(!p.d.querySelector('.modal') && p.count('GET /mock-provider/checkout/ref1') === 0,
+    'Đăng xuất rồi đăng nhập lại cùng tài khoản: phản hồi POST cũ KHÔNG mở cổng');
+  ok(allowedToasts(p), 'Cùng tài khoản đăng nhập lại: phản hồi cũ không sinh thông báo');
+  const keptSame = JSON.parse(p.store()[p.intentKey()] || 'null');
+  ok(!!keptSame && keptSame.requestId === keySame, 'Ý định của chính tài khoản đó nguyên vẹn (không bị phản hồi cũ xoá)');
+  ok(p.amountInput() && p.amountInput().disabled && /Chưa rõ/.test(p.notice()), 'Trang ví của phiên mới hiện đúng trạng thái "chưa rõ" của ý định, không bị phản hồi cũ đổi');
+  p.close();
+
+  // R9.3: POST chậm + đổi sang tài khoản khác. Chính sách: không dùng chéo; không xoá ý định của người khác.
+  p = await wallet({ timeoutMs: 5000, topup: slowSubmitted(700) });
+  p.click(p.btn());
+  await sleep(20);
+  const keyA2 = p.bodies[0].requestId;
+  await logoutUi(p);
+  await loginUi(p, OTHER);
+  p.w.location.hash = '#/wallet';
+  await sleep(1000);
+  ok(!p.d.querySelector('.modal') && p.count('GET /mock-provider/checkout/ref1') === 0,
+    'Đổi tài khoản: phản hồi POST cũ KHÔNG mở cổng cho tài khoản mới');
+  ok(allowedToasts(p), 'Đổi tài khoản: phản hồi cũ không sinh thông báo cho tài khoản mới');
+  ok(p.store()[p.intentKey(OTHER)] === undefined && p.notice() === '' && !p.amountInput().disabled,
+    'Tài khoản mới: không có ý định, không có thông báo, ô số tiền không bị khoá');
+  const snapAfterSwitch = p.store();
+  ok(JSON.parse(snapAfterSwitch[p.intentKey()] || 'null') && JSON.parse(snapAfterSwitch[p.intentKey()]).requestId === keyA2,
+    'Chính sách: ý định của tài khoản cũ được GIỮ (không tự xoá) để họ phục hồi khi quay lại');
+  p.close();
+  // Tài khoản cũ quay lại: phục hồi đúng ý định; không bao giờ dùng chéo cho tài khoản khác.
+  p = await wallet({ storage: snapAfterSwitch, topup: (b) => json(201, row({ requestId: b.requestId })) });
+  ok(p.amountInput().disabled && p.amountInput().value === '150000' && /Chưa rõ/.test(p.notice()),
+    'Tài khoản cũ quay lại: ý định được phục hồi (số tiền khoá, báo "chưa rõ")');
+  await press(p, 600);
+  ok(p.bodies.length === 1 && p.bodies[0].requestId === keyA2, 'Tài khoản cũ gửi lại với đúng khoá của mình');
+  p.close();
+  p = await wallet({ storage: snapAfterSwitch, user: OTHER, topup: (b) => json(201, row({ requestId: b.requestId })) });
+  await press(p, 600);
+  ok(p.bodies.length === 1 && p.bodies[0].requestId !== keyA2, 'Tài khoản khác trên cùng trình duyệt không bao giờ dùng khoá của người kia');
+  p.close();
+
+  // R9.4: GET kiểm tra chậm + đổi tài khoản.
+  let slowNext = false;
+  p = await wallet({
+    timeoutMs: 5000, topup: () => HANG,
+    extra: {
+      'GET /api/payments/me': () => {
+        if (!slowNext) return json(200, { paymentRequests: [] });
+        slowNext = false; // chỉ lần gọi của "Kiểm tra trạng thái" chậm và có dòng khớp
+        return delay(700, json(200, { paymentRequests: [row({ requestId: (p.bodies[0] || {}).requestId })] }));
+      },
+    },
+  });
+  p.w.ENCLAVE_API_TIMEOUT_MS = 200;
+  await press(p, 400); // POST treo -> hết hạn -> chưa rõ
+  p.w.ENCLAVE_API_TIMEOUT_MS = 5000;
+  const keyChk = p.bodies[0].requestId;
+  p.clearToasts(); // bỏ thông báo timeout hợp lệ của bước POST trước đó
+  slowNext = true;
+  p.click(p.d.querySelector('#topupIntent [data-act="topup-check"]'));
+  await sleep(40);
+  await logoutUi(p);
+  await loginUi(p, OTHER);
+  p.w.location.hash = '#/wallet';
+  await sleep(1200);
+  ok(!p.d.querySelector('.modal') && p.count('GET /mock-provider/checkout/ref1') === 0,
+    'GET kiểm tra chậm + đổi tài khoản: KHÔNG mở cổng cho tài khoản mới');
+  ok(allowedToasts(p), 'GET kiểm tra chậm + đổi tài khoản: không có thông báo nào từ kết quả cũ');
+  ok(p.store()[p.intentKey(OTHER)] === undefined && p.notice() === '', 'GET kiểm tra chậm + đổi tài khoản: ý định/thông báo của tài khoản mới không bị đụng');
+  ok(JSON.parse(p.store()[p.intentKey()] || 'null') && JSON.parse(p.store()[p.intentKey()]).requestId === keyChk,
+    'GET kiểm tra chậm: ý định của tài khoản cũ không bị kết quả cũ xoá');
+  p.close();
+
+  // R9.5: request của phiên cũ nhận 401 sau khi người khác đăng nhập: không làm mới phiên, không thử lại bằng token mới.
+  p = await wallet({ timeoutMs: 5000, topup: () => delay(700, json(401, { error: 'UNAUTHENTICATED', message: 'Token không hợp lệ hoặc đã hết hạn' })) });
+  p.routes['POST /api/passkeys/session/refresh'] = () => json(200, { token: 'tok-bi-lam-moi', user: BUYER });
+  p.click(p.btn());
+  await sleep(20);
+  await logoutUi(p);
+  await loginUi(p, OTHER);
+  await sleep(1000);
+  ok(p.bodies.length === 1, 'Request cũ nhận 401: KHÔNG được thử lại bằng token của người dùng mới (chỉ 1 POST)');
+  ok(p.count('POST /api/passkeys/session/refresh') === 0, 'Request cũ nhận 401: không kích hoạt làm mới phiên của người dùng mới');
+  ok(p.w.localStorage.getItem('cat_token') === 'tok-' + OTHER.id, 'Người dùng mới vẫn đăng nhập, token nguyên vẹn');
+  ok(allowedToasts(p), 'Request cũ nhận 401: không có thông báo hết phiên nào cho người dùng mới');
+  p.close();
+
+  // ------------------------------------------------------------------------------------------
+  section('R10: bước GET xác nhận SUCCEEDED lỗi/không khớp thì KHÔNG báo thành công');
+  const keyOfPage = (pg) => (pg.bodies[0] || {}).requestId;
+  const confirmCases = [
+    ['GET 503', () => json(503, { error: 'INTERNAL_ERROR', message: 'x' })],
+    ['GET treo (timeout)', () => HANG],
+    ['GET 200 thân HTML', () => html(200, '<html>ok</html>')],
+    ['GET 200 mảng', () => json(200, [])],
+    ['GET sai id', (pg) => json(200, row({ id: 'p-khac', status: 'SUCCEEDED', requestId: keyOfPage(pg) }))],
+    ['GET sai số tiền', (pg) => json(200, row({ amount: 1000, status: 'SUCCEEDED', requestId: keyOfPage(pg) }))],
+    ['GET sai requestId', () => json(200, row({ status: 'SUCCEEDED', requestId: 'khac-hoan-toan-9999' }))],
+    ['GET nói PENDING (trái POST)', (pg) => json(200, row({ status: 'PENDING', requestId: keyOfPage(pg) }))],
+    ['GET nói FAILED (trái POST)', (pg) => json(200, row({ status: 'FAILED', requestId: keyOfPage(pg) }))],
+  ];
+  for (const [label, make] of confirmCases) {
+    let pg;
+    pg = await wallet({
+      topup: (b) => json(200, row({ requestId: b.requestId, status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', idempotentReplay: true })),
+      extra: { 'GET /api/payments/p1': () => make(pg) },
+    });
+    await press(pg, TIMEOUT_MS + 700);
+    const tt = pg.toasts();
+    ok(tt.every((x) => x.kind !== 'ok' && !/Nạp tiền thành công/.test(x.text)) && !pg.d.querySelector('.modal')
+      && pg.count('GET /mock-provider/checkout/ref1') === 0,
+    `${label}: không báo thành công, không mở cổng`);
+    ok(/Chưa xác nhận/.test(pg.notice()) && !!pg.d.querySelector('#topupIntent [data-act="topup-check"]') && !!pg.store()[pg.intentKey()],
+      `${label}: giữ trạng thái "chưa xác nhận", có nút kiểm tra lại, giữ ý định`);
+    pg.close();
+  }
+  // Chỉ GET hợp lệ, đúng yêu cầu, nói SUCCEEDED mới được báo thành công — kể cả khi bấm "Kiểm tra lại" sau đó.
+  let pg2;
+  let mode = 'bad';
+  pg2 = await wallet({
+    topup: (b) => json(200, row({ requestId: b.requestId, status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', idempotentReplay: true })),
+    extra: {
+      'GET /api/payments/p1': () => (mode === 'bad'
+        ? json(503, { error: 'INTERNAL_ERROR', message: 'x' })
+        : json(200, row({ status: 'SUCCEEDED', resolvedBy: 'WEBHOOK', requestId: keyOfPage(pg2), resolvedAt: new Date().toISOString() }))),
+    },
+  });
+  await press(pg2, 700);
+  ok(pg2.toasts().every((x) => x.kind !== 'ok'), 'GET lỗi lần đầu: chưa có thông báo thành công');
+  mode = 'good';
+  pg2.click(pg2.d.querySelector('#topupIntent [data-act="topup-check"]'));
+  await sleep(700);
+  ok(pg2.toasts().filter((x) => x.kind === 'ok' && /Nạp tiền thành công/.test(x.text)).length === 1, 'Kiểm tra lại, GET hợp lệ SUCCEEDED đúng yêu cầu: đúng MỘT thông báo thành công');
+  ok(!pg2.store()[pg2.intentKey()] && pg2.notice() === '', 'Sau khi được xác nhận: ý định và thông báo được dọn');
+  pg2.close();
+
+  // ------------------------------------------------------------------------------------------
+  section('R11: huỷ theo dõi dọn hẹn giờ và không để tác vụ treo');
+  p = await wallet({
+    timeoutMs: 5000,
+    topup: (b) => json(200, row({ requestId: b.requestId, submissionStatus: 'SUBMITTING' })),
+    extra: { 'GET /api/payments/p1': () => json(200, row({ submissionStatus: 'SUBMITTING' })) },
+  });
+  await press(p, 300);
+  ok(p.pollTimers() === 1, `Đang theo dõi: có đúng 1 hẹn giờ chờ lượt hỏi (nhận ${p.pollTimers()})`);
+  await logoutUi(p);
+  ok(p.pollTimers() === 0, `Đăng xuất: hẹn giờ theo dõi được huỷ ngay (còn ${p.pollTimers()})`);
+  p.close();
+  p = await wallet({
+    timeoutMs: 5000,
+    topup: (b) => json(200, row({ requestId: b.requestId, submissionStatus: 'SUBMITTING' })),
+    extra: { 'GET /api/payments/p1': () => json(200, row({ submissionStatus: 'SUBMITTING' })) },
+  });
+  await press(p, 300);
+  p.w.location.hash = '#/';
+  await sleep(300);
+  ok(p.pollTimers() === 0, `Rời trang ví: hẹn giờ theo dõi được huỷ ngay (còn ${p.pollTimers()})`);
   p.close();
 
   console.log(`\n${checks} kiểm tra, ${fails ? fails + ' FAIL' : 'ALL PASS'}`);
