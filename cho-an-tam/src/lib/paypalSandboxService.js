@@ -6,7 +6,7 @@ const { PayPalSandboxError, validateQuote } = require('./paypalSandboxProvider')
 // the application must persist immutable quote/order ownership and select the
 // provider before this module can be exposed by an authenticated route.
 function createSandboxPaymentService({ provider, store, settle, returnUrl, cancelUrl,
-  now = Date.now, createRetryWindowMs = 5 * 60 * 1000 }) {
+  captureCoordinator = null, now = Date.now, createRetryWindowMs = 5 * 60 * 1000 }) {
   if (!provider || !store || typeof settle !== 'function' ||
       !['loadByRequestId', 'loadByOrderId', 'bindOrder', 'claimCreateAttempt'].every(k => typeof store[k] === 'function') ||
       typeof now !== 'function' || !Number.isInteger(createRetryWindowMs) || createRetryWindowMs <= 0 ||
@@ -66,7 +66,7 @@ function createSandboxPaymentService({ provider, store, settle, returnUrl, cance
     // Existing settlement must independently require row.provider=PAYPAL_SANDBOX,
     // claim PENDING atomically and credit/ledger in the SAME database transaction.
     return settle({ paymentRequestId: row.paymentRequestId, providerRef: row.providerRef,
-      status: 'SUCCEEDED', amount: row.amountVnd, source });
+      status: 'SUCCEEDED', amount: row.amountVnd, source, orderId: row.orderId, captureId: result.captureId });
   }
 
   return Object.freeze({
@@ -96,7 +96,7 @@ function createSandboxPaymentService({ provider, store, settle, returnUrl, cance
       // idempotency retention expires. Recover the same order with a GET instead.
       const result = row.orderId
         ? await provider.getOrder(input(row))
-        : await provider.createOrder({ paymentRequestId: row.paymentRequestId, quote: row.quote, returnUrl, cancelUrl });
+        : await provider.createOrder({ paymentRequestId: row.paymentRequestId, quote: row.quote, returnUrl: typeof returnUrl==='function'?returnUrl(row.paymentRequestId):returnUrl, cancelUrl: typeof cancelUrl==='function'?cancelUrl(row.paymentRequestId):cancelUrl });
       if (!result || result.paymentRequestId !== row.paymentRequestId || result.amount !== row.amountVnd ||
           typeof result.orderId !== 'string' || !result.orderId || (row.orderId && row.orderId !== result.orderId)) {
         reject('PAYPAL_ORDER_MISMATCH', 'Created order does not match the stored payment request', 409);
@@ -111,6 +111,7 @@ function createSandboxPaymentService({ provider, store, settle, returnUrl, cance
         approvalUrl: result.approvalUrl, quote: row.quote, sandbox: true };
     },
     async capture({ paymentRequestId, userId }) {
+      if (captureCoordinator) return captureCoordinator.capture({paymentRequestId,userId});
       const row = await load(paymentRequestId, userId, true);
       openForCheckout(row);
       const result = row.status === 'SUCCEEDED'

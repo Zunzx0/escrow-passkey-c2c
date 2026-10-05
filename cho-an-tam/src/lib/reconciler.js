@@ -23,13 +23,13 @@ const { logSecurityEvent, EVENTS } = require('./securityEvents');
 
 const DEFAULT_MIN_AGE_SECONDS = parseInt(process.env.RECONCILE_MIN_AGE_SECONDS || '30', 10);
 
-async function markAttempt(id) {
+async function markAttempt(id, paymentProvider='MOCK') {
   // Chỉ là vết vận hành: không tăng version, nên không bao giờ làm hỏng lượt tất toán đang chạy
   // song song ở webhook.
   await db.prepare(
     `UPDATE payment_requests SET reconcile_attempts = reconcile_attempts + 1, last_reconciled_at = ?
-     WHERE id = ? AND status = 'PENDING'`
-  ).run(nowIso(), id);
+     WHERE id = ? AND provider = ? AND (status = 'PENDING' OR (provider = 'PAYPAL_SANDBOX' AND status = 'FAILED'))`
+  ).run(nowIso(), id, paymentProvider);
 }
 
 async function recordError(id, message) {
@@ -55,7 +55,9 @@ async function reconcileOnce({
   limit = 50,
   paymentRequestId = null,
   onQuery = null,
+  paypalRuntime = null,
 } = {}) {
+  if(paypalRuntime && process.env.APP_ENV!=='test')throw Error('Worker runtime injection is test-only');
   const cutoff = new Date(Date.now() - minAgeSeconds * 1000).toISOString();
   const pending = paymentRequestId
     ? await db.prepare(`SELECT * FROM payment_requests WHERE id = ? AND provider = 'MOCK' AND status = 'PENDING' AND created_at <= ?`)
@@ -187,6 +189,28 @@ async function reconcileOnce({
     }
   }
 
+  const paypal=paypalRuntime||require('./paypalRuntime').getRuntime();
+  if (paypal.publicConfig().paypalSandbox.enabled) {
+    const rows=paymentRequestId
+      ? await db.prepare("SELECT id FROM payment_requests WHERE id=? AND provider='PAYPAL_SANDBOX' AND status IN ('PENDING','FAILED') AND created_at<=?").all(paymentRequestId,cutoff)
+      : await db.prepare("SELECT pr.id FROM payment_requests pr JOIN paypal_payment_bindings b ON b.payment_request_id=pr.id WHERE pr.provider='PAYPAL_SANDBOX' AND b.order_id IS NOT NULL AND b.recovery_required_at IS NULL AND pr.created_at<=? AND (pr.status='PENDING' OR (pr.status='FAILED' AND b.capture_post_sent_at IS NOT NULL AND b.recovery_required_at IS NULL)) ORDER BY COALESCE(pr.last_reconciled_at,pr.created_at) ASC LIMIT ?").all(cutoff,limit);
+    summary.paypal={scanned:rows.length,applied:0,errors:0,recoveryRequired:0};
+    for(const row of rows) {
+      await markAttempt(row.id,'PAYPAL_SANDBOX');
+      try {
+        const result=await paypal.reconcileOne(row.id);
+        if(result.outcome==='APPLIED')summary.paypal.applied++;
+        if(result.outcome==='RECOVERY_REQUIRED')summary.paypal.recoveryRequired++;
+        summary.results.push({id:row.id,provider:'PAYPAL_SANDBOX',...result});
+        await clearError(row.id);
+      } catch(error) {
+        summary.paypal.errors++;
+        // Never store upstream bodies/secrets in the operational error column.
+        await recordError(row.id,error.code||'PAYPAL_RECONCILE_ERROR');
+        summary.results.push({id:row.id,provider:'PAYPAL_SANDBOX',outcome:'ERROR',error:error.code||'PAYPAL_RECONCILE_ERROR'});
+      }
+    }
+  }
   return summary;
 }
 
@@ -201,8 +225,8 @@ function startReconciler({ intervalSeconds, minAgeSeconds = DEFAULT_MIN_AGE_SECO
     running = true;
     try {
       const s = await reconcileOnce({ minAgeSeconds });
-      if (s.applied || s.conflict || s.errors) {
-        console.log(`[reconcile] quét ${s.scanned}, tất toán ${s.applied}, trùng ${s.duplicate}, mâu thuẫn ${s.conflict}, lỗi ${s.errors}`);
+      if (s.applied || s.conflict || s.errors || (s.paypal && (s.paypal.applied || s.paypal.errors || s.paypal.recoveryRequired))) {
+        console.log(`[reconcile] quét ${s.scanned}, tất toán ${s.applied}, trùng ${s.duplicate}, mâu thuẫn ${s.conflict}, lỗi ${s.errors}; PayPal ${s.paypal?JSON.stringify(s.paypal):"tắt"}`);
       }
     } catch (e) {
       console.error('[reconcile] lượt đối soát hỏng:', e.message);

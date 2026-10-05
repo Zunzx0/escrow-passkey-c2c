@@ -89,6 +89,7 @@ const SUITES = [
   'manual-transaction-amount-e2e',
   'topup-idempotency-e2e',
   'payment-provider-isolation-e2e',
+  'paypal-integration-e2e',
   'admin-provenance-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');

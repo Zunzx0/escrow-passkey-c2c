@@ -48,7 +48,8 @@ function createCaptureCoordinator({store, provider, settle, now=Date.now, leaseM
       return {status:'PENDING',outcome:posted||claim.mustVerifyFirst?'RECONCILING':'AWAITING_APPROVAL'};
     } catch (error) {
       // Unknown after POST stays pending; never infer FAILED from network error or timeout.
-      await store.finishCaptureAttempt(paymentRequestId,claimId,{state:'UNKNOWN',errorCode:error.code||'PAYPAL_CAPTURE_UNRESOLVED'});
+      try { await store.finishCaptureAttempt(paymentRequestId,claimId,{state:'UNKNOWN',errorCode:error.code||'PAYPAL_CAPTURE_UNRESOLVED'}); }
+      catch(cleanupError) { console.error('[paypal-cleanup] failed to persist UNKNOWN',cleanupError.code||'CLEANUP_ERROR','original',error.code||'PAYPAL_CAPTURE_UNRESOLVED'); }
       throw error;
     }
   }});

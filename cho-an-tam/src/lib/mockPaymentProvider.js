@@ -244,7 +244,7 @@ async function deliverWebhook(callback) {
 }
 
 function isCheckoutEnabled() {
-  return process.env.MOCK_PROVIDER_CHECKOUT !== '0';
+  return process.env.MOCK_PROVIDER_CHECKOUT !== '0' && process.env.PAYPAL_SANDBOX_ENABLED !== '1';
 }
 
 module.exports = {

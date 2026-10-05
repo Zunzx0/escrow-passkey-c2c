@@ -43,7 +43,9 @@
     "test:count-marks": "node test/count-marks-unit.js",
     "test:provider-isolation": "node --env-file=.env.test test/payment-provider-isolation-e2e.js",
     "test:paypal-store": "node test/paypal-store-concurrency-e2e.js",
-    "test:paypal-migration": "node test/paypal-binding-migration-e2e.js"
+    "test:paypal-migration": "node test/paypal-binding-migration-e2e.js",
+    "test:paypal-integration": "node --env-file=.env.test scripts/run-suite.js --only=paypal-integration-e2e",
+    "test:paypal-modules": "node --test test/paypal-sandbox-adapter.test.js test/paypal-sandbox-service.test.js test/paypal-capture-coordinator.test.js"
   },
   "keywords": [],
   "author": "",
