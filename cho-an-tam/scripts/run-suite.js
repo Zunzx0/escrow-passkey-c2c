@@ -62,6 +62,20 @@ const keepDb = args.includes('--keep-db');
 const onlyArg = args.find((a) => a.startsWith('--only='));
 const only = onlyArg ? onlyArg.slice('--only='.length).split(',') : null;
 
+// Bài kiểm thử đầy đủ dựng một máy chủ test có cả giao diện tĩnh và cổng thanh toán
+// mô phỏng. Railway API có thể dùng SERVE_FRONTEND=0, nhưng sao chép giá trị đó
+// sang .env.test sẽ làm hardening-e2e báo thiếu robots.txt/security.txt. Dừng sớm
+// với lời giải thích rõ ràng, trước khi xoá DB test và chạy các bộ mất nhiều phút.
+if (!only) {
+  const disabled = [
+    ['SERVE_FRONTEND', 'robots.txt/security.txt và các bài kiểm thử giao diện'],
+    ['MOCK_PROVIDER_CHECKOUT', 'các bài kiểm thử thanh toán mô phỏng'],
+  ].filter(([name]) => process.env[name] === '0');
+  if (disabled.length) {
+    fail(`Bộ test đầy đủ cần bật ${disabled.map(([name, purpose]) => `${name}=1 (${purpose})`).join(', ')} trong .env.test. SERVE_FRONTEND=0 chỉ dành cho Railway API; giao diện production do Vercel phục vụ.`);
+  }
+}
+
 // Thứ tự: bộ không cần máy chủ trước, rồi lõi -> lớp mua bán -> an toàn -> các nhánh mới.
 const SUITES = [
   'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
@@ -72,6 +86,7 @@ const SUITES = [
   'passkey-registration-race-e2e',
   'topup-concurrency-e2e',
   'topup-idempotency-e2e',
+  'admin-provenance-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');
 

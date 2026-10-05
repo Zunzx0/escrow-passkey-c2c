@@ -327,6 +327,9 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  // Nguồn gốc quyền quản trị: bảng + backfill một lần, trigger ở mọi lần khởi động.
+  // Đặt ở đây chứ không ở schema.sql để backfill chỉ chạy đúng lúc bảng được tạo lần đầu.
+  require('./lib/adminProvenance').migrateSqlite(db);
 
   // Seed: chỉ ví SYSTEM_ESCROW duy nhất (lý do không seed Admin: xem ghi chú cuối tệp).
   const existingEscrow = db.prepare("SELECT id FROM wallets WHERE wallet_type = 'SYSTEM_ESCROW'").get();
@@ -350,8 +353,9 @@ function openSqlite() {
 // không bao giờ sửa phần tử đã chạy trên cơ sở dữ liệu thật.
 const PG_MIGRATIONS = [
   { version: 1, name: 'initial-schema', file: 'schema.pg.sql' },
-  // Số 3 (không phải 2): số 2 dành cho migration admin-provenance ở một nhánh khác. Hai migration
-  // độc lập nhau; runner bỏ qua số đã áp và chạy theo thứ tự mảng, nên gộp nhánh nào trước cũng được.
+  // Số 2: admin-provenance (xem lib/adminProvenance.js). Số 3: yêu cầu nạp tiền chống lặp.
+  // Runner áp đúng số chưa có, theo thứ tự mảng; không đánh số lại migration đã áp.
+  { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
   { version: 3, name: 'topup-request-idempotency', file: 'schema.pg.003-topup-idempotency.sql' },
 ];
 
