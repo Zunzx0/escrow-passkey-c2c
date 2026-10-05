@@ -119,6 +119,11 @@ nên bộ test không thể vô tình ghi vào cơ sở dữ liệu thực nghi�
 **từ chối khởi động** nếu `FAULT_INJECT` đang bật, và tự kiểm mã có đúng bản đã đóng băng không
 (mục 11). Mỗi môi trường có kho trạng thái Mock Provider riêng (`<tên DB>.mock-provider.db`).
 
+Trước khi chạy bộ test đầy đủ, đặt `SERVE_FRONTEND=1` và `MOCK_PROVIDER_CHECKOUT=1` trong
+`.env.test`. Bộ test kiểm tra cả `robots.txt`, `security.txt` và thanh toán mô phỏng; nếu tắt
+một trong hai tính năng, lệnh sẽ báo lỗi cấu hình ngay trước khi bắt đầu. Cấu hình Railway API
+`SERVE_FRONTEND=0` vẫn đúng vì giao diện production được Vercel phục vụ riêng.
+
 ---
 
 ## 3. Kịch bản demo (khoảng 5 phút)
