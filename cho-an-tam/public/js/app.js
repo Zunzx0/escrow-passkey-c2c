@@ -32,7 +32,6 @@ const App = (() => {
     homeLimit: HOME_PAGE_SIZE,  // số tin đang hiện ở trang chủ
     homeListings: [],           // kết quả tìm gần nhất, để "Xem thêm" không phải gọi lại API
     orderTab: null,             // 'sell' | 'buy' — chỉ người bán có hai tab
-    topupMethod: 'CARD',        // phương thức nạp tiền (mô phỏng) đang chọn
     adminTab: 'disputes',       // 'disputes' | 'seller-requests' | 'users' | 'invariants' | 'security-events'
     secEventsType: '',          // bộ lọc loại sự kiện của tab "Sự kiện bảo mật"
     orderFilter: 'active',      // 'active' | 'all' | 'done'
@@ -180,26 +179,137 @@ const App = (() => {
     return refreshing;
   }
 
+  // ---------------------------------------------------------------------
+  // Thông báo lỗi API
+  //
+  // Người dùng chỉ được thấy câu tiếng Việt do giao diện hoặc máy chủ chủ động viết. Không bao
+  // giờ hiện mã lỗi thô, stack trace hay nội dung phản hồi của lớp trung gian (Vercel, Railway,
+  // proxy): các lớp đó có thể trả HTML hoặc JSON không theo định dạng của sàn.
+  // ---------------------------------------------------------------------
+
+  const UNKNOWN_OUTCOME_MSG =
+    'Chưa nhận được phản hồi từ máy chủ nên chưa rõ thao tác đã được thực hiện hay chưa. ' +
+    'Đừng thử lại ngay: hãy kiểm tra lại trạng thái (đơn hàng, ví, lịch sử nạp tiền) rồi mới quyết định.';
+
+  const API_ERROR_MESSAGES = {
+    INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
+    // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
+    // của máy chủ ("… từ X đến Y") thay vì ghi cứng một con số ở đây.
+    AMOUNT_OUT_OF_RANGE: (data) => {
+      const m = /từ\s+(.+?)\s+đến\s+(.+?)\s*$/.exec(String((data && data.message) || ''));
+      return m ? `Số tiền ngoài phạm vi cho phép: phải từ ${m[1]} đến ${m[2]}.` : 'Số tiền ngoài phạm vi cho phép.';
+    },
+    LISTING_STATE_CONFLICT: () =>
+      'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.',
+    // 401 này KHÔNG phải hết phiên: phiếu uỷ quyền Passkey sai, hết hạn hoặc đã dùng. Người dùng vẫn
+    // đang đăng nhập và chỉ cần xác thực lại.
+    REAUTH_REQUIRED: () =>
+      'Thao tác này cần xác thực lại bằng Passkey. Phiếu xác thực đã hết hạn hoặc đã được dùng; bạn vẫn đang đăng nhập — ' +
+      'hãy bắt đầu lại thao tác và xác thực Passkey khi được yêu cầu.',
+    DISPUTE_NOT_OPEN: () =>
+      'Tranh chấp này không còn ở trạng thái chờ xử lý — có thể đã được xử lý ở nơi khác. Không có khoản tiền nào được chuyển thêm; ' +
+      'danh sách sẽ được tải lại.',
+  };
+
+  /** Câu của máy chủ chỉ được dùng khi đúng định dạng lỗi của sàn và trông như một câu người đọc được. */
+  function safeServerMessage(data) {
+    const code = data && data.error;
+    const msg = data && data.message;
+    if (typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{2,60}$/.test(code)) return null;
+    if (typeof msg !== 'string' || !msg.trim() || msg.length > 300) return null;
+    if (/[<>]/.test(msg) || /\bat\s+\S+\s*\(.*:\d+/.test(msg)) return null; // HTML hoặc dấu vết stack
+    return msg.trim();
+  }
+
+  function apiErrorMessage(status, data) {
+    const body = data && typeof data === 'object' ? data : {};
+    const known = API_ERROR_MESSAGES[body.error];
+    if (known) return known(body);
+
+    if (status >= 500) {
+      const ref = typeof body.requestId === 'string' && /^[0-9a-f-]{8,40}$/i.test(body.requestId)
+        ? ` Mã tham chiếu: ${body.requestId.slice(0, 8)}.` : '';
+      return ([502, 503, 504].includes(status)
+        ? 'Máy chủ tạm thời không phản hồi. Hãy thử lại sau ít phút.'
+        : 'Hệ thống gặp lỗi khi xử lý yêu cầu. Hãy thử lại sau ít phút.')
+        + ' Nếu bạn vừa gửi một thao tác liên quan đến tiền hoặc đơn hàng, hãy kiểm tra lại trạng thái trước khi làm lại.' + ref;
+    }
+
+    const own = safeServerMessage(body);
+    if (own) return own;
+    switch (status) {
+      case 400: return 'Yêu cầu không hợp lệ. Hãy kiểm tra lại thông tin đã nhập.';
+      case 401: return 'Bạn cần đăng nhập để thực hiện thao tác này.';
+      case 403: return 'Bạn không có quyền thực hiện thao tác này.';
+      case 404: return 'Không tìm thấy nội dung được yêu cầu.';
+      case 409: return 'Trạng thái đã thay đổi so với lúc bạn xem. Hãy tải lại trang rồi thử lại.';
+      case 429: return 'Bạn thao tác quá nhanh. Hãy chờ một lúc rồi thử lại.';
+      default: return `Yêu cầu không thực hiện được (mã HTTP ${status}). Hãy thử lại sau.`;
+    }
+  }
+
+  /**
+   * Lỗi mất kết nối hoặc quá thời gian chờ. Với thao tác ghi, yêu cầu có thể đã tới máy chủ và đã
+   * được xử lý: KHÔNG được nói "thất bại" và KHÔNG được tự coi là thành công — chỉ báo chưa rõ
+   * và yêu cầu kiểm tra lại trạng thái. `unknownOutcome` để nơi gọi tự kiểm tra lại giúp.
+   */
+  function connectionError(method, timedOut) {
+    const writes = method !== 'GET';
+    const err = new Error(writes
+      ? UNKNOWN_OUTCOME_MSG
+      : (timedOut ? 'Máy chủ phản hồi quá lâu. Hãy kiểm tra kết nối rồi tải lại.' : 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng rồi thử lại.'));
+    err.code = timedOut ? 'TIMEOUT' : 'NETWORK_ERROR';
+    err.unknownOutcome = writes;
+    return err;
+  }
+
+  // Quá thời gian chờ coi như mất kết nối. Mặc định 30 giây; window.ENCLAVE_API_TIMEOUT_MS cho phép
+  // bộ kiểm thử UI rút ngắn.
+  function apiTimeoutMs() {
+    const v = Number(window.ENCLAVE_API_TIMEOUT_MS);
+    return v > 0 ? v : 30000;
+  }
+
+  /** fetch có hạn chờ; đọc cả phần thân trong cùng hạn đó để một thân bị cắt dở không thành "thành công rỗng". */
+  async function fetchJson(url, options) {
+    const method = (options && options.method) || 'GET';
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    let timedOut = false;
+    const timer = ctl ? setTimeout(() => { timedOut = true; ctl.abort(); }, apiTimeoutMs()) : null;
+    try {
+      const res = await fetch(url, ctl ? { ...options, signal: ctl.signal } : options);
+      const data = await res.json().catch(() => null);
+      if (timedOut) throw new Error('timeout');
+      if (res.ok && (!data || typeof data !== 'object' || Array.isArray(data))) {
+        throw new Error('Invalid JSON response');
+      }
+      return { res, data: data && typeof data === 'object' ? data : {} };
+    } catch (e) {
+      throw connectionError(method, timedOut);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   async function api(path, { method = 'GET', body } = {}, retried = false) {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
 
-    const res = await fetch(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
-    const data = await res.json().catch(() => ({}));
+    const { res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
 
     if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
       if (!retried && await refreshSession()) return api(path, { method, body }, true);
       clearSession();
       renderChrome();
       route();
-      throw new Error('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại');
+      const expired = new Error('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại');
+      expired.code = 'UNAUTHENTICATED';
+      expired.status = 401;
+      throw expired;
     }
     if (!res.ok) {
-      const message = data.error === 'LISTING_STATE_CONFLICT'
-        ? 'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.'
-        : (data.message || data.error || `Lỗi HTTP ${res.status}`);
-      const err = new Error(message);
+      const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
       err.status = res.status;
       throw err;
@@ -229,6 +339,12 @@ const App = (() => {
       return result;
     } catch (e) {
       toast(e.message, 'err');
+      // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
+      // một thao tác sẽ lại bị từ chối.
+      if (e && e.code === 'DISPUTE_NOT_OPEN') {
+        closeModal();
+        Promise.resolve(route()).catch(() => { /* lỗi tải lại đã được báo ở nơi khác */ });
+      }
       throw e;
     } finally {
       state.busy.delete(key);
@@ -319,8 +435,11 @@ const App = (() => {
   // dismissible=false dùng cho màn hình hoàn tất thiết lập tài khoản: bỏ nút đóng và bỏ
   // việc bấm ra ngoài để tắt, vì phiên lúc đó chưa gọi được chức năng nào — đóng modal chỉ
   // dẫn người dùng tới một màn hình trống rồi lỗi 403.
+  let modalDismissible = true;
+
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
     closeModal();
+    modalDismissible = dismissible;
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
@@ -338,7 +457,11 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() { $('#modalRoot').innerHTML = ''; }
+  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; }
+
+  // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
+  // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
+  function dismissModal() { if (modalDismissible) closeModal(); }
 
   // =====================================================================
   // Phiên đăng nhập
@@ -1394,7 +1517,6 @@ const App = (() => {
           <b>${esc(name)}</b>
           <div class="small muted">${publicId ? accountLabel(publicId) : ''}
             ${seller ? `${publicId ? ' · ' : ''}Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
-          <div class="small text-trust mt-2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
         </div>
       </div>
       ${seller ? `
@@ -2086,6 +2208,7 @@ const App = (() => {
 
   async function doDeleteListing(id, btn) {
     const r = await guard('del:' + id, btn, () => api('/listings/' + encodeURIComponent(id), { method: 'DELETE' }));
+    if (!r) return; // lần bấm lặp khi yêu cầu đầu còn chạy: không báo thành công thay cho nó
     closeModal();
     toast(r && r.hidden ? 'Đã ẩn tin vì tin đã có lịch sử giao dịch.' : 'Đã gỡ tin.', 'ok');
     route();
@@ -2098,7 +2221,7 @@ const App = (() => {
 
   const ENTRY_LABEL = {
     DEMO_TOPUP: 'Số dư khởi tạo (demo)',
-    TOPUP_CREDIT: 'Nạp tiền qua cổng thanh toán',
+    TOPUP_CREDIT: 'Nạp tiền qua cổng mô phỏng',
     ESCROW_LOCK_DEBIT: 'Thanh toán đơn — chuyển vào ký quỹ',
     ESCROW_LOCK_CREDIT: 'Ký quỹ nhận tiền',
     ESCROW_RELEASE_DEBIT: 'Ký quỹ giải ngân',
@@ -2106,12 +2229,6 @@ const App = (() => {
     ESCROW_REFUND_DEBIT: 'Ký quỹ hoàn tiền',
     ESCROW_REFUND_CREDIT: 'Nhận hoàn tiền',
   };
-
-  const PAY_METHODS = [
-    { key: 'CARD', icon: 'credit-card', label: 'Thẻ ATM nội địa', note: 'Mô phỏng' },
-    { key: 'EWALLET', icon: 'smartphone', label: 'Ví điện tử', note: 'Mô phỏng' },
-    { key: 'BANK', icon: 'landmark', label: 'Chuyển khoản ngân hàng', note: 'Mô phỏng' },
-  ];
 
   async function viewWallet() {
     if (!state.user) return requireLogin('Đăng nhập để xem ví của bạn.');
@@ -2190,7 +2307,6 @@ const App = (() => {
   const TOPUP_PRESETS = [100000, 200000, 500000, 1000000, 2000000];
 
   function topupCard() {
-    const method = state.topupMethod || 'CARD';
     return `
       <div class="card">
         <div class="card-head"><h2>Nạp tiền vào ví</h2><span class="tag tag-navy">${ico('shield-check', 12)} Cổng thanh toán mô phỏng</span></div>
@@ -2201,17 +2317,10 @@ const App = (() => {
               `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
             <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
           </div>
-          <div class="field">
-            <label>Phương thức thanh toán</label>
-            <div class="radio-cards">
-              ${PAY_METHODS.map((m) => `
-                <label class="radio-card">
-                  <input type="radio" name="payMethod" value="${m.key}" ${method === m.key ? 'checked' : ''}>
-                  ${ico(m.icon, 20)}
-                  <span>${esc(m.label)}<small>${esc(m.note)}</small></span>
-                </label>`).join('')}
-            </div>
-            <span class="hint">Cả ba phương thức đều đi qua cùng một cổng thanh toán mô phỏng — đồ án không nối cổng thật.</span>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Đây là <b>thanh toán mô phỏng</b>: không dùng thẻ, ví điện tử hay tài khoản ngân hàng thật và không chuyển
+              tiền thật. Hệ thống chưa nối PayPal hay cổng thanh toán thật nào.</span>
           </div>
           <div class="note">
             ${ico('info', 18)}
@@ -2258,16 +2367,16 @@ const App = (() => {
     // Cổng giả lập chỉ cho đúng người tạo yêu cầu nạp tiền thao tác, nên phải kèm phiên.
     const headers = body !== undefined ? { 'Content-Type': 'application/json' } : {};
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-    const res = await fetch(API_BASE + '/mock-provider' + path, {
+    const { res, data } = await fetchJson(API_BASE + '/mock-provider' + path, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    const data = await res.json().catch(() => ({}));
     if (res.status === 401 && !retried && await refreshSession()) return providerApi(path, { method, body }, true);
     if (!res.ok) {
-      const err = new Error(data.message || data.error || `Lỗi HTTP ${res.status}`);
+      const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
+      err.status = res.status;
       throw err;
     }
     return data;
@@ -2276,9 +2385,15 @@ const App = (() => {
   async function createTopup(btn) {
     const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
     if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
-    const picked = document.querySelector('input[name="payMethod"]:checked');
-    state.topupMethod = picked ? picked.value : 'CARD';
-    const pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
+    let pr;
+    try {
+      pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
+    } catch (e) {
+      // Không rõ yêu cầu đã được tạo hay chưa: nạp lại danh sách để người dùng thấy sự thật thay vì nạp trùng.
+      if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      return;
+    }
+    if (!pr) return; // lần bấm lặp khi yêu cầu đầu còn chạy
     await loadTopupHistory();
     await openCheckout(pr.id, pr.providerRef);
   }
@@ -2291,7 +2406,6 @@ const App = (() => {
       return toast(e.code === 'NOT_FOUND' ? 'Cổng thanh toán mô phỏng đang tắt (MOCK_PROVIDER_CHECKOUT=0).' : e.message, 'err');
     }
     const settled = page.status !== 'PENDING';
-    const m = PAY_METHODS.find((x) => x.key === (state.topupMethod || 'CARD')) || PAY_METHODS[0];
     openModal({
       title: 'Cổng thanh toán (mô phỏng)',
       body: `
@@ -2300,7 +2414,7 @@ const App = (() => {
           <span>Đây là trang của <b>cổng thanh toán</b>, không phải của sàn. Trong demo, bạn chọn kết quả thanh toán;
             cổng sẽ gửi webhook đã ký về máy chủ của sàn.</span>
         </div>
-        <div class="price-row"><span>Phương thức</span><span>${ico(m.icon, 16)} ${esc(m.label)}</span></div>
+        <div class="price-row"><span>Phương thức</span><span>${ico('shield-check', 16)} Thanh toán mô phỏng</span></div>
         <div class="price-row"><span>Mã giao dịch tại cổng</span><span class="mono">${esc(shortId(page.providerRef))}</span></div>
         <div class="price-row total"><span>Số tiền thanh toán</span><span class="val">${money(page.amount)}</span></div>
         ${settled ? `<div class="note note-success mt-4">${ico('circle-check', 18)}<span>Cổng thanh toán
@@ -2322,9 +2436,18 @@ const App = (() => {
   async function payCheckout(el) {
     const { id, ref, outcome } = el.dataset;
     const deliverWebhook = el.dataset.deliver === '1';
-    await guard('checkout:' + ref, el, () => providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
-      method: 'POST', body: { outcome, deliverWebhook },
-    }));
+    try {
+      await guard('checkout:' + ref, el, () => providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
+        method: 'POST', body: { outcome, deliverWebhook },
+      }));
+    } catch (e) {
+      // Mất kết nối giữa chừng: cổng có thể đã ghi nhận. Hỏi lại máy chủ — không coi là thất bại, không coi là thành công.
+      if (e && e.unknownOutcome) {
+        closeModal();
+        await waitForTopupResult(id);
+      }
+      return;
+    }
     closeModal();
     await waitForTopupResult(id);
   }
@@ -2343,6 +2466,8 @@ const App = (() => {
       await refreshWallet();
     } else if (p && p.status === 'FAILED') {
       toast('Cổng thanh toán báo thất bại. Ví của bạn không thay đổi.', 'err');
+    } else if (!p) {
+      toast('Chưa kiểm tra được trạng thái do lỗi kết nối. Hãy mở lại Lịch sử nạp tiền sau ít phút; số dư chỉ thay đổi khi có xác nhận.');
     } else {
       toast('Chưa có xác nhận từ cổng thanh toán. Hệ thống sẽ tự đối soát; số dư chỉ thay đổi khi có kết quả.');
     }
@@ -2800,10 +2925,16 @@ const App = (() => {
     route();
   }
 
+  // Tranh chấp của lần tải gần nhất, để bước xem lại đọc đúng dữ liệu máy chủ đã trả thay vì
+  // tin vào chữ trên nút.
+  const disputeCache = new Map();
+
   async function loadDisputes() {
     const { disputes } = await api('/admin/disputes');
     const list = $('#adminPanel');
     if (!list) return;
+    disputeCache.clear();
+    disputes.forEach((d) => disputeCache.set(d.id, d));
 
     if (disputes.length === 0) {
       list.innerHTML = empty('shield-check', 'Không có tranh chấp nào', 'Mọi đơn hàng đang diễn ra suôn sẻ.');
@@ -2861,6 +2992,39 @@ const App = (() => {
    * không dùng được cho "giải ngân". Nếu thiếu ràng buộc này thì lần xác thực lại chỉ chứng
    * minh quản trị viên có mặt, chứ không chứng minh đã chấp thuận điều gì.
    */
+  /**
+   * Bước xem lại TRƯỚC khi xác thực Passkey: nói rõ hành động, người nhận tiền và số tiền để
+   * quản trị viên không bấm nhầm hai nút liền kề. Xác nhận ở đây chỉ mở đường tới bước
+   * Passkey; phiếu uỷ quyền và quyền của máy chủ không đổi.
+   */
+  function openDisputeConfirm(kind, disputeId) {
+    const d = disputeCache.get(disputeId);
+    if (!d) return toast('Không tìm thấy tranh chấp — hãy tải lại trang.', 'err');
+    const t = d.transaction || {};
+    const refund = kind === 'refund';
+    const recipient = refund ? 'Người mua' : 'Người bán';
+    const recipientName = refund ? t.buyerName : t.sellerName;
+    openModal({
+      title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: giải ngân cho người bán',
+      body: `
+        <div class="stack">
+          <div class="note note-warning">
+            ${ico('triangle-alert', 18)}
+            <span>Quyết định này <b>không thể hoàn tác</b>: tiền rời ví ký quỹ và được ghi vĩnh viễn vào nhật ký của đơn.</span>
+          </div>
+          <div class="price-row"><span>Đơn hàng</span><span>${esc(t.itemName || 'Đơn hàng')}</span></div>
+          <div class="price-row"><span>Hành động</span><span><b>${refund ? 'Hoàn toàn bộ tiền' : 'Chuyển toàn bộ tiền'}</b></span></div>
+          <div class="price-row"><span>${recipient} nhận tiền</span><span><b>${esc(recipientName || '—')}</b></span></div>
+          <div class="price-row total"><span>Số tiền</span><span class="val">${money(t.amount || 0)}</span></div>
+          <p class="small muted m-0">Sau khi bấm xác nhận, bạn sẽ được yêu cầu xác thực lại bằng Passkey.</p>
+        </div>`,
+      footer: `
+        <button class="btn" data-act="modal-close">Huỷ</button>
+        <button class="btn btn-primary" data-act="admin-confirm" data-kind="${refund ? 'refund' : 'release'}"
+          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận giải ngân'} và dùng Passkey</button>`,
+    });
+  }
+
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
     await guard('adm:' + disputeId, btn, async () => {
@@ -2876,6 +3040,7 @@ const App = (() => {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
       });
     }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
+    closeModal();
     route();
   }
 
@@ -3105,7 +3270,7 @@ const App = (() => {
     'add-device': (el) => addDevice(el),
     'del-device': (el) => deleteDevice(el.dataset.id, el),
     'logout': () => logout(),
-    'modal-close': () => closeModal(),
+    'modal-close': () => dismissModal(),
     'reload': () => route(),
     'open-sell': () => openSell(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
@@ -3138,8 +3303,9 @@ const App = (() => {
     'do-delete-listing': (el) => doDeleteListing(el.dataset.id, el),
     'seed-demo': (el) => seedDemo(el),
 
-    'admin-refund': (el) => adminResolve('refund', el.dataset.id, el),
-    'admin-release': (el) => adminResolve('release', el.dataset.id, el),
+    'admin-refund': (el) => openDisputeConfirm('refund', el.dataset.id),
+    'admin-release': (el) => openDisputeConfirm('release', el.dataset.id),
+    'admin-confirm': (el) => adminResolve(el.dataset.kind, el.dataset.id, el),
 
     'audit-load': () => loadAudit($('#auditTxId').value.trim()),
     'audit-verify': (el) => verifyAudit(el),
@@ -3159,7 +3325,7 @@ const App = (() => {
     const act = el.dataset.act;
 
     if (act === 'modal-backdrop') {
-      if (e.target === el) closeModal();
+      if (e.target === el) dismissModal();
       return;
     }
     const handler = HANDLERS[act];
@@ -3174,7 +3340,7 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
     window.addEventListener('hashchange', route);
     const topSearch = $('#topSearch');
     if (topSearch) topSearch.addEventListener('submit', (e) => {

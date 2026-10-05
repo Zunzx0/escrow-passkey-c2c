@@ -195,9 +195,21 @@ function openSqlite() {
         ['reconcile_attempts', 'INTEGER NOT NULL DEFAULT 0'],
         ['last_reconciled_at', 'TEXT'],
         ['last_reconcile_error', 'TEXT'],
+        // Khoá chống lặp và trạng thái bước gửi sang provider (xem schema.sql). Yêu cầu cũ mặc định
+        // SUBMITTED; nếu thật ra provider không có bản ghi, worker đối soát tự phát hiện và gửi lại.
+        ['client_request_id', 'TEXT'],
+        ['submission_status', "TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (submission_status IN ('SUBMITTING','SUBMITTED','SUBMIT_FAILED'))"],
+        ['submit_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+        ['last_submit_error', 'TEXT'],
+        ['submit_claim', 'TEXT'],
+        ['submit_claimed_at', 'TEXT'],
       ].filter(([name]) => !paymentCols.has(name));
       for (const [name, type] of add) db.exec(`ALTER TABLE payment_requests ADD COLUMN ${name} ${type}`);
       if (add.length) console.log(`[migrate] payment_requests: đã thêm cột ${add.map(([n]) => n).join(', ')}.`);
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_requests_client_request
+         ON payment_requests(user_id, client_request_id) WHERE client_request_id IS NOT NULL`
+      );
     }
 
     // Phiếu uỷ quyền gắn với phiên đã xác thực lại; cột cho phép NULL nên thêm bằng ALTER TABLE.
@@ -343,7 +355,10 @@ function openSqlite() {
 // không bao giờ sửa phần tử đã chạy trên cơ sở dữ liệu thật.
 const PG_MIGRATIONS = [
   { version: 1, name: 'initial-schema', file: 'schema.pg.sql' },
+  // Số 2: admin-provenance (xem lib/adminProvenance.js). Số 3: yêu cầu nạp tiền chống lặp.
+  // Runner áp đúng số chưa có, theo thứ tự mảng; không đánh số lại migration đã áp.
   { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
+  { version: 3, name: 'topup-request-idempotency', file: 'schema.pg.003-topup-idempotency.sql' },
 ];
 
 function installPgTypeParsers(pg) {

@@ -14,6 +14,7 @@
 //   6. Ghi reports/<mốc thời gian>/summary.json + summary.md; mã thoát khác 0 nếu có bộ hỏng.
 const fs = require('fs');
 const path = require('path');
+const { countMarks } = require('./count-marks');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -78,13 +79,15 @@ if (!only) {
 
 // Thứ tự: bộ không cần máy chủ trước, rồi lõi -> lớp mua bán -> an toàn -> các nhánh mới.
 const SUITES = [
-  'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
+  'count-marks-unit', 'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
   'payment-e2e', 'reconcile-e2e', 'counter-e2e', 'cleanup-e2e', 'notification-e2e', 'checkout-e2e',
   'dispute-race-e2e', 'security-report-regression-e2e',
   'username-enumeration-e2e',
   'listing-lifecycle-e2e',
   'passkey-registration-race-e2e',
   'topup-concurrency-e2e',
+  'manual-transaction-amount-e2e',
+  'topup-idempotency-e2e',
   'admin-provenance-e2e',
 ].filter((s) => !only || only.includes(s));
 const RUN_ROLLBACK = !only || only.includes('rollback-e2e');
@@ -141,13 +144,6 @@ function runNode(script, extraEnv = {}) {
     child.stderr.on('data', (d) => { out += d; });
     child.on('close', (code) => resolve({ code, out, ms: Date.now() - started }));
   });
-}
-
-function countMarks(out) {
-  return {
-    pass: (out.match(/✅/g) || []).length,
-    fail: (out.match(/❌/g) || []).length,
-  };
 }
 
 async function main() {
