@@ -55,6 +55,7 @@ const { logSecurityEvent, EVENTS } = require('../lib/securityEvents');
 const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounter');
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const { isProvenAdmin } = require('../lib/adminProvenance');
+const { normalizeUsername, isValidUsername, USERNAME_HINT } = require('../lib/username');
 
 const router = express.Router();
 
@@ -145,12 +146,12 @@ router.post('/register/account', authLimiter, registrationUsernameLimiter, async
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu username, displayName hoặc password');
     }
 
-    const cleanUsername = String(username).trim().toLowerCase();
-    if (!/^[a-z0-9._-]{3,32}$/.test(cleanUsername)) {
+    const cleanUsername = normalizeUsername(username);
+    if (!isValidUsername(cleanUsername)) {
       throw new AppError(
         400,
         'VALIDATION_ERROR',
-        'Tên đăng nhập dài 3–32 ký tự, chỉ gồm chữ thường, số và . _ -'
+        USERNAME_HINT
       );
     }
     const cleanDisplayName = String(displayName).trim().slice(0, 80);

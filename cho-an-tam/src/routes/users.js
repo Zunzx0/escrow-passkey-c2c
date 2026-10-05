@@ -3,6 +3,7 @@ const express = require('express');
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth, requireEnrollAuth, optionalAuth, signAccessToken } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
+const { publicUsername } = require('../lib/username');
 const { ACTIONS, requireGrant, markGrantUsed } = require('../lib/reauth');
 const { revokeAllSessions } = require('../lib/session');
 const { hashPassword, verifyPassword, assertPasswordPolicy } = require('../lib/password');
@@ -236,7 +237,7 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 
     res.json({
       id: user.id,
-      username: user.username,
+      username: publicUsername(user.username),
       displayName: user.display_name,
       role: user.role,
       joinedAt: user.created_at,

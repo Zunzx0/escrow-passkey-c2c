@@ -28,6 +28,7 @@
 const { db, uuid, nowIso } = require('./../db');
 const { hashPassword, generateTemporaryPassword, assertPasswordPolicy } = require('./password');
 const { recordBootstrapProvenance } = require('./adminProvenance');
+const { normalizeUsername, isValidUsername, USERNAME_HINT } = require('./username');
 
 class BootstrapError extends Error {
   constructor(code, message) {
@@ -42,12 +43,12 @@ class BootstrapError extends Error {
  * @returns {Promise<{ user: object, temporaryPassword: string, created: boolean }>}
  */
 async function createBootstrapAdmin({ username: usernameRaw, displayName, temporaryPassword, source = 'BOOTSTRAP_CLI' } = {}) {
-  const username = String(usernameRaw || '').trim().toLowerCase();
+  const username = normalizeUsername(usernameRaw);
   if (!username) throw new BootstrapError('MISSING_USERNAME', 'Thiếu tên đăng nhập.');
-  if (!/^[a-z0-9._-]{3,32}$/.test(username)) {
+  if (!isValidUsername(username)) {
     throw new BootstrapError(
       'INVALID_USERNAME',
-      'Tên đăng nhập dài 3–32 ký tự, chỉ gồm chữ thường, số và . _ -'
+      USERNAME_HINT
     );
   }
 
