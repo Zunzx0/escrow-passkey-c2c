@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const { generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
 
 const { db, uuid, nowIso } = require('../db');
-const { requireAuth, requireRole } = require('../lib/auth');
+const { requireAuth } = require('../lib/auth');
 const { appendAuditLog, verifyChain } = require('../lib/hash');
 const { AppError } = require('../lib/errors');
 const { serializeSellerRequest } = require('./users');
@@ -22,6 +22,7 @@ const { logSecurityEvent, listSecurityEvents, EVENTS } = require('../lib/securit
 const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounter');
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const { onDisputeResolved } = require('../lib/notifications');
+const { isProvenAdmin, UNVERIFIED_ADMIN_ROLE } = require('../lib/adminProvenance');
 const { settleListing } = require('../lib/listingLifecycle');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
@@ -42,12 +43,23 @@ const {
 
 const router = express.Router();
 
-// ROLE không phải chứng cứ duy nhất về nguồn gốc tài khoản quản trị. Buyer/Seller luôn có
-// ví USER, còn tài khoản ADMIN chỉ được tạo bằng bootstrap và không có ví. Nếu một lỗi ở
-// nơi khác nâng role của tài khoản mua/bán thành ADMIN, ví cũ vẫn tồn tại và mọi tuyến
-// quản trị phải đóng lại. Đây là hàng rào độc lập với role và Passkey của chính kẻ tấn công.
+// ROLE không phải chứng cứ duy nhất về nguồn gốc tài khoản quản trị. Ba điều kiện độc lập:
+//   1. users.role = 'ADMIN';
+//   2. có dấu nguồn gốc trong admin_provenance (lib/adminProvenance.js) — chỉ bootstrap sinh ra,
+//      nên tài khoản bị sửa role mà CHƯA có ví (lọt qua điều kiện 3) vẫn bị chặn ở đây;
+//   3. không có ví USER — Buyer/Seller luôn có ví từ lúc kích hoạt (PR #13).
+// lib/auth.js đã đổi role của ADMIN thiếu nguồn gốc thành role nội bộ; điều kiện 2 được kiểm lại
+// ở đây để router quản trị tự đứng vững, không phụ thuộc hoàn toàn vào lớp xác thực.
+// Người dùng thường (BUYER/SELLER) vẫn nhận 403 FORBIDDEN như trước; ADMIN_IDENTITY_INVALID chỉ dành
+// cho tài khoản mang role ADMIN mà không chứng minh được nguồn gốc.
 async function requireAdminIdentity(req, res, next) {
   try {
+    const invalid = () => new AppError(403, 'ADMIN_IDENTITY_INVALID', 'Tài khoản này không có nguồn gốc quản trị hợp lệ.');
+    if (req.user.role === UNVERIFIED_ADMIN_ROLE) throw invalid();
+    if (req.user.role !== 'ADMIN') {
+      return res.status(403).json({ error: 'FORBIDDEN', message: 'Không đủ quyền thực hiện thao tác này' });
+    }
+    if (!(await isProvenAdmin(db, req.user.id))) throw invalid();
     const wallet = await db.prepare("SELECT 1 FROM wallets WHERE user_id = ? AND wallet_type = 'USER' LIMIT 1").get(req.user.id);
     if (wallet) {
       throw new AppError(403, 'ADMIN_IDENTITY_INVALID', 'Tài khoản có ví người dùng không được thực hiện chức năng quản trị.');
@@ -58,7 +70,7 @@ async function requireAdminIdentity(req, res, next) {
   }
 }
 
-router.use(requireAuth, requireRole('ADMIN'), requireAdminIdentity);
+router.use(requireAuth, requireAdminIdentity);
 
 function serializeTxn(t) {
   if (!t) return null;

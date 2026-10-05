@@ -180,7 +180,11 @@ async function bootstrapAdminFromEnv() {
   const password = process.env.ADMIN_BOOTSTRAP_PASSWORD;
   if (!username || !password) return;
 
-  const alreadyHasAdmin = await db.prepare(`SELECT 1 FROM users WHERE role = 'ADMIN' LIMIT 1`).get();
+  // Chỉ tính ADMIN có dấu nguồn gốc (lib/adminProvenance.js): một tài khoản bị sửa role='ADMIN'
+  // không được làm thủ tục bootstrap tưởng là hệ thống đã có quản trị viên thật.
+  const alreadyHasAdmin = await db
+    .prepare(`SELECT 1 FROM users u JOIN admin_provenance p ON p.user_id = u.id WHERE u.role = 'ADMIN' LIMIT 1`)
+    .get();
   if (alreadyHasAdmin) {
     console.log('[admin-bootstrap] Đã có ít nhất một ADMIN trong cơ sở dữ liệu — bỏ qua.');
     return;
@@ -192,6 +196,7 @@ async function bootstrapAdminFromEnv() {
       username,
       displayName: process.env.ADMIN_BOOTSTRAP_DISPLAY_NAME || 'Quản trị viên',
       temporaryPassword: password,
+      source: 'BOOTSTRAP_ENV',
     });
     console.log(`[admin-bootstrap] Đã tạo quản trị viên "${user.username}" ở trạng thái chờ thiết lập.`);
     console.log('[admin-bootstrap] Đăng nhập bằng mật khẩu đã đặt trong ADMIN_BOOTSTRAP_PASSWORD, ');

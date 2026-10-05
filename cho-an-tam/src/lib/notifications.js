@@ -45,7 +45,12 @@ async function notify(items) {
 }
 
 async function adminIds() {
-  return (await db.prepare(`SELECT id FROM users WHERE role = 'ADMIN' AND account_status = 'ACTIVE'`).all()).map((u) => u.id);
+  // Chỉ quản trị viên có dấu nguồn gốc (lib/adminProvenance.js): tài khoản bị sửa role='ADMIN'
+  // không được nhận thông báo về tranh chấp và yêu cầu bán hàng của người khác.
+  return (await db.prepare(
+    `SELECT u.id FROM users u JOIN admin_provenance p ON p.user_id = u.id
+     WHERE u.role = 'ADMIN' AND u.account_status = 'ACTIVE'`
+  ).all()).map((u) => u.id);
 }
 
 const money = (n) => `${Number(n).toLocaleString('vi-VN')}₫`;
