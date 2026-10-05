@@ -650,6 +650,16 @@ async function main() {
   pg2.close();
 
   // ------------------------------------------------------------------------------------------
+  section('R12: refresh đang chờ không được thay hoặc xoá phiên mới');
+  p = await wallet({ timeoutMs: 5000, topup: () => json(401, { error: 'UNAUTHENTICATED' }), extra: {
+    'POST /api/passkeys/session/refresh': () => delay(1800, json(200, { token: 'tok-old-refresh', user: BUYER })),
+  } });
+  p.click(p.btn()); await sleep(40); await logoutUi(p); await loginUi(p, OTHER); await sleep(1600);
+  ok(p.w.localStorage.getItem('cat_token') === 'tok-' + OTHER.id, 'Refresh cũ đến muộn không thay hoặc xoá token mới');
+  ok((JSON.parse(p.w.localStorage.getItem('cat_user') || 'null') || {}).id === OTHER.id, 'Refresh cũ không khôi phục tài khoản trước');
+  ok(p.bodies.length === 1, 'Sau khi chờ refresh, request cũ không gửi lại');
+  p.close();
+
   section('R11: huỷ theo dõi dọn hẹn giờ và không để tác vụ treo');
   p = await wallet({
     timeoutMs: 5000,
@@ -676,4 +686,5 @@ async function main() {
   process.exit(fails ? 1 : 0);
 }
 
-main().catch((e) => { console.error('[topup-request-id-ui] lỗi:', e); process.exit(1); });
+module.exports = { wallet, delay, json, row, BUYER, OTHER, loginUi, logoutUi, sleep, press };
+if (require.main === module) main().catch((e) => { console.error('[topup-request-id-ui] lỗi:', e); process.exit(1); });

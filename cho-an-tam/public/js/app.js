@@ -166,22 +166,24 @@ const App = (() => {
   // credentials: 'include' vì cookie làm mới thuộc về origin của API, có thể khác origin của trang.
   let refreshing = null;
   function refreshSession() {
-    if (!refreshing) {
-      refreshing = (async () => {
+    const epoch = state.sessionEpoch;
+    const userId = state.user && state.user.id;
+    if (!refreshing || refreshing.epoch !== epoch) {
+      const job = { epoch, promise: null };
+      job.promise = (async () => {
         try {
           const res = await fetch(API_BASE + '/api/passkeys/session/refresh', { method: 'POST', credentials: 'include' });
-          if (!res.ok) return false;
+          if (state.sessionEpoch !== epoch || !res.ok) return false;
           const data = await res.json();
-          if (!data.token) return false;
+          if (state.sessionEpoch !== epoch || !data.token || !userId || !data.user || data.user.id !== userId) return false;
           setSession(data.token, { ...(state.user || {}), ...data.user });
           return true;
-        } catch (_) {
-          return false;
-        }
+        } catch (_) { return false; }
       })();
-      refreshing.finally(() => { refreshing = null; });
+      refreshing = job;
+      job.promise.finally(() => { if (refreshing === job) refreshing = null; });
     }
-    return refreshing;
+    return refreshing.promise;
   }
 
   // ---------------------------------------------------------------------
@@ -320,7 +322,9 @@ const App = (() => {
     if (state.sessionEpoch !== epoch) throw oldSession();
 
     if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
-      if (!retried && await refreshSession()) return api(path, { method, body }, true);
+      const refreshed = !retried && await refreshSession();
+      if (state.sessionEpoch !== epoch) throw oldSession();
+      if (refreshed) return api(path, { method, body }, true);
       clearSession();
       renderChrome();
       route();
@@ -519,11 +523,13 @@ const App = (() => {
   }
 
   async function refreshWallet() {
+    const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role === 'ADMIN') { state.wallet = null; return; }
     try {
-      state.wallet = await api('/wallets/me');
+      const wallet = await api('/wallets/me');
+      if (state.sessionEpoch === epoch) state.wallet = wallet;
     } catch (_) {
-      state.wallet = null;
+      if (state.sessionEpoch === epoch) state.wallet = null;
     }
   }
 
@@ -541,12 +547,13 @@ const App = (() => {
 
   /** Chỉ Người mua mới có khái niệm "yêu cầu mở cửa hàng". */
   async function refreshSellerRequest() {
+    const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role !== 'BUYER') { state.sellerRequest = null; return; }
     try {
       const { request } = await api('/users/me/seller-request');
-      state.sellerRequest = request;
+      if (state.sessionEpoch === epoch) state.sellerRequest = request;
     } catch (_) {
-      state.sellerRequest = null;
+      if (state.sessionEpoch === epoch) state.sellerRequest = null;
     }
   }
 
@@ -2420,12 +2427,20 @@ const App = (() => {
     // Cổng giả lập chỉ cho đúng người tạo yêu cầu nạp tiền thao tác, nên phải kèm phiên.
     const headers = body !== undefined ? { 'Content-Type': 'application/json' } : {};
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-    const { res, data } = await fetchJson(API_BASE + '/mock-provider' + path, {
+    const epoch = state.sessionEpoch;
+    let res, data;
+    try { ({ res, data } = await fetchJson(API_BASE + '/mock-provider' + path, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    if (res.status === 401 && !retried && await refreshSession()) return providerApi(path, { method, body }, true);
+     }));
+    } catch (e) { throw state.sessionEpoch !== epoch ? staleError() : e; }
+    if (state.sessionEpoch !== epoch) throw staleError();
+    if (res.status === 401 && !retried) {
+      const refreshed = await refreshSession();
+      if (state.sessionEpoch !== epoch) throw staleError();
+      if (refreshed) return providerApi(path, { method, body }, true);
+    }
     if (!res.ok) {
       const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
