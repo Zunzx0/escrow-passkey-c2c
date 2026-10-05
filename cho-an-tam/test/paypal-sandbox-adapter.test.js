@@ -206,3 +206,26 @@ test('sparse capture response is queried before trusting success; bad preflight 
   await assert.rejects(() => createSandboxProvider(config, { fetchImpl: bad.fetchImpl }).captureOrder(binding));
   assert.equal(bad.calls.filter(c => c.url.endsWith('/capture')).length, 0);
 });
+
+
+test('durable capture hook completes before capture POST transport starts', async () => {
+  let posted=false, marked=false;
+  const t=transport((url, init)=>{
+    if (url.endsWith('/v1/oauth2/token')) return {body:{access_token:'fixture-token',token_type:'Bearer',expires_in:300}};
+    if (init.method==='POST' && url.endsWith('/capture')) { assert.equal(marked,true);posted=true;return {body:{id:'ORDER123'}}; }
+    const body=order(posted?'COMPLETED':'APPROVED');if(!posted)delete body.purchase_units[0].payments;return {body};
+  });
+  const p=createSandboxProvider(config,t);
+  const result=await p.captureOrder({...binding,beforeCapture:async()=>{assert.equal(posted,false);marked=true;}});
+  assert.equal(result.status,'SUCCEEDED');assert.equal(marked,true);assert.equal(posted,true);
+});
+
+test('lost durable capture claim aborts before any capture POST', async () => {
+  const t=transport(url=>{
+    if(url.endsWith('/v1/oauth2/token'))return {body:{access_token:'fixture-token',token_type:'Bearer',expires_in:300}};
+    const body=order('APPROVED');delete body.purchase_units[0].payments;return {body};
+  });
+  const p=createSandboxProvider(config,t);
+  await assert.rejects(p.captureOrder({...binding,beforeCapture:async()=>{throw Error('CLAIM_LOST')}}),/CLAIM_LOST/);
+  assert.equal(t.calls.filter(c=>c.url.endsWith('/capture')).length,0);
+});

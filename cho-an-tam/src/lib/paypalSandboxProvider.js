@@ -246,6 +246,10 @@ function createSandboxProvider(config = {}, { fetchImpl = globalThis.fetch, now 
       const before = verifyOrder(await api(path), expected);
       if (before.status === 'SUCCEEDED') return before;
       try {
+        if (input.beforeCapture !== undefined) {
+          if (typeof input.beforeCapture !== 'function') fail('VALIDATION_ERROR', 'beforeCapture must be a function', 400);
+          await input.beforeCapture();
+        }
         const captured = await api(`${path}/capture`, 'POST', {},
           requestKey('capture', expected.paymentRequestId));
         if (!captured || captured.id !== expected.orderId) {
