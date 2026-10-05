@@ -39,7 +39,8 @@
     "check:invariants": "node scripts/check-invariants.js",
     "reset-db": "node scripts/reset-db.js",
     "freeze:experiment": "node scripts/freeze-experiment.js",
-    "freeze:verify": "node scripts/freeze-experiment.js --verify"
+    "freeze:verify": "node scripts/freeze-experiment.js --verify",
+    "test:count-marks": "node test/count-marks-unit.js"
   },
   "keywords": [],
   "author": "",

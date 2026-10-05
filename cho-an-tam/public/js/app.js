@@ -280,6 +280,9 @@ const App = (() => {
       const res = await fetch(url, ctl ? { ...options, signal: ctl.signal } : options);
       const data = await res.json().catch(() => null);
       if (timedOut) throw new Error('timeout');
+      if (res.ok && (!data || typeof data !== 'object' || Array.isArray(data))) {
+        throw new Error('Invalid JSON response');
+      }
       return { res, data: data && typeof data === 'object' ? data : {} };
     } catch (e) {
       throw connectionError(method, timedOut);

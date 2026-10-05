@@ -79,7 +79,7 @@ if (!only) {
 
 // Thứ tự: bộ không cần máy chủ trước, rồi lõi -> lớp mua bán -> an toàn -> các nhánh mới.
 const SUITES = [
-  'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
+  'count-marks-unit', 'invariants-unit', 'e2e', 'market-e2e', 'security-e2e', 'hybrid-e2e', 'hardening-e2e',
   'payment-e2e', 'reconcile-e2e', 'counter-e2e', 'cleanup-e2e', 'notification-e2e', 'checkout-e2e',
   'dispute-race-e2e', 'security-report-regression-e2e',
   'username-enumeration-e2e',

@@ -58,6 +58,8 @@ async function openPage(hash, session) {
     resources: 'usable',
     pretendToBeVisual: true,
     beforeParse(w) {
+      // Node fetch requires its own AbortSignal realm; preserve real abort semantics in this harness.
+      w.AbortController = AbortController;
       w.fetch = (u, o) => { calls.push(`${(o && o.method) || 'GET'} ${String(u)}`); return fetch(new URL(u, BASE), o); };
       w.scrollTo = () => {};
       if (session) {

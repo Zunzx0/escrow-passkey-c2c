@@ -121,7 +121,7 @@ async function walletPage(extraRoutes) {
   p.d.querySelector('#topupAmount').value = '150000';
   return Object.assign(p, { topupBtn: () => p.d.querySelector('[data-act="topup-create"]') });
 }
-const submitTopup = async (p, wait = 250) => { p.click(p.topupBtn()); await sleep(wait); };
+const submitTopup = async (p, wait = 250) => { p.d.querySelector('#topupAmount').value = '150000'; p.click(p.topupBtn()); await sleep(wait); };
 
 async function main() {
   // ------------------------------------------------------------------------------------------
@@ -312,6 +312,18 @@ async function main() {
   ok(finalToasts.some((x) => /Chưa có xác nhận từ cổng thanh toán/.test(x.text) && !/thất bại/.test(x.text)),
     'Kết luận trung thực: chưa có xác nhận, số dư chỉ đổi khi có kết quả');
   p.close();
+
+  section('E6: HTTP 2xx có thân hỏng không trở thành thành công');
+  for (const [name, response] of [['HTML 200', html(200, '<html>proxy response</html>')], ['JSON null', json(200, null)], ['JSON array', json(200, [])]]) {
+    p = await walletPage({ 'POST /api/payments/topup': () => response });
+    const before = p.count('GET /api/payments/me');
+    await submitTopup(p, 400);
+    ok(p.toasts().some(t => t.kind === 'err' && /chưa rõ thao tác/.test(t.text)), name + ': báo kết quả chưa rõ');
+    ok(p.toasts().every(t => t.kind !== 'ok'), name + ': không báo thành công');
+    ok(p.count('GET /api/payments/me') > before, name + ': hỏi lại lịch sử');
+    ok(!p.topupBtn().disabled && !p.d.querySelector('.modal'), name + ': nút khôi phục, không mở checkout');
+    p.close();
+  }
 
   console.log(`\n${checks} kiểm tra, ${fails ? fails + ' FAIL' : 'ALL PASS'}`);
   process.exit(fails ? 1 : 0);
