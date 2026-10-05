@@ -124,15 +124,43 @@ function verifyProviderSignature(payload, signature) {
 // Kho trạng thái phía provider
 // ---------------------------------------------------------------------------------------
 
-/** Phía BACKEND: gửi một yêu cầu thanh toán mới sang provider. Provider ghi nhận ở PENDING. */
+/**
+ * Phía BACKEND: gửi một yêu cầu thanh toán sang provider. Provider ghi nhận ở PENDING.
+ *
+ * IDEMPOTENT theo providerRef — đúng như API "create payment" của provider thật khi nhận cùng
+ * idempotency key: gửi lại một yêu cầu provider đã có thì không tạo bản ghi thứ hai, không đổi
+ * trạng thái đã có. Nhờ vậy backend gửi lại sau một lần gửi hỏng/không rõ kết quả mà không sợ
+ * trùng. Cùng providerRef nhưng khác merchantRef/amount là xung đột thật -> báo lỗi.
+ *
+ * MOCK_PROVIDER_SUBMIT_FAIL=1 mô phỏng provider từ chối/không trả lời bước tạo thanh toán (đọc ở
+ * mỗi lần gọi để bài kiểm thử bật theo từng process).
+ */
 async function submitPayment({ providerRef, merchantRef, amount }) {
+  // Nhật ký mọi lệnh tạo thanh toán đến provider, KỂ CẢ lệnh trùng và lệnh bị từ chối. Chỉ dùng để
+  // kiểm thử: đếm xem backend đã gọi provider bao nhiêu lần — điều mà bản ghi trong kho không cho biết.
+  if (process.env.MOCK_PROVIDER_CALL_LOG) {
+    require('fs').appendFileSync(process.env.MOCK_PROVIDER_CALL_LOG, JSON.stringify({ providerRef, merchantRef }) + '\n');
+  }
+  if (process.env.MOCK_PROVIDER_SUBMIT_FAIL === '1') {
+    throw new ProviderError('PROVIDER_UNAVAILABLE', 'Provider không nhận yêu cầu tạo thanh toán (mô phỏng sự cố)');
+  }
+  // Độ trễ mô phỏng của lệnh tạo thanh toán. Bài kiểm thử dùng nó để các lượt gửi lại đồng thời
+  // chồng lên lượt gửi đầu tiên — đúng khung thời gian mà lỗi gửi trùng xảy ra.
+  const submitDelay = parseInt(process.env.MOCK_PROVIDER_SUBMIT_DELAY_MS || '0', 10) || 0;
+  if (submitDelay > 0) await new Promise((r) => setTimeout(r, submitDelay));
   const now = new Date().toISOString();
   await store()
     .prepare(
       `INSERT INTO ${T} (provider_ref, merchant_ref, amount, status, created_at, updated_at)
-       VALUES (?, ?, ?, 'PENDING', ?, ?)`
+       VALUES (?, ?, ?, 'PENDING', ?, ?)
+       ON CONFLICT (provider_ref) DO NOTHING`
     )
     .run(providerRef, merchantRef, amount, now, now);
+  const row = await findPayment(providerRef);
+  if (!row || row.merchant_ref !== merchantRef || row.amount !== amount) {
+    throw new ProviderError('PROVIDER_REF_CONFLICT', 'providerRef đã thuộc về một khoản thanh toán khác');
+  }
+  return { providerRef, status: row.status };
 }
 
 async function findPayment(providerRef) {
