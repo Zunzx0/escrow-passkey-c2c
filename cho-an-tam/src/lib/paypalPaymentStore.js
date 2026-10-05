@@ -28,7 +28,10 @@ const CAPTURE_STATES = ['READY', 'IN_FLIGHT', 'UNKNOWN', 'VERIFIED', 'NOT_CAPTUR
 const FINISH_STATES = new Set(['READY', 'UNKNOWN', 'VERIFIED', 'NOT_CAPTURED']);
 // Bằng chứng đủ mạnh để kết luận "PayPal không thu tiền và sẽ không thu" sau khi đã gửi POST.
 // APPROVED, PENDING, CREATED, PAYER_ACTION_REQUIRED KHÔNG nằm trong danh sách.
-const NOT_CAPTURED_EVIDENCE = ['ORDER_VOIDED', 'CAPTURE_DECLINED'];
+// CAPTURE_DECLINED cũng KHÔNG (quyết định của Codex, 05/10/2026): một capture bị từ chối chưa chứng
+// minh toàn bộ order và các lượt POST còn treo đã kết thúc. Chỉ order VOIDED — đã được adapter xác minh
+// qua API chính thức — mới đủ mạnh.
+const NOT_CAPTURED_EVIDENCE = ['ORDER_VOIDED'];
 
 class PayPalStoreError extends Error {
   constructor(code, message, status) {
@@ -117,16 +120,43 @@ function bindingColumns(intType) {
          CHECK (capture_id IS NULL OR order_id IS NOT NULL)`;
 }
 
-function proposedSchema(dialect) {
+// Cột provider + trigger bất biến: ĐÃ có trong migration v4 thật của Codex (provider isolation). Chỉ dùng
+// cho fixture trên nền cũ chưa có v4; migration binding (v5) KHÔNG được ALTER provider lại.
+function providerSchema(dialect) {
   if (dialect === 'sqlite') {
     return [
       `ALTER TABLE payment_requests ADD COLUMN provider TEXT NOT NULL DEFAULT 'MOCK'
          CHECK (provider IN ('MOCK','PAYPAL_SANDBOX'))`,
-      `CREATE TABLE IF NOT EXISTS paypal_payment_bindings (${bindingColumns('INTEGER').replace('%PR%', 'payment_requests')}
-       )`,
       `CREATE TRIGGER IF NOT EXISTS trg_payment_requests_provider_immutable
        BEFORE UPDATE OF provider ON payment_requests FOR EACH ROW WHEN NEW.provider IS NOT OLD.provider
        BEGIN SELECT RAISE(ABORT, 'PAYMENT_PROVIDER_IMMUTABLE'); END`,
+    ];
+  }
+  if (dialect === 'pg') {
+    return [
+      `ALTER TABLE app.payment_requests ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'MOCK'
+         CHECK (provider IN ('MOCK','PAYPAL_SANDBOX'))`,
+      `CREATE OR REPLACE FUNCTION app.forbid_payment_provider_change() RETURNS trigger LANGUAGE plpgsql AS $$
+       BEGIN
+         IF NEW.provider IS DISTINCT FROM OLD.provider THEN
+           RAISE EXCEPTION 'PAYMENT_PROVIDER_IMMUTABLE' USING ERRCODE = '42501';
+         END IF;
+         RETURN NEW;
+       END $$`,
+      `DROP TRIGGER IF EXISTS trg_payment_requests_provider_immutable ON app.payment_requests`,
+      `CREATE TRIGGER trg_payment_requests_provider_immutable BEFORE UPDATE OF provider ON app.payment_requests
+       FOR EACH ROW EXECUTE FUNCTION app.forbid_payment_provider_change()`,
+    ];
+  }
+  throw new TypeError(`Unsupported dialect: ${dialect}`);
+}
+
+// Bảng binding + trigger: nội dung của migration v5. Không đụng cột provider.
+function bindingSchema(dialect) {
+  if (dialect === 'sqlite') {
+    return [
+      `CREATE TABLE IF NOT EXISTS paypal_payment_bindings (${bindingColumns('INTEGER').replace('%PR%', 'payment_requests')}
+       )`,
       `CREATE TRIGGER IF NOT EXISTS trg_paypal_binding_insert_guard
        BEFORE INSERT ON paypal_payment_bindings FOR EACH ROW WHEN NOT EXISTS (
          SELECT 1 FROM payment_requests pr
@@ -150,20 +180,8 @@ function proposedSchema(dialect) {
   }
   if (dialect === 'pg') {
     return [
-      `ALTER TABLE app.payment_requests ADD COLUMN IF NOT EXISTS provider TEXT NOT NULL DEFAULT 'MOCK'
-         CHECK (provider IN ('MOCK','PAYPAL_SANDBOX'))`,
       `CREATE TABLE IF NOT EXISTS app.paypal_payment_bindings (${bindingColumns('BIGINT').replace('%PR%', 'app.payment_requests')}
        )`,
-      `CREATE OR REPLACE FUNCTION app.forbid_payment_provider_change() RETURNS trigger LANGUAGE plpgsql AS $$
-       BEGIN
-         IF NEW.provider IS DISTINCT FROM OLD.provider THEN
-           RAISE EXCEPTION 'PAYMENT_PROVIDER_IMMUTABLE' USING ERRCODE = '42501';
-         END IF;
-         RETURN NEW;
-       END $$`,
-      `DROP TRIGGER IF EXISTS trg_payment_requests_provider_immutable ON app.payment_requests`,
-      `CREATE TRIGGER trg_payment_requests_provider_immutable BEFORE UPDATE OF provider ON app.payment_requests
-       FOR EACH ROW EXECUTE FUNCTION app.forbid_payment_provider_change()`,
       `CREATE OR REPLACE FUNCTION app.guard_paypal_binding() RETURNS trigger LANGUAGE plpgsql AS $$
        BEGIN
          IF TG_OP = 'INSERT' THEN
@@ -194,6 +212,11 @@ function proposedSchema(dialect) {
     ];
   }
   throw new TypeError(`Unsupported dialect: ${dialect}`);
+}
+
+/** Toàn bộ lược đồ đề xuất (provider + binding) cho nền chưa có migration v4. */
+function proposedSchema(dialect) {
+  return [...providerSchema(dialect), ...bindingSchema(dialect)];
 }
 
 // ---------------------------------------------------------------------------------------
@@ -328,7 +351,8 @@ function createPayPalPaymentStore({ db } = {}) {
    *                      có giá trị): không biết PayPal đã thu chưa, phải GET order trước, chỉ POST lại với
    *                      cùng PayPal-Request-Id.
    *   BUSY               người khác giữ quyền còn hạn.
-   *   REPLAY             request SUCCEEDED hoặc capture VERIFIED: chỉ đọc lại.
+   *   REPLAY             request SUCCEEDED: chỉ đọc lại.
+   *   SETTLEMENT_REQUIRED capture VERIFIED nhưng request vẫn PENDING: ví CHƯA cộng; chạy settlement.
    *   RECOVERY_REQUIRED  PayPal đã thu tiền nhưng request đã FAILED: cần quy trình phục hồi, không capture.
    *   CLOSED             request FAILED.
    *   NOT_CAPTURED       đã có bằng chứng mạnh PayPal không thu và sẽ không thu: không capture nữa.
@@ -345,7 +369,10 @@ function createPayPalPaymentStore({ db } = {}) {
       const row = toTrusted(r);
       if (userId !== null && row.userId !== userId) return { outcome: 'FORBIDDEN', row: null };
       if (row.capture.state === 'RECOVERY_REQUIRED') return { outcome: 'RECOVERY_REQUIRED', row };
-      if (row.status === 'SUCCEEDED' || row.capture.state === 'VERIFIED') return { outcome: 'REPLAY', row };
+      if (row.status === 'SUCCEEDED') return { outcome: 'REPLAY', row };
+      // Đã có bằng chứng thu tiền nhưng request CHƯA SUCCEEDED: ví chưa được cộng. Không trả REPLAY (dễ
+      // bị hiểu là xong) — người gọi phải chạy settlement trong một transaction với bằng chứng này.
+      if (row.capture.state === 'VERIFIED') return { outcome: 'SETTLEMENT_REQUIRED', row };
       if (row.status === 'FAILED') return { outcome: 'CLOSED', row };
       if (row.capture.state === 'NOT_CAPTURED') return { outcome: 'NOT_CAPTURED', row };
       if (!row.orderId) return { outcome: 'NOT_READY', row };
@@ -533,6 +560,8 @@ function createPayPalPaymentStore({ db } = {}) {
 module.exports = {
   createPayPalPaymentStore,
   proposedSchema,
+  providerSchema,
+  bindingSchema,
   PayPalStoreError,
   CAPTURE_STATES,
   NOT_CAPTURED_EVIDENCE,
