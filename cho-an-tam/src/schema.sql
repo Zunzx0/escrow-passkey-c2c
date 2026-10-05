@@ -148,6 +148,7 @@ CREATE TABLE IF NOT EXISTS payment_requests (
   amount INTEGER NOT NULL CHECK (amount > 0),
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','SUCCEEDED','FAILED')),
   provider_ref TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL DEFAULT 'MOCK' CHECK (provider IN ('MOCK','PAYPAL_SANDBOX')),
   version INTEGER NOT NULL DEFAULT 0,
   resolved_at TEXT,
   resolved_by TEXT CHECK (resolved_by IS NULL OR resolved_by IN ('WEBHOOK','RECONCILER')),
