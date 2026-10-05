@@ -26,7 +26,7 @@ async function main(){
  const after=JSON.stringify(await query('SELECT * FROM payment_requests ORDER BY id'));
  boot(target);
  ok(JSON.stringify(await query('SELECT * FROM payment_requests ORDER BY id'))===after,'second startup is idempotent');
- if(pgArg)ok((await query('SELECT version FROM app.schema_migrations ORDER BY version')).map(x=>x.version).join(',')==='1,2,3,4,5','migration versions apply in order once');
+ if(pgArg)ok((await query('SELECT version FROM app.schema_migrations ORDER BY version')).map(x=>x.version).join(',')==='1,2,3,4,5,6','migration versions apply in order once');
  }finally{await close();await cleanup();}
  console.log('Migration checks passed: '+passes);
 }

@@ -370,6 +370,10 @@ function createPayPalPaymentStore({ db } = {}) {
       if (userId !== null && row.userId !== userId) return { outcome: 'FORBIDDEN', row: null };
       if (row.capture.state === 'RECOVERY_REQUIRED') return { outcome: 'RECOVERY_REQUIRED', row };
       if (row.status === 'SUCCEEDED') return { outcome: 'REPLAY', row };
+      if (row.status === 'FAILED' && row.capture.state === 'VERIFIED') {
+        await persistLegacyRecovery(paymentRequestId, nowIso);
+        return { outcome: 'RECOVERY_REQUIRED', row: toTrusted(await rawById(paymentRequestId)) };
+      }
       // Đã có bằng chứng thu tiền nhưng request CHƯA SUCCEEDED: ví chưa được cộng. Không trả REPLAY (dễ
       // bị hiểu là xong) — người gọi phải chạy settlement trong một transaction với bằng chứng này.
       if (row.capture.state === 'VERIFIED') return { outcome: 'SETTLEMENT_REQUIRED', row };
@@ -425,6 +429,11 @@ function createPayPalPaymentStore({ db } = {}) {
     return { ok: false, outcome: 'RECOVERY_REQUIRED', reason: 'RECOVERY_REQUIRED', captureId };
   }
 
+  // Preserve immutable VERIFIED/capture evidence from old data, while flagging manual recovery.
+  async function persistLegacyRecovery(paymentRequestId, nowIso) {
+    await db.prepare("UPDATE paypal_payment_bindings SET recovery_required_at = COALESCE(recovery_required_at, ?), last_capture_error = 'CAPTURED_AFTER_REQUEST_CLOSED' WHERE payment_request_id = ? AND capture_state = 'VERIFIED'").run(nowIso, paymentRequestId);
+  }
+
   async function recordConflict(paymentRequestId, captureId) {
     await db.prepare('UPDATE paypal_payment_bindings SET last_capture_error = ? WHERE payment_request_id = ?')
       .run(`CONFLICTING_CAPTURE:${String(captureId).slice(0, 150)}`, paymentRequestId);
@@ -436,7 +445,7 @@ function createPayPalPaymentStore({ db } = {}) {
    *                 Đã gửi POST -> { ok:false, reason:'CAPTURE_OUTCOME_UNRESOLVED' }, quyền vẫn giữ; người
    *                 gọi phải ghi UNKNOWN, VERIFIED hoặc NOT_CAPTURED.
    *   UNKNOWN       timeout/không rõ; request giữ PENDING, chờ đối soát.
-   *   NOT_CAPTURED  bằng chứng mạnh: evidence ∈ ORDER_VOIDED | CAPTURE_DECLINED.
+   *   NOT_CAPTURED  bằng chứng mạnh: evidence ∈ ORDER_VOIDED.
    *   VERIFIED      PayPal xác nhận đã thu (captureId bắt buộc). Request đã FAILED -> RECOVERY_REQUIRED (bằng
    *                 chứng được commit, KHÔNG ghi ví): người gọi KHÔNG được rollback lời gọi này.
    * @returns {{ ok: true } | { ok: false, reason: 'STALE_CLAIM'|'CAPTURE_OUTCOME_UNRESOLVED'|'CAPTURE_ID_CONFLICT'|'RECOVERY_REQUIRED' }}
@@ -493,6 +502,10 @@ function createPayPalPaymentStore({ db } = {}) {
         if (!r.order_id) return { ok: false, reason: 'NOT_READY' };
         if (r.capture_id && r.capture_id !== captureId) return { ok: false, reason: 'CAPTURE_ID_CONFLICT', conflict: true };
         if (r.capture_state === 'RECOVERY_REQUIRED') return { ok: false, outcome: 'RECOVERY_REQUIRED', reason: 'RECOVERY_REQUIRED', captureId };
+        if (r.capture_state === 'VERIFIED' && r.status === 'FAILED') {
+          await persistLegacyRecovery(paymentRequestId, now);
+          return { ok: false, outcome: 'RECOVERY_REQUIRED', reason: 'RECOVERY_REQUIRED', captureId };
+        }
         if (r.capture_state === 'VERIFIED') return { ok: true };
         if (r.status === 'FAILED') return persistRecovery(paymentRequestId, captureId, now);
         const changed = (await db.prepare(

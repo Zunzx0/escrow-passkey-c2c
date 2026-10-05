@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS paypal_payment_bindings (
          capture_post_count INTEGER NOT NULL DEFAULT 0,
          capture_id TEXT UNIQUE,
          capture_verified_at TEXT,
-         not_captured_evidence TEXT CHECK (not_captured_evidence IS NULL OR not_captured_evidence IN ('ORDER_VOIDED','CAPTURE_DECLINED')),
+         not_captured_evidence TEXT CHECK (not_captured_evidence IS NULL OR not_captured_evidence IN ('ORDER_VOIDED')),
          recovery_required_at TEXT,
          last_capture_error TEXT,
          created_at TEXT NOT NULL,

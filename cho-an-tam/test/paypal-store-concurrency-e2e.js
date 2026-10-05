@@ -631,6 +631,18 @@ async function runSuite(fx) {
       `finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận ${JSON.stringify(fq)})`);
   });
 
+  await group('K7: Legacy FAILED + VERIFIED requires manual recovery, never settlement', async () => {
+    const id = await newPayPal(); await A.bindOrder(id, 'ORD-' + id);
+    await A.markCaptureVerified(id, 'CAP-LEGACY-' + id);
+    await dbA.prepare("UPDATE payment_requests SET status = 'FAILED' WHERE id = ?").run(id);
+    const claim = await B.claimCapture(id, users.owner, uid(), iso(), iso(-60000));
+    assert(claim.outcome === 'RECOVERY_REQUIRED', 'Legacy closed verified request is not SETTLEMENT_REQUIRED');
+    const result = await A.markCaptureVerified(id, 'CAP-LEGACY-' + id);
+    assert(!result.ok && result.outcome === 'RECOVERY_REQUIRED', 'Replay evidence on legacy FAILED does not return success');
+    const saved = await raw(id);
+    assert(saved.capture_id === 'CAP-LEGACY-' + id && saved.capture_state === 'VERIFIED' && saved.recovery_required_at && (await reqRow(id)).status === 'FAILED', 'Immutable evidence preserved and recovery marker durable; request remains closed');
+  });
+
   await group('K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ', async () => {
     if (!hasPostMarker) { assert(false, 'Bản cũ không phân biệt chưa gửi POST / đã gửi POST'); return; }
     const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
@@ -646,7 +658,7 @@ async function runSuite(fx) {
     if (fx.schemaMode === 'proposed') {
       assert(dbRejectsDeclined, 'Lược đồ đề xuất: CHECK của CSDL từ chối CAPTURE_DECLINED');
     } else {
-      console.log(`  ⚠ migration v5 thật: CSDL ${dbRejectsDeclined ? 'đã từ chối' : 'VẪN CHO PHÉP'} not_captured_evidence = CAPTURE_DECLINED (store chặn ở tầng ứng dụng; cần sửa CHECK của v5)`);
+      assert(dbRejectsDeclined, 'Migration thật: CSDL từ chối CAPTURE_DECLINED');
     }
     assert((await A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'ORDER_VOIDED' })).ok, 'Order VOIDED: NOT_CAPTURED');
     assert((await B.closeUncaptured(id, { nowIso: iso(), reason: 'ORDER_VOIDED' })).closed, 'Sau NOT_CAPTURED: đóng được');
