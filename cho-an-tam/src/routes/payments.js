@@ -4,7 +4,7 @@ const { db, uuid, nowIso } = require('../db');
 const { requireAuth } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
 const { verifyProviderSignature } = require('../lib/mockPaymentProvider');
-const { applyProviderResult, submitToProvider } = require('../lib/paymentService');
+const { applyProviderResult, claimSubmission, submitToProvider } = require('../lib/paymentService');
 const { getUserWallet } = require('../lib/walletOps');
 
 const router = express.Router();
@@ -98,8 +98,10 @@ const PROVIDER_UNAVAILABLE = () => new AppError(
 
 /**
  * Trả lại yêu cầu đã có cho một lần gửi lặp (cùng người dùng, cùng requestId).
- * Khác số tiền là dùng lại khoá cho một nghiệp vụ khác -> 409. Yêu cầu còn PENDING mà provider
- * chưa nhận thì gửi lại provider ngay — đây là cách client tự gỡ một lần gửi hỏng.
+ * Khác số tiền là dùng lại khoá cho một nghiệp vụ khác -> 409.
+ *
+ * Yêu cầu còn PENDING mà provider chưa nhận thì GIÀNH quyền gửi rồi gửi lại. Nếu tiến trình khác đang
+ * giữ quyền còn hạn (đang gửi), không gửi lần nữa: trả trạng thái hiện tại (SUBMITTING) để client chờ.
  */
 async function replayExisting(res, existing, amount) {
   if (existing.amount !== amount) {
@@ -107,9 +109,14 @@ async function replayExisting(res, existing, amount) {
   }
   let row = existing;
   if (row.status === 'PENDING' && row.submission_status !== 'SUBMITTED') {
-    const sent = await submitToProvider(row);
-    row = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(row.id);
-    if (!sent.submitted && row.status === 'PENDING') throw PROVIDER_UNAVAILABLE();
+    const claim = await claimSubmission(row);
+    if (claim) {
+      const sent = await submitToProvider(row, claim);
+      row = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(row.id);
+      if (!sent.submitted && !sent.busy && row.status === 'PENDING') throw PROVIDER_UNAVAILABLE();
+    } else {
+      row = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(row.id);
+    }
   }
   res.status(200).json({ ...serializePaymentRequest(row), idempotentReplay: true });
 }
@@ -137,6 +144,8 @@ router.post('/topup', requireAuth, async (req, res, next) => {
     // provider_ref mô phỏng mã do PHÍA PROVIDER cấp — độc lập với id nội bộ, đúng như một
     // provider thật sẽ làm. Ở đây tự sinh vì đang đóng luôn vai provider.
     const providerRef = uuid();
+    // Người tạo giữ quyền gửi ngay từ lúc INSERT: không tiến trình nào khác được gửi yêu cầu này.
+    const claim = uuid();
     const now = nowIso();
     let replay = null;
     // Kiểm hạn mức và ghi yêu cầu trong CÙNG một giao dịch ghi của cơ sở dữ liệu, nên hai request
@@ -156,9 +165,10 @@ router.post('/topup', requireAuth, async (req, res, next) => {
         await assertTopupLimits(req.user.id, wallet, amount);
         await db.prepare(
           `INSERT INTO payment_requests
-             (id, user_id, amount, status, provider_ref, version, client_request_id, submission_status, created_at, updated_at)
-           VALUES (?, ?, ?, 'PENDING', ?, 0, ?, 'SUBMITTING', ?, ?)`
-        ).run(id, req.user.id, amount, providerRef, clientRequestId, now, now);
+             (id, user_id, amount, status, provider_ref, version, client_request_id, submission_status,
+              submit_claim, submit_claimed_at, created_at, updated_at)
+           VALUES (?, ?, ?, 'PENDING', ?, 0, ?, 'SUBMITTING', ?, ?, ?, ?)`
+        ).run(id, req.user.id, amount, providerRef, clientRequestId, claim, now, now, now);
       })();
     } catch (e) {
       // Một tiến trình khác (cùng CSDL) vừa ghi cùng khoá: chỉ mục duy nhất chặn — trả yêu cầu đó.
@@ -170,7 +180,7 @@ router.post('/topup', requireAuth, async (req, res, next) => {
     // Ghi yêu cầu ở phía ta TRƯỚC rồi mới gửi sang provider: nếu bước gửi hỏng, yêu cầu nằm ở
     // PENDING + SUBMIT_FAILED (không phải im lặng PENDING), client nhận 503 rõ ràng, và việc gửi
     // lại thuộc về client (cùng requestId) hoặc worker đối soát.
-    const sent = await submitToProvider({ id, provider_ref: providerRef, amount });
+    const sent = await submitToProvider({ id, provider_ref: providerRef, amount }, claim);
     if (!sent.submitted) throw PROVIDER_UNAVAILABLE();
 
     res.status(201).json(serializePaymentRequest(await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(id)));

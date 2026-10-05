@@ -18,7 +18,7 @@
 // nào ở provider để người dùng thanh toán, nên giữ PENDING chỉ chiếm suất nạp tiền của họ mãi.
 const { db, nowIso } = require('../db');
 const provider = require('./mockPaymentProvider');
-const { applyProviderResult, submitToProvider, expireUnsubmitted, maxSubmitAttempts } = require('./paymentService');
+const { applyProviderResult, claimSubmission, submitToProvider, expireUnsubmitted, maxSubmitAttempts } = require('./paymentService');
 const { logSecurityEvent, EVENTS } = require('./securityEvents');
 
 const DEFAULT_MIN_AGE_SECONDS = parseInt(process.env.RECONCILE_MIN_AGE_SECONDS || '30', 10);
@@ -67,20 +67,30 @@ async function reconcileOnce({
 
   const summary = {
     scanned: pending.length, applied: 0, duplicate: 0, conflict: 0, stillPending: 0, errors: 0,
-    resubmitted: 0, expired: 0, results: [],
+    resubmitted: 0, expired: 0, skipped: 0, results: [],
   };
 
   /**
    * Yêu cầu mà provider chưa nhận (SUBMITTING / SUBMIT_FAILED, hoặc yêu cầu cũ provider báo không
-   * biết): gửi lại. Gửi được -> tiếp tục hỏi provider như thường. Vẫn hỏng và đã đủ số lần gửi ->
-   * đóng FAILED (expireUnsubmitted tự kiểm provider không có bản ghi). Trả về true nếu xử lý xong
-   * yêu cầu trong lượt này.
+   * biết): giành quyền gửi rồi gửi lại. Gửi được -> tiếp tục hỏi provider như thường (trả false).
+   * Đã đủ số lần gửi và provider xác nhận không biết -> đóng FAILED. Trả về true nếu xử lý xong yêu
+   * cầu trong lượt này; false nếu yêu cầu đã sẵn sàng để hỏi trạng thái.
    */
   async function handleUnsubmitted(pr) {
-    const sent = await submitToProvider(pr);
+    const claim = await claimSubmission(pr);
+    if (!claim) {
+      // Tiến trình khác đang gửi (quyền còn hạn). Không chen vào — lượt sau xem lại.
+      summary.skipped += 1;
+      return true;
+    }
+    const sent = await submitToProvider(pr, claim);
     if (sent.submitted) {
       summary.resubmitted += 1;
       return false;
+    }
+    if (sent.busy) {
+      summary.skipped += 1;
+      return true;
     }
     const fresh = await db.prepare('SELECT * FROM payment_requests WHERE id = ?').get(pr.id);
     if (fresh.status === 'PENDING' && Number(fresh.submit_attempts) >= maxSubmitAttempts()) {
@@ -95,6 +105,8 @@ async function reconcileOnce({
           summary.resubmitted += 1;
           return false;
         }
+        summary.skipped += 1;
+        return true;
       } catch (e) {
         await recordError(pr.id, `${e.code || 'EXPIRE_ERROR'}: ${e.message}`);
       }
@@ -118,11 +130,8 @@ async function reconcileOnce({
     } catch (e) {
       if (e.code === 'UNKNOWN_PAYMENT') {
         // Provider không hề biết yêu cầu này (dữ liệu trước khi có submission_status, hoặc lần gửi
-        // trước báo thành công nhầm): coi như chưa gửi và gửi lại — thay vì ghi lỗi mãi mãi.
-        await db.prepare(
-          `UPDATE payment_requests SET submission_status = 'SUBMIT_FAILED', updated_at = ?
-           WHERE id = ? AND status = 'PENDING' AND submission_status = 'SUBMITTED'`
-        ).run(nowIso(), pr.id);
+        // trước báo thành công nhầm): coi như chưa gửi và gửi lại qua đúng đường có quyền gửi —
+        // thay vì ghi lỗi mãi mãi.
         if (await handleUnsubmitted(pr)) continue;
         try {
           answer = await provider.queryStatus(pr.provider_ref);

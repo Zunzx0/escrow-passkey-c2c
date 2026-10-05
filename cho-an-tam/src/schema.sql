@@ -125,6 +125,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_single_system_escrow_wallet
 --   SUBMITTING     đã ghi yêu cầu, đang gửi (hoặc process chết giữa chừng)
 --   SUBMITTED      provider đã ghi nhận
 --   SUBMIT_FAILED  gửi hỏng; client gửi lại cùng requestId hoặc worker đối soát sẽ gửi lại
+-- submit_claim / submit_claimed_at là QUYỀN GỬI (lease): chỉ tiến trình giữ claim còn hạn mới được
+-- gửi yêu cầu lên provider. Hết hạn (tiến trình chết giữa chừng) thì tiến trình khác giành lại.
 -- client_request_id là khoá chống lặp do client gửi (requestId), duy nhất theo từng người dùng —
 -- chỉ mục duy nhất được tạo trong db.js (migrate) vì cột có thể được thêm sau bằng ALTER TABLE.
 --
@@ -157,6 +159,8 @@ CREATE TABLE IF NOT EXISTS payment_requests (
     CHECK (submission_status IN ('SUBMITTING','SUBMITTED','SUBMIT_FAILED')),
   submit_attempts INTEGER NOT NULL DEFAULT 0,
   last_submit_error TEXT,
+  submit_claim TEXT,
+  submit_claimed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

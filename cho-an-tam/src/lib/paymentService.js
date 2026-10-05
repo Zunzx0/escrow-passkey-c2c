@@ -14,7 +14,7 @@
 //     sở dữ liệu; hỏng ở bất kỳ bước nào (kể cả process chết giữa chừng) thì không bước nào
 //     được coi là đã xảy ra;
 //   - không bao giờ ghi đè một kết quả đã tất toán.
-const { db, nowIso } = require('../db');
+const { db, uuid, nowIso } = require('../db');
 const { AppError } = require('./errors');
 const { applyWalletDelta, insertWalletEntry, fingerprintRequest, getUserWallet } = require('./walletOps');
 const { maybeFail } = require('./faultInjection');
@@ -120,80 +120,123 @@ async function applyProviderResult({ paymentRequestId, providerRef, status, amou
 // Bước GỬI yêu cầu sang provider (submission_status, xem schema.sql)
 // ---------------------------------------------------------------------------------------
 //
-// Yêu cầu được ghi PENDING + SUBMITTING TRƯỚC rồi mới gửi provider (để không bao giờ có khoản
-// provider biết mà phía ta không biết). Gửi hỏng thì yêu cầu không được nằm im: nó mang
-// SUBMIT_FAILED, client gửi lại cùng requestId hoặc worker đối soát sẽ gửi lại. Provider nhận
-// idempotent theo providerRef nên gửi lại bao nhiêu lần cũng chỉ một bản ghi.
+// Yêu cầu được ghi PENDING + SUBMITTING TRƯỚC rồi mới gửi provider, nên không bao giờ có khoản
+// provider biết mà phía ta không biết. Gửi hỏng thì yêu cầu mang SUBMIT_FAILED, không nằm im.
+//
+// QUYỀN GỬI (lease). Tại một thời điểm chỉ MỘT tiến trình được gửi một yêu cầu lên provider:
+//   - người tạo yêu cầu giữ quyền ngay khi INSERT (submit_claim = token);
+//   - người gửi lại (client gửi lại cùng requestId, worker đối soát) phải GIÀNH quyền bằng một
+//     UPDATE có điều kiện, và chỉ khi chưa có claim hoặc claim đã quá TOPUP_SUBMIT_LEASE_SECONDS;
+//   - kết quả chỉ được ghi khi còn đúng claim của mình (WHERE submit_claim = token). Mất claim giữa
+//     chừng (hết hạn và bị tiến trình khác giành) thì không ghi đè, mà đọc lại trạng thái thật.
+// Nhờ vậy năm request đồng thời cho cùng một yêu cầu chỉ tạo ra một lệnh tới provider.
+//
+// Provider nhận idempotent theo providerRef, nên lệnh lặp sau một lỗi không rõ kết quả không tạo
+// bản ghi thứ hai — nhưng backend vẫn không gửi lặp chủ động.
 
 function maxSubmitAttempts() {
   return Math.max(1, parseInt(process.env.TOPUP_SUBMIT_MAX_ATTEMPTS || '5', 10) || 5);
 }
 
-/**
- * Gửi (hoặc gửi lại) một yêu cầu PENDING sang provider và ghi kết quả vào submission_status.
- * @returns {{ submitted: boolean, error?: Error }}
- */
-async function submitToProvider(pr) {
-  const provider = require('./mockPaymentProvider');
-  try {
-    await provider.submitPayment({ providerRef: pr.provider_ref, merchantRef: pr.id, amount: pr.amount });
-  } catch (e) {
-    await db.prepare(
-      `UPDATE payment_requests
-       SET submission_status = 'SUBMIT_FAILED', submit_attempts = submit_attempts + 1, last_submit_error = ?, updated_at = ?
-       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'`
-    ).run(`${e.code || 'SUBMIT_ERROR'}: ${e.message}`.slice(0, 300), nowIso(), pr.id);
-    return { submitted: false, error: e };
-  }
-  const marked = await db.prepare(
-    `UPDATE payment_requests
-     SET submission_status = 'SUBMITTED', submit_attempts = submit_attempts + 1, last_submit_error = NULL, updated_at = ?
-     WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'`
-  ).run(nowIso(), pr.id);
-  if (marked.changes !== 1) {
-    // Hoặc đã SUBMITTED từ trước (bình thường), hoặc yêu cầu vừa bị đưa sang FAILED vì hết lượt
-    // gửi trong lúc lần gửi này đang chạy. Trường hợp sau: huỷ khoản vừa tạo ở provider để người
-    // dùng không thể thanh toán một yêu cầu mà phía ta đã đóng.
-    const cur = await db.prepare('SELECT status FROM payment_requests WHERE id = ?').get(pr.id);
-    if (cur && cur.status === 'FAILED') {
-      try { await provider.settlePayment(pr.provider_ref, 'FAILED', { onlyFromPending: true }); } catch (_) { /* đã có kết quả */ }
-      return { submitted: false, error: new AppError(409, 'PAYMENT_REQUEST_CLOSED', 'Yêu cầu nạp tiền đã đóng') };
-    }
-  }
-  return { submitted: true };
+function leaseCutoffIso() {
+  const seconds = Math.max(1, parseInt(process.env.TOPUP_SUBMIT_LEASE_SECONDS || '60', 10) || 60);
+  return new Date(Date.now() - seconds * 1000).toISOString();
 }
 
 /**
- * Đóng một yêu cầu mà provider CHƯA TỪNG nhận được, sau khi đã gửi đủ TOPUP_SUBMIT_MAX_ATTEMPTS
- * lần. Chỉ đóng khi provider xác nhận không có bản ghi nào cho providerRef — nếu có (một lần gửi
- * trước thật ra đã tới), yêu cầu được đánh dấu SUBMITTED và tiếp tục chờ kết quả như thường.
- * Không có tiền nào di chuyển: chỉ một yêu cầu SUCCEEDED mới từng cộng ví.
- *
+ * Giành quyền gửi cho một yêu cầu PENDING. Trả về token nếu giành được; null nếu tiến trình khác
+ * đang giữ quyền còn hạn — khi đó không gửi, để tiến trình kia làm.
+ */
+async function claimSubmission(pr) {
+  const token = uuid();
+  const now = nowIso();
+  const r = await db.prepare(
+    `UPDATE payment_requests
+     SET submission_status = 'SUBMITTING', submit_claim = ?, submit_claimed_at = ?, updated_at = ?
+     WHERE id = ? AND status = 'PENDING' AND (submit_claim IS NULL OR submit_claimed_at < ?)`
+  ).run(token, now, now, pr.id, leaseCutoffIso());
+  return r.changes === 1 ? token : null;
+}
+
+/**
+ * Mất quyền gửi giữa chừng: đọc lại trạng thái thật rồi quyết định, không suy đoán.
+ *  - đã FAILED (đóng trong lúc gửi): huỷ khoản vừa có ở provider để không ai thanh toán được;
+ *  - đã SUBMITTED (tiến trình khác gửi xong): coi như đã gửi;
+ *  - còn lại: tiến trình khác đang xử lý — báo bận, không ghi gì.
+ */
+async function lostLease(pr, error = null) {
+  const provider = require('./mockPaymentProvider');
+  const cur = await db.prepare('SELECT status, submission_status FROM payment_requests WHERE id = ?').get(pr.id);
+  if (cur && cur.status === 'FAILED') {
+    try { await provider.settlePayment(pr.provider_ref, 'FAILED', { onlyFromPending: true }); } catch (_) { /* chưa có khoản nào ở provider */ }
+    return { submitted: false, error: new AppError(409, 'PAYMENT_REQUEST_CLOSED', 'Yêu cầu nạp tiền đã đóng') };
+  }
+  if (cur && cur.submission_status === 'SUBMITTED') return { submitted: true };
+  return { submitted: false, busy: true, error };
+}
+
+/**
+ * Gửi yêu cầu lên provider khi đang giữ quyền `token`, rồi ghi kết quả và NHẢ quyền.
+ * @returns {{ submitted: boolean, busy?: boolean, error?: Error }}
+ */
+async function submitToProvider(pr, token) {
+  const provider = require('./mockPaymentProvider');
+  const release = (status, error) => db.prepare(
+    `UPDATE payment_requests
+     SET submission_status = ?, submit_attempts = submit_attempts + 1, last_submit_error = ?,
+         submit_claim = NULL, submit_claimed_at = NULL, updated_at = ?
+     WHERE id = ? AND submit_claim = ? AND status = 'PENDING'`
+  ).run(status, error, nowIso(), pr.id, token);
+
+  try {
+    await provider.submitPayment({ providerRef: pr.provider_ref, merchantRef: pr.id, amount: pr.amount });
+  } catch (e) {
+    const r = await release('SUBMIT_FAILED', `${e.code || 'SUBMIT_ERROR'}: ${e.message}`.slice(0, 300));
+    return r.changes === 1 ? { submitted: false, error: e } : lostLease(pr, e);
+  }
+
+  const r = await release('SUBMITTED', null);
+  return r.changes === 1 ? { submitted: true } : lostLease(pr);
+}
+
+/**
+ * Đóng FAILED một yêu cầu mà provider CHƯA TỪNG nhận, sau khi đã đủ TOPUP_SUBMIT_MAX_ATTEMPTS lần.
+ * Chỉ đóng khi provider TRẢ LỜI rõ qua API truy vấn rằng không biết khoản này (UNKNOWN_PAYMENT):
+ * không đọc kho của provider, không đoán từ lỗi mạng. Lỗi khác -> bỏ qua, lượt sau hỏi lại.
+ * Không đóng khi còn tiến trình giữ quyền gửi còn hạn. Không có tiền nào di chuyển.
  * @returns {{ outcome: 'EXPIRED'|'SUBMITTED'|'SKIPPED' }}
  */
 async function expireUnsubmitted(pr) {
   const provider = require('./mockPaymentProvider');
-  const atProvider = await provider.findPayment(pr.provider_ref);
-  if (atProvider) {
-    await db.prepare(
-      `UPDATE payment_requests SET submission_status = 'SUBMITTED', last_submit_error = NULL, updated_at = ?
-       WHERE id = ? AND status = 'PENDING'`
-    ).run(nowIso(), pr.id);
-    return { outcome: 'SUBMITTED' };
+  try {
+    await provider.queryStatus(pr.provider_ref);
+  } catch (e) {
+    if (e.code !== 'UNKNOWN_PAYMENT') throw e;
+    return closeUnsubmitted(pr);
   }
+  // Provider ĐÃ có khoản này: lần gửi trước thật ra đã tới. Ghi nhận và chờ kết quả như thường.
+  await db.prepare(
+    `UPDATE payment_requests SET submission_status = 'SUBMITTED', last_submit_error = NULL, updated_at = ?
+     WHERE id = ? AND status = 'PENDING'`
+  ).run(nowIso(), pr.id);
+  return { outcome: 'SUBMITTED' };
+}
 
-  let expired = false;
+async function closeUnsubmitted(pr) {
+  let closed = false;
   await db.transaction(async () => {
     const now = nowIso();
     const r = await db.prepare(
       `UPDATE payment_requests
        SET status = 'FAILED', version = version + 1, resolved_at = ?, resolved_by = 'RECONCILER',
-           last_reconcile_error = ?, updated_at = ?
-       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED' AND submit_attempts >= ?`
-    ).run(now, `SUBMIT_EXHAUSTED: provider không nhận yêu cầu sau ${maxSubmitAttempts()} lần gửi`, now, pr.id, maxSubmitAttempts());
-    expired = r.changes === 1;
+           last_reconcile_error = ?, submit_claim = NULL, submit_claimed_at = NULL, updated_at = ?
+       WHERE id = ? AND status = 'PENDING' AND submission_status <> 'SUBMITTED'
+         AND submit_attempts >= ? AND (submit_claim IS NULL OR submit_claimed_at < ?)`
+    ).run(now, `SUBMIT_EXHAUSTED: provider không nhận yêu cầu sau ${maxSubmitAttempts()} lần gửi`, now,
+      pr.id, maxSubmitAttempts(), leaseCutoffIso());
+    closed = r.changes === 1;
   })();
-  if (!expired) return { outcome: 'SKIPPED' };
+  if (!closed) return { outcome: 'SKIPPED' };
 
   await logSecurityEvent(null, {
     type: EVENTS.TOPUP_FAILED,
@@ -204,4 +247,10 @@ async function expireUnsubmitted(pr) {
   return { outcome: 'EXPIRED' };
 }
 
-module.exports = { applyProviderResult, submitToProvider, expireUnsubmitted, maxSubmitAttempts };
+module.exports = {
+  applyProviderResult,
+  claimSubmission,
+  submitToProvider,
+  expireUnsubmitted,
+  maxSubmitAttempts,
+};

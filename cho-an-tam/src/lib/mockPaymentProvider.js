@@ -136,9 +136,18 @@ function verifyProviderSignature(payload, signature) {
  * mỗi lần gọi để bài kiểm thử bật theo từng process).
  */
 async function submitPayment({ providerRef, merchantRef, amount }) {
+  // Nhật ký mọi lệnh tạo thanh toán đến provider, KỂ CẢ lệnh trùng và lệnh bị từ chối. Chỉ dùng để
+  // kiểm thử: đếm xem backend đã gọi provider bao nhiêu lần — điều mà bản ghi trong kho không cho biết.
+  if (process.env.MOCK_PROVIDER_CALL_LOG) {
+    require('fs').appendFileSync(process.env.MOCK_PROVIDER_CALL_LOG, JSON.stringify({ providerRef, merchantRef }) + '\n');
+  }
   if (process.env.MOCK_PROVIDER_SUBMIT_FAIL === '1') {
     throw new ProviderError('PROVIDER_UNAVAILABLE', 'Provider không nhận yêu cầu tạo thanh toán (mô phỏng sự cố)');
   }
+  // Độ trễ mô phỏng của lệnh tạo thanh toán. Bài kiểm thử dùng nó để các lượt gửi lại đồng thời
+  // chồng lên lượt gửi đầu tiên — đúng khung thời gian mà lỗi gửi trùng xảy ra.
+  const submitDelay = parseInt(process.env.MOCK_PROVIDER_SUBMIT_DELAY_MS || '0', 10) || 0;
+  if (submitDelay > 0) await new Promise((r) => setTimeout(r, submitDelay));
   const now = new Date().toISOString();
   await store()
     .prepare(

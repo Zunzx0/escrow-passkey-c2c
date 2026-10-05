@@ -201,6 +201,8 @@ function openSqlite() {
         ['submission_status', "TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (submission_status IN ('SUBMITTING','SUBMITTED','SUBMIT_FAILED'))"],
         ['submit_attempts', 'INTEGER NOT NULL DEFAULT 0'],
         ['last_submit_error', 'TEXT'],
+        ['submit_claim', 'TEXT'],
+        ['submit_claimed_at', 'TEXT'],
       ].filter(([name]) => !paymentCols.has(name));
       for (const [name, type] of add) db.exec(`ALTER TABLE payment_requests ADD COLUMN ${name} ${type}`);
       if (add.length) console.log(`[migrate] payment_requests: đã thêm cột ${add.map(([n]) => n).join(', ')}.`);

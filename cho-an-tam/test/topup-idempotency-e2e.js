@@ -26,9 +26,10 @@
  */
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
 
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const { flows } = require('./helpers/accounts');
 const { checkInvariants } = require('../src/lib/invariants');
 const { db, DIALECT, uuid, nowIso } = require('../src/db');
@@ -205,6 +206,29 @@ async function main() {
     assert(a.data.submissionStatus === 'SUBMITTED' && a.data.requestId === null, 'Phản hồi có submissionStatus=SUBMITTED, requestId=null');
   });
 
+  await group('D1: Năm lần gửi ĐỒNG THỜI, provider chậm 400 ms -> đúng MỘT lần gửi lên provider', async () => {
+    // Trước bản sửa (lease gửi): mọi lượt gửi lại đều gọi provider, submit_attempts tăng theo số lượt.
+    const callLog = path.join(ROOT, 'data', 'test', `provider-calls-${Date.now()}.log`);
+    const child = await startChild({ MOCK_PROVIDER_SUBMIT_DELAY_MS: '400', MOCK_PROVIDER_CALL_LOG: callLog });
+    try {
+      assert(child.up, 'Server con với provider chậm khởi động');
+      const key = rid();
+      const before = await countRequests(other.user.id);
+      const rs = await Promise.all(Array.from({ length: 5 }, () => topup(other.token, 108000, key, CHILD_BASE)));
+      console.log(`  [D1] ${rs.map((r) => `${r.status}${r.data.idempotentReplay ? 'r' : ''}:${r.data.submissionStatus || r.data.error}`).join(' ')}`);
+      const row = await db.prepare('SELECT * FROM payment_requests WHERE user_id = ? AND client_request_id = ?').get(other.user.id, key);
+      const calls = fs.existsSync(callLog)
+        ? fs.readFileSync(callLog, 'utf8').split('\n').filter((l) => l && JSON.parse(l).merchantRef === (row && row.id)).length
+        : 0;
+      assert((await countRequests(other.user.id)) - before === 1, 'Đúng một yêu cầu được tạo');
+      assert(calls === 1, `Provider nhận đúng MỘT lệnh tạo thanh toán cho yêu cầu này (thực tế ${calls} lệnh)`);
+      assert(rs.every((r) => r.status === 200 || r.status === 201), 'Cả năm phản hồi đều thành công (200/201)');
+      assert(row && row.submission_status === 'SUBMITTED', 'Sau khi xong, yêu cầu ở SUBMITTED');
+    } finally {
+      assert(await child.stop(), 'Server con provider chậm đã thoát hẳn');
+    }
+  });
+
   // Các ca provider sập dùng người dùng riêng để không đụng hạn mức PENDING của các nhóm trên.
   const victim = await flows.registerUser({ username: `ti-vic-${stamp}`, displayName: 'Nạp lúc provider sập' });
   const victim2 = await flows.registerUser({ username: `ti-vi2-${stamp}`, displayName: 'Nạp lúc provider sập 2' });
@@ -297,6 +321,90 @@ async function main() {
       `Đối soát đưa về SUBMITTED, vẫn PENDING (thực tế ${row.submission_status}/${row.status})`);
     const p = await provider.findPayment(row.provider_ref);
     assert(!!p && p.amount === 115000 && p.merchant_ref === r.data.id && p.status === 'PENDING', 'Provider giữ nguyên đúng một bản ghi');
+  });
+
+  await group('I7: Gửi lại khi tiến trình khác đang giữ quyền gửi còn hạn -> KHÔNG gửi lần nữa', async () => {
+    const id = uuid(); const ref = uuid(); const key = rid(); const amount = 117000; const now = nowIso();
+    await db.prepare(
+      `INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, version, client_request_id,
+         submission_status, submit_claim, submit_claimed_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'PENDING', ?, 0, ?, 'SUBMITTING', 'tien-trinh-khac', ?, ?, ?)`
+    ).run(id, third.user.id, amount, ref, key, now, now, now);
+    const r = await topup(third.token, amount, key);
+    assert(r.status === 200 && r.data.idempotentReplay === true && r.data.submissionStatus === 'SUBMITTING',
+      `Trả 200 idempotentReplay với trạng thái hiện tại SUBMITTING (nhận ${r.status} ${r.data.submissionStatus || r.data.error})`);
+    assert(!(await provider.findPayment(ref)), 'Lượt gửi lại này KHÔNG gửi lệnh nào lên provider');
+    const row = await prRow(id);
+    assert(row.submit_claim === 'tien-trinh-khac' && row.submission_status === 'SUBMITTING', 'Quyền gửi của tiến trình kia không bị giành');
+  });
+
+  await group('S6: Tiến trình chết giữa chừng để lại quyền đã hết hạn -> đối soát giành lại và gửi', async () => {
+    const id = uuid(); const ref = uuid(); const key = rid(); const amount = 118000; const now = nowIso();
+    const longAgo = new Date(Date.now() - 3600 * 1000).toISOString();
+    await db.prepare(
+      `INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, version, client_request_id,
+         submission_status, submit_claim, submit_claimed_at, created_at, updated_at)
+       VALUES (?, ?, ?, 'PENDING', ?, 0, ?, 'SUBMITTING', 'tien-trinh-da-chet', ?, ?, ?)`
+    ).run(id, third.user.id, amount, ref, key, longAgo, now, now);
+    const k = await runReconcile(id);
+    const row = await prRow(id);
+    assert(k.code === 0 && row.submission_status === 'SUBMITTED' && row.submit_claim === null,
+      `Đối soát giành lại quyền hết hạn, gửi xong và nhả quyền (thực tế ${row.submission_status}, claim=${row.submit_claim}, exit ${k.code})`);
+    assert(!!(await provider.findPayment(ref)), 'Provider có bản ghi sau khi phục hồi');
+    assert(row.status === 'PENDING', 'Yêu cầu vẫn PENDING chờ kết quả thanh toán (không bị đóng)');
+  });
+
+  await group('M1: CSDL SQLite cũ (trước khi có các cột này) được nâng cấp đúng, dữ liệu cũ giữ nguyên', async () => {
+    if (DIALECT !== 'sqlite') {
+      console.log('  (bỏ qua trên PostgreSQL: nâng cấp PostgreSQL được kiểm bằng migration v3 trên CSDL thử nghiệm riêng)');
+      return;
+    }
+    const Database = require('../src/lib/sqlite');
+    const file = path.join(ROOT, 'data', 'test', `legacy-topup-${Date.now()}.db`);
+    const now = nowIso();
+    const old = new Database(file);
+    old.exec(`CREATE TABLE payment_requests (
+      id TEXT PRIMARY KEY, user_id TEXT NOT NULL, amount INTEGER NOT NULL CHECK (amount > 0),
+      status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','SUCCEEDED','FAILED')),
+      provider_ref TEXT NOT NULL UNIQUE, version INTEGER NOT NULL DEFAULT 0, resolved_at TEXT,
+      resolved_by TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL)`);
+    old.prepare(`INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, created_at, updated_at)
+                 VALUES ('legacy-pending', 'u-cu', 150000, 'PENDING', 'legacy-ref-1', ?, ?)`).run(now, now);
+    old.prepare(`INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, created_at, updated_at)
+                 VALUES ('legacy-done', 'u-cu', 160000, 'SUCCEEDED', 'legacy-ref-2', ?, ?)`).run(now, now);
+    old.close();
+
+    const env = { ...process.env, DB_PATH: file };
+    delete env.DATABASE_URL;
+    const child = spawnSync(process.execPath, ['-e', "require('./src/db'); console.log('NANG_CAP_XONG')"], { cwd: ROOT, env, encoding: 'utf8' });
+    assert(child.status === 0 && /NANG_CAP_XONG/.test(child.stdout),
+      `Khởi động trên CSDL cũ không lỗi (exit ${child.status}) ${(child.stderr || '').slice(0, 200)}`);
+
+    const check = new Database(file);
+    try {
+      const cols = check.prepare('PRAGMA table_info(payment_requests)').all().map((c) => c.name);
+      assert(['client_request_id', 'submission_status', 'submit_attempts', 'last_submit_error', 'submit_claim', 'submit_claimed_at']
+        .every((c) => cols.includes(c)), 'Đủ các cột mới sau nâng cấp');
+      const pend = check.prepare("SELECT * FROM payment_requests WHERE id = 'legacy-pending'").get();
+      assert(pend && pend.status === 'PENDING' && pend.amount === 150000 && pend.submission_status === 'SUBMITTED'
+        && pend.submit_attempts === 0 && pend.client_request_id === null,
+      `Yêu cầu cũ PENDING giữ nguyên số tiền, mặc định SUBMITTED (${JSON.stringify(pend)})`);
+      const done = check.prepare("SELECT status, amount FROM payment_requests WHERE id = 'legacy-done'").get();
+      assert(done && done.status === 'SUCCEEDED' && done.amount === 160000, 'Yêu cầu cũ đã tất toán giữ nguyên');
+
+      const ins = (id, key) => check.prepare(
+        `INSERT INTO payment_requests (id, user_id, amount, status, provider_ref, client_request_id, created_at, updated_at)
+         VALUES (?, 'u-cu', 1000, 'PENDING', ?, ?, ?, ?)`).run(id, `r-${id}`, key, now, now);
+      ins('n-1', null); ins('n-2', null);
+      assert(true, 'Nhiều yêu cầu không có khoá (NULL) cùng người dùng vẫn được phép — chỉ mục là partial');
+      ins('k-1', 'khoa-trung-1234');
+      let dupBlocked = false;
+      try { ins('k-2', 'khoa-trung-1234'); } catch (_) { dupBlocked = true; }
+      assert(dupBlocked, 'Cùng người dùng + cùng khoá bị chỉ mục duy nhất chặn ở CSDL');
+    } finally {
+      check.close();
+      for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(file + s); } catch (_) { /* file tạm */ } }
+    }
   });
 
   const inv = await checkInvariants(db);
