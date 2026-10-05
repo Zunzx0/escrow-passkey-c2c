@@ -14,6 +14,7 @@
 //   6. Ghi reports/<mốc thời gian>/summary.json + summary.md; mã thoát khác 0 nếu có bộ hỏng.
 const fs = require('fs');
 const path = require('path');
+const { countMarks } = require('./count-marks');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
@@ -141,13 +142,6 @@ function runNode(script, extraEnv = {}) {
     child.stderr.on('data', (d) => { out += d; });
     child.on('close', (code) => resolve({ code, out, ms: Date.now() - started }));
   });
-}
-
-function countMarks(out) {
-  return {
-    pass: (out.match(/✅/g) || []).length,
-    fail: (out.match(/❌/g) || []).length,
-  };
 }
 
 async function main() {
