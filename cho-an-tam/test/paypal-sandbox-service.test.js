@@ -10,10 +10,10 @@ const { createSandboxPaymentService } = require(servicePath);
 const { createQuote } = require(providerPath);
 
 function harness(changes = {}, options = {}) {
-  const row = { provider: 'PAYPAL_SANDBOX', paymentRequestId: 'request-1', userId: 'buyer-1', providerRef: 'ref-1', amountVnd: 100000, quote: createQuote(100000, 25000), orderId: 'ORDER1', ...changes };
+  const row = { provider: 'PAYPAL_SANDBOX', paymentRequestId: 'request-1', userId: 'buyer-1', providerRef: 'ref-1', amountVnd: 100000, quote: createQuote(100000, 25000), orderId: 'ORDER1', status: 'PENDING', ...changes };
   const calls = { create: 0, capture: 0, query: 0, settle: [], credits: 0, balance: 0 };
   const result = { orderId: 'ORDER1', paymentRequestId: 'request-1', amount: 100000, status: 'SUCCEEDED', captureId: 'CAPTURE1', approvalUrl: 'https://www.sandbox.paypal.com/checkoutnow?token=ORDER1' };
-  let signatureValid = true; let settled = false;
+  let signatureValid = true; let settled = row.status === 'SUCCEEDED';
   const provider = {
     async createOrder() { calls.create++; return structuredClone(result); },
     async captureOrder() { calls.capture++; return structuredClone(result); },
@@ -135,4 +135,34 @@ test('failed first create keeps original durable timestamp for subsequent retry'
   await assert.rejects(() => h.service.createOrder(owner));
   assert.equal(first, new Date(now).toISOString());
   assert.equal(h.row.createAttemptAt, first); assert.equal(h.calls.credits, 0);
+});
+
+test('closed local payment cannot initiate creation or capture before any provider call', async () => {
+  for (const orderId of [null, 'ORDER1']) {
+    const h = harness({ status: 'FAILED', orderId });
+    for (const method of ['createOrder', 'capture']) await assert.rejects(() => h.service[method](owner), e => e.code === 'PAYPAL_PAYMENT_CLOSED');
+    assert.equal(h.calls.create + h.calls.capture + h.calls.query + h.calls.credits, 0);
+  }
+  const missing = harness({ status: undefined });
+  await assert.rejects(() => missing.service.capture(owner));
+  assert.equal(missing.calls.capture, 0);
+});
+
+test('already settled request recovers with GET and duplicate sink without new money-taking operation', async () => {
+  const h = harness({ status: 'SUCCEEDED' });
+  const created = await h.service.createOrder(owner);
+  const captured = await h.service.capture(owner);
+  assert.equal(created.orderId, 'ORDER1');
+  assert.equal(captured.outcome, 'DUPLICATE');
+  assert.equal(h.calls.query, 2); assert.equal(h.calls.create + h.calls.capture + h.calls.credits, 0);
+  const corrupt = harness({ status: 'SUCCEEDED', orderId: null });
+  await assert.rejects(() => corrupt.service.capture(owner));
+  assert.equal(corrupt.calls.query + corrupt.calls.capture, 0);
+});
+
+test('create claim rechecks a request closed during the atomic claim', async () => {
+  const h = harness({ orderId: null });
+  h.store.claimCreateAttempt = async () => ({ ...h.row, status: 'FAILED', createAttemptAt: new Date().toISOString() });
+  await assert.rejects(() => h.service.createOrder(owner), e => e.code === 'PAYPAL_PAYMENT_CLOSED');
+  assert.equal(h.calls.create + h.calls.query + h.calls.credits, 0);
 });

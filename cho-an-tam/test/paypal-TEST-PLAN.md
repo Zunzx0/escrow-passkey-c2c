@@ -34,7 +34,9 @@ Remove-Item Env:PAYPAL_SERVICE_MODULE
 
 ## Kết quả đã chạy
 
-Ngày 05/10/2026: 24/24 kịch bản `node:test` đạt khi đọc trực tiếp hai module checkout triển khai. Có 14 kịch bản adapter và 10 kịch bản service. Không có request mạng hay kết nối DB trong lần chạy này. Một lần chạy ban đầu dùng fixture OAuth thiếu `token_type=Bearer` bị từ chối; fixture đã được sửa rồi chạy lại sạch.
+Ngày 05/10/2026: 27/27 kịch bản `node:test` đạt khi đọc trực tiếp hai module checkout triển khai. Có 14 kịch bản adapter và 13 kịch bản service. Không có request mạng hay kết nối DB trong lần chạy này. Một lần chạy ban đầu dùng fixture OAuth thiếu `token_type=Bearer` bị từ chối; fixture đã được sửa rồi chạy lại sạch.
+
+Đã khóa thêm: yêu cầu local FAILED không thể create/capture; yêu cầu SUCCEEDED chỉ dùng GET và sink duplicate, không tạo giao dịch PayPal mới; trạng thái local được kiểm lại sau atomic create claim.
 
 Service concurrency sử dụng sink nguyên tử giả lập trong bộ test; đây là bằng chứng service gọi cùng một điểm tất toán với binding đúng, không phải bằng chứng giao dịch SQL production. Không thể suy ra chống cộng ví hai lần chỉ từ `PayPal-Request-Id`.
 
