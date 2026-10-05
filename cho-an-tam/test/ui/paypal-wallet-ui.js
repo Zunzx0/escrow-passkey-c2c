@@ -227,8 +227,8 @@ async function main() {
   p.close();
 
   p = await wallet({ extra: { 'GET /api/payments/paypal/config': () => json(404, { error: 'NOT_FOUND', message: 'x' }) } });
-  ok(!!p.amountInput() && /Cổng thanh toán mô phỏng/.test(p.viewText()) && !/PayPal Sandbox/.test(p.d.querySelector('.card .card-head').textContent),
-    'Máy chủ cũ chưa có route config (404): giữ cổng mô phỏng như trước, KHÔNG hiện PayPal (frontend có thể lên trước backend)');
+  ok(!p.amountInput() && /chưa mở cổng nào/.test(p.viewText()) && noMockCalls(p),
+    'Config 404: tắt cả hai cổng, không tự chuyển sang mock');
   p.close();
 
   for (const [label, resp] of [

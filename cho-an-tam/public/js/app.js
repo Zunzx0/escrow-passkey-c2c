@@ -2988,11 +2988,8 @@ const App = (() => {
       state.payConfig = cfg || { paypal: false, mock: false, state: 'invalid' };
     } catch (e) {
       if (e && e.stale) return state.payConfig || { paypal: false, mock: false, state: 'error' };
-      // 404: máy chủ cũ chưa có PayPal (frontend có thể được triển khai trước backend) -> giữ hành vi mô phỏng như trước.
-      // Mọi lỗi khác (mạng, 5xx, sai dạng): không biết cổng nào đang bật -> không mở cổng nào, không đoán.
-      state.payConfig = e && e.status === 404
-        ? { paypal: false, mock: true, state: 'legacy' }
-        : { paypal: false, mock: false, state: 'error' };
+      // Không có cấu hình xác nhận: giữ cả hai cổng tắt, kể cả HTTP 404.
+      state.payConfig = { paypal: false, mock: false, state: 'error' };
     }
     return state.payConfig;
   }

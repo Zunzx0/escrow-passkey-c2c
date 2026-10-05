@@ -65,7 +65,7 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
   const html0 = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script\b[^>]*\bsrc=[^>]*><\/script>/g, '');
   const log = [];
   const pending = new Map(); // id hẹn giờ -> số ms
-  const table = { ...routes };
+  const table = { 'GET /api/payments/paypal/config': () => json(200, { paypalSandbox: { enabled: false, mode: 'sandbox' }, mockPayments: { enabled: true } }), ...routes };
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/`,
     runScripts: 'outside-only',

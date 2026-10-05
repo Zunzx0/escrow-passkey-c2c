@@ -54,7 +54,7 @@ const HANG = Symbol('hang');
 async function openPage({ hash, user, routes }) {
   const html0 = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script\b[^>]*\bsrc=[^>]*><\/script>/g, '');
   const log = [];
-  const table = { ...routes };
+  const table = { 'GET /api/payments/paypal/config': () => json(200, { paypalSandbox: { enabled: false, mode: 'sandbox' }, mockPayments: { enabled: true } }), ...routes };
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/`,
     runScripts: 'outside-only',
