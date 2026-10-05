@@ -333,6 +333,7 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
   // Nguồn gốc quyền quản trị: bảng + backfill một lần, trigger ở mọi lần khởi động.
   // Đặt ở đây chứ không ở schema.sql để backfill chỉ chạy đúng lúc bảng được tạo lần đầu.
   require('./lib/adminProvenance').migrateSqlite(db);
@@ -364,6 +365,7 @@ const PG_MIGRATIONS = [
   { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
   { version: 3, name: 'topup-request-idempotency', file: 'schema.pg.003-topup-idempotency.sql' },
   { version: 4, name: 'payment-provider-isolation', file: 'schema.pg.004-payment-provider.sql' },
+  { version: 5, name: 'paypal-durable-bindings', file: 'schema.pg.005-paypal-bindings.sql' },
 ];
 
 function installPgTypeParsers(pg) {

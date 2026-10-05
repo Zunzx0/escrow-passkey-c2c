@@ -41,7 +41,9 @@
     "freeze:experiment": "node scripts/freeze-experiment.js",
     "freeze:verify": "node scripts/freeze-experiment.js --verify",
     "test:count-marks": "node test/count-marks-unit.js",
-    "test:provider-isolation": "node --env-file=.env.test test/payment-provider-isolation-e2e.js"
+    "test:provider-isolation": "node --env-file=.env.test test/payment-provider-isolation-e2e.js",
+    "test:paypal-store": "node test/paypal-store-concurrency-e2e.js",
+    "test:paypal-migration": "node test/paypal-binding-migration-e2e.js"
   },
   "keywords": [],
   "author": "",
