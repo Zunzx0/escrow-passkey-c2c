@@ -43,6 +43,8 @@ const App = (() => {
     sessionEpoch: 0,            // tăng mỗi khi PHIÊN đổi (đăng xuất, đăng nhập mới, đổi tài khoản); không tăng khi chỉ làm mới token
     topupIntent: null,          // bản nhớ trong bộ nhớ của ý định nạp tiền chưa rõ kết quả (bản lưu nằm ở localStorage)
     topupNotice: null,          // thông báo trạng thái nạp tiền đang hiện trên trang ví
+    payConfig: null,            // cấu hình công khai của cổng nạp tiền do máy chủ trả (PayPal Sandbox / mô phỏng)
+    paypalCallback: null,       // {kind:'return'|'cancel', id} đọc từ URL khi PayPal đưa người dùng quay lại; dùng một lần
   };
 
   const ROLE_LABEL = { BUYER: 'Người mua', SELLER: 'Người bán', ADMIN: 'Quản trị viên' };
@@ -111,6 +113,23 @@ const App = (() => {
     FAILED:    { label: 'Thất bại',            tone: 'tag-danger' },
   };
   const RESOLVED_BY_LABEL = { WEBHOOK: 'qua webhook', RECONCILER: 'qua đối soát tự động' };
+
+  // Giai đoạn (stage) của một yêu cầu nạp PayPal Sandbox do MÁY CHỦ quyết định (HOP-DONG-API-PAYPAL-P2-M2.md §5).
+  // Chỉ SUCCEEDED (được GET xác nhận) mới là nạp thành công; mọi giai đoạn khác — kể cả HTTP 200, DUPLICATE, BUSY —
+  // KHÔNG phải thành công.
+  const PAYPAL_PROVIDER = 'PAYPAL_SANDBOX';
+  const PAYPAL_STAGE_UI = {
+    CREATING:                 { label: 'Đang tạo yêu cầu',            tone: 'tag-warning', hint: 'Chưa có order PayPal' },
+    AWAITING_APPROVAL:        { label: 'Chờ phê duyệt PayPal',        tone: 'tag-warning', hint: 'Chờ bạn phê duyệt ở PayPal Sandbox' },
+    CAPTURING:                { label: 'Đang xác nhận thanh toán',    tone: 'tag-warning', hint: 'Đang xác nhận với PayPal' },
+    RECONCILING:              { label: 'Đang đối soát',               tone: 'tag-warning', hint: 'Chưa rõ kết quả — hệ thống đang đối soát' },
+    CREATE_RECOVERY_REQUIRED: { label: 'Cần đối soát',                tone: 'tag-danger',  hint: 'Chưa tạo được order; không tự tạo order mới' },
+    RECOVERY_REQUIRED:        { label: 'Cần xử lý thủ công',          tone: 'tag-danger',  hint: 'Có bằng chứng thu tiền nhưng yêu cầu đã đóng' },
+    NOT_CAPTURED:             { label: 'Không tiếp tục thu tiền',     tone: '',            hint: 'Ví không đổi' },
+    SUCCEEDED:                { label: 'Thành công',                  tone: 'tag-success', hint: '' },
+    FAILED:                   { label: 'Thất bại',                    tone: 'tag-danger',  hint: 'Yêu cầu đã đóng; ví không đổi' },
+  };
+  const PAYPAL_STAGES = Object.keys(PAYPAL_STAGE_UI);
 
   // =====================================================================
   // Tiện ích
@@ -215,6 +234,19 @@ const App = (() => {
       'hãy bắt đầu lại thao tác và xác thực Passkey khi được yêu cầu.',
     // 503 của POST /payments/topup: yêu cầu ĐÃ được lưu ở máy chủ, chỉ chưa gửi được sang cổng. Gửi lại bằng cùng
     // requestId là an toàn (không tạo trùng).
+    PAYPAL_DISABLED: () =>
+      'Nạp tiền bằng PayPal Sandbox hiện chưa được bật hoặc chưa đủ cấu hình. Không có yêu cầu nào được tạo và giao diện không tự chuyển sang cổng khác.',
+    PAYPAL_CREATE_RECOVERY_REQUIRED: () =>
+      'Yêu cầu này đã không tạo được order PayPal trong 5 phút đầu và hệ thống KHÔNG tự tạo order mới. Cần hỗ trợ đối soát — ' +
+      'hãy giữ mã tham chiếu của yêu cầu.',
+    PAYPAL_ORDER_MISMATCH: () =>
+      'Dữ liệu order PayPal không khớp với yêu cầu đã lưu. Dừng mọi thao tác tự động; cần đối soát thủ công.',
+    PAYPAL_CAPTURE_CONFLICT: () =>
+      'Bằng chứng thu tiền của yêu cầu này cần được đối soát thủ công. Dừng mọi thao tác tự động; ví không bị giao diện thay đổi.',
+    PAYPAL_CAPTURE_CLAIM_LOST: () =>
+      'Một thao tác xác nhận khác đang giữ quyền thu tiền cho yêu cầu này. Không gửi thêm lệnh nào — hãy bấm "Kiểm tra lại" để xem trạng thái.',
+    PAYMENT_PROVIDER_MISMATCH: () =>
+      'Yêu cầu này thuộc một cổng thanh toán khác với cổng bạn đang dùng. Hãy kiểm tra lại trong Lịch sử nạp tiền.',
     PROVIDER_UNAVAILABLE: () =>
       'Cổng thanh toán tạm thời không nhận yêu cầu. Yêu cầu nạp tiền của bạn đã được lưu, chưa bị mất — hãy bấm "Thử lại cùng yêu cầu" ' +
       'sau ít phút (hệ thống cũng sẽ tự gửi lại).',
@@ -2278,11 +2310,15 @@ const App = (() => {
       return wrongRole('Quản trị viên không phải một bên của giao dịch nên không có ví.');
     }
 
+    // Cổng nạp tiền nào đang bật là do MÁY CHỦ nói (GET /api/payments/paypal/config); không đoán từ hostname.
+    const cfg = await loadPayConfig();
+    if (currentHead() !== 'wallet' || !state.user) return; // người dùng đã đi nơi khác / đăng xuất trong lúc chờ
+
     view().innerHTML = `
       <div class="page">
         ${banner('Ví & nạp tiền', 'Mọi biến động số dư được ghi thành bút toán và có khoá chống ghi trùng')}
         <div class="stat-grid" id="walletStats"></div>
-        ${topupCard()}
+        ${walletTopupCard(cfg)}
         <div class="card">
           <div class="card-head"><h2>Lịch sử nạp tiền</h2></div>
           <div class="table-scroll" id="topupHistory"></div>
@@ -2340,6 +2376,8 @@ const App = (() => {
           </tbody>
         </table>`;
     renderChrome();
+    // Vừa được PayPal đưa quay lại (?paypal=return|cancel): xác minh rồi mới hiển thị, không tự thu tiền.
+    Promise.resolve(processPaypalCallback()).catch(() => { /* lỗi đã được báo ở nơi xử lý */ });
   }
 
   // ---------- Nạp tiền qua Mock Payment Provider ----------
@@ -2382,6 +2420,7 @@ const App = (() => {
    * trường submissionStatus (dữ liệu cũ) được coi là đã gửi, đúng như máy chủ quy ước.
    */
   function historyAction(p) {
+    if (p.provider === PAYPAL_PROVIDER) return paypalHistoryAction(p);
     if (p.status !== 'PENDING') return '';
     const sub = p.submissionStatus || 'SUBMITTED';
     if (sub === 'SUBMITTING') return '<span class="muted small">Đang gửi sang cổng thanh toán…</span>';
@@ -2406,15 +2445,20 @@ const App = (() => {
       <table class="data">
         <thead><tr><th>Thời điểm</th><th class="num">Số tiền</th><th>Trạng thái</th><th>Kết quả</th><th></th></tr></thead>
         <tbody>${paymentRequests.map((p) => {
-          const ui = PAYMENT_UI[p.status] || { label: p.status, tone: '' };
+          const pp = p.provider === PAYPAL_PROVIDER && PAYPAL_STAGES.includes(p.stage);
+          const ui = pp ? PAYPAL_STAGE_UI[p.stage] : (PAYMENT_UI[p.status] || { label: p.status, tone: '' });
+          const tag = p.provider === PAYPAL_PROVIDER ? '<div><span class="tag tag-info">PayPal Sandbox</span></div>'
+            : p.provider === 'MOCK' ? '<div><span class="tag">Mô phỏng</span></div>' : '';
+          const usd = pp && validQuote(p.quote, p.amount) ? `<div class="muted small">${esc(p.quote.usdValue)} USD · Sandbox</div>` : '';
+          const result = p.resolvedAt
+            ? `${fmtDateTime(p.resolvedAt)} · ${esc(RESOLVED_BY_LABEL[p.resolvedBy] || '')}`
+            : (pp ? esc(ui.hint || '') : 'Chờ cổng thanh toán trả kết quả');
           return `
             <tr>
-              <td class="nowrap">${fmtDateTime(p.createdAt)}</td>
-              <td class="num">${money(p.amount)}</td>
+              <td class="nowrap">${fmtDateTime(p.createdAt)}${tag}</td>
+              <td class="num">${money(p.amount)}${usd}</td>
               <td><span class="tag ${ui.tone}">${esc(ui.label)}</span></td>
-              <td class="muted small">${p.resolvedAt
-                ? `${fmtDateTime(p.resolvedAt)} · ${esc(RESOLVED_BY_LABEL[p.resolvedBy] || '')}`
-                : 'Chờ cổng thanh toán trả kết quả'}</td>
+              <td class="muted small">${result}</td>
               <td>${historyAction(p)}</td>
             </tr>`;
         }).join('')}
@@ -2546,8 +2590,8 @@ const App = (() => {
     state.topupNotice = null;
   }
 
-  function startIntent(amount) {
-    const intent = { userId: state.user.id, requestId: 'topup-' + newRequestId(), amount, createdAt: new Date().toISOString() };
+  function startIntent(amount, provider) {
+    const intent = { userId: state.user.id, requestId: 'topup-' + newRequestId(), amount, provider: provider || 'MOCK', createdAt: new Date().toISOString() };
     saveIntent(intent);
     return intent;
   }
@@ -2640,6 +2684,14 @@ const App = (() => {
           '<b>Chưa có kết quả mới từ cổng thanh toán.</b> Hệ thống vẫn tự đối soát; số dư chỉ đổi khi máy chủ xác nhận. Bạn có thể kiểm tra lại bất cứ lúc nào.',
           `<button class="btn btn-sm" data-act="topup-check"${idAttr}>Kiểm tra lại</button>`);
         break;
+      case 'paypal':
+        box.innerHTML = paypalNoticeHtml(notice, intent);
+        break;
+      case 'paypal-stop':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Dừng mọi thao tác tự động.</b> ${esc((API_ERROR_MESSAGES[notice.code] || (() => ''))())} Không có khoản nào bị giao diện tự cộng hay tự tạo lại.`,
+          check + (intent ? fresh : ''));
+        break;
       default: // 'unknown'
         box.innerHTML = box2('note-warning', 'triangle-alert',
           `<b>Chưa rõ yêu cầu nạp ${amountText} đã được tạo hay chưa.</b> Số tiền được khoá để tránh nạp trùng. Hãy kiểm tra trạng thái trước; gửi lại cùng yêu cầu thì an toàn.`,
@@ -2648,6 +2700,11 @@ const App = (() => {
   }
 
   async function createTopup(btn) {
+    // Ý định đã có thì đi tiếp đúng đường của nó (không đổi cổng giữa chừng); chưa có thì theo cấu hình máy chủ.
+    const existing = loadIntent();
+    if ((existing && existing.provider === PAYPAL_PROVIDER) || (!existing && state.payConfig && state.payConfig.paypal)) {
+      return createPaypalTopup(btn);
+    }
     // Còn ý định chưa rõ thì GỬI LẠI chính nó (cùng khoá, cùng số tiền), bỏ qua ô nhập.
     let intent = loadIntent();
     if (!intent) {
@@ -2821,6 +2878,9 @@ const App = (() => {
     }
     if (raw === undefined) return; // bấm lặp
     if (!ctxAlive(ctx)) return;
+    if (raw !== null && (raw.provider === PAYPAL_PROVIDER || (intent && intent.provider === PAYPAL_PROVIDER))) {
+      return finishPaypalCheck(raw, { intent, knownId, ctx });
+    }
     if (raw === null) {
       setTopupNotice({ kind: 'notfound' });
       return;
@@ -2867,6 +2927,481 @@ const App = (() => {
     const input = $('#topupAmount');
     if (input) { input.value = ''; input.focus(); }
     toast('Đã bỏ lần nạp cũ. Nhập số tiền để bắt đầu lần nạp mới.');
+  }
+
+  // ---------- PayPal Sandbox ----------
+  //
+  // Hợp đồng: HOP-DONG-API-PAYPAL-P2-M2.md. Mọi con số tiền, báo giá, giai đoạn và URL phê duyệt đều do MÁY CHỦ quyết định; giao
+  // diện chỉ hiển thị và KIỂM dữ liệu, không tự tính tỷ giá hay số USD, không tự dựng URL, không tự cộng ví.
+  //
+  // Luồng: tạo yêu cầu (POST /payments/paypal/topup, giữ requestId như P1) -> người dùng bấm "Mở PayPal Sandbox" (mở lại URL bằng
+  // GET .../checkout) -> PayPal đưa về ?paypal=return|cancel&paymentRequestId=<id> -> giao diện GET /payments/:id để xác minh chủ
+  // sở hữu / id / số tiền / requestId / provider -> người dùng bấm xác nhận thì POST .../capture -> luôn GET lại làm chứng cứ.
+  // Query của PayPal (token, PayerID) KHÔNG phải chứng cứ thành công và không dùng làm danh tính hay quyền sở hữu.
+
+  const PAYPAL_APPROVAL_ORIGIN = 'https://www.sandbox.paypal.com';
+  // Từ chối dứt khoát của máy chủ TRƯỚC khi tạo gì: bỏ ý định. Lỗi còn lại (mạng, timeout, 5xx, 429, ...) có thể đã tạo -> giữ ý định.
+  const PAYPAL_DEFINITE_CODES = ['INVALID_AMOUNT', 'AMOUNT_OUT_OF_RANGE', 'VALIDATION_ERROR', 'TOPUP_LIMIT_EXCEEDED',
+    'WALLET_NOT_FOUND', 'FORBIDDEN', 'PAYPAL_DISABLED'];
+  const PAYPAL_STOP_CODES = ['PAYPAL_CREATE_RECOVERY_REQUIRED', 'PAYPAL_ORDER_MISMATCH', 'PAYPAL_CAPTURE_CONFLICT'];
+  const PAYPAL_OUTCOME_HINT = {
+    APPLIED: 'Máy chủ báo đã áp dụng — đang xác minh lại trạng thái.',
+    DUPLICATE: 'Yêu cầu này đã được xử lý trước đó — đang xác minh lại trạng thái.',
+    BUSY: 'Máy chủ đang xử lý một xác nhận khác cho yêu cầu này. Hãy chờ rồi kiểm tra lại.',
+    NOT_READY: 'PayPal chưa ghi nhận phê duyệt. Hãy hoàn tất phê duyệt ở PayPal Sandbox rồi quay lại.',
+    CLOSED: 'Yêu cầu này đã đóng.',
+    NOT_CAPTURED: 'Không thu tiền cho yêu cầu này.',
+    RECOVERY_REQUIRED: 'Cần xử lý thủ công; giao diện không tự cộng ví.',
+    RECONCILING: 'Chưa rõ kết quả; hệ thống đang đối soát.',
+    AWAITING_APPROVAL: 'Vẫn chờ phê duyệt ở PayPal Sandbox.',
+  };
+
+  /** Điều hướng sang URL đã kiểm. window.ENCLAVE_NAVIGATE chỉ để bộ kiểm thử UI chặn điều hướng thật. */
+  function goTo(url) {
+    if (typeof window.ENCLAVE_NAVIGATE === 'function') return window.ENCLAVE_NAVIGATE(url);
+    window.location.assign(url);
+  }
+
+  /** Chỉ chấp nhận URL https, ĐÚNG origin Sandbox, không username/password. Không domain gần giống, không javascript:. */
+  function validApprovalUrl(raw) {
+    if (typeof raw !== 'string' || !raw || raw.length > 2000 || /[\s\\]/.test(raw)) return null;
+    let u;
+    try { u = new URL(raw); } catch (_) { return null; }
+    if (u.protocol !== 'https:' || u.origin !== PAYPAL_APPROVAL_ORIGIN) return null;
+    if (u.username || u.password || u.port) return null;
+    return u.href;
+  }
+
+  /** Cấu hình công khai. Thiếu/lỗi/sai dạng thì TẮT PayPal; chỉ mở mô phỏng khi máy chủ nói mockPayments.enabled=true. */
+  function readPayConfig(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const pp = raw.paypalSandbox;
+    const mk = raw.mockPayments;
+    if (!pp || typeof pp !== 'object' || typeof pp.enabled !== 'boolean') return null;
+    if (!mk || typeof mk !== 'object' || typeof mk.enabled !== 'boolean') return null;
+    return { paypal: pp.enabled === true && pp.mode === 'sandbox', mock: mk.enabled === true, state: 'ok' };
+  }
+
+  async function loadPayConfig() {
+    try {
+      const cfg = readPayConfig(await api('/payments/paypal/config'));
+      state.payConfig = cfg || { paypal: false, mock: false, state: 'invalid' };
+    } catch (e) {
+      if (e && e.stale) return state.payConfig || { paypal: false, mock: false, state: 'error' };
+      // 404: máy chủ cũ chưa có PayPal (frontend có thể được triển khai trước backend) -> giữ hành vi mô phỏng như trước.
+      // Mọi lỗi khác (mạng, 5xx, sai dạng): không biết cổng nào đang bật -> không mở cổng nào, không đoán.
+      state.payConfig = e && e.status === 404
+        ? { paypal: false, mock: true, state: 'legacy' }
+        : { paypal: false, mock: false, state: 'error' };
+    }
+    return state.payConfig;
+  }
+
+  function walletTopupCard(cfg) {
+    if (cfg.paypal) return paypalTopupCard();
+    if (cfg.mock) return topupCard();
+    const msg = cfg.state === 'ok'
+      ? 'Hiện chưa có cổng nạp tiền nào được bật. Giao diện không tự chuyển sang cổng khác.'
+      : 'Chưa tải được cấu hình nạp tiền từ máy chủ nên chưa mở cổng nào. Giao diện không đoán cổng nào đang bật.';
+    return `
+      <div class="card">
+        <div class="card-head"><h2>Nạp tiền vào ví</h2></div>
+        <div class="card-body stack">
+          <div class="note note-warning">${ico('triangle-alert', 18)}<span><b>Nạp tiền chưa sẵn sàng.</b> ${msg}</span></div>
+          <div id="topupIntent" aria-live="polite"></div>
+          ${cfg.state === 'ok' ? '' : '<div><button class="btn" data-act="paypal-config-retry">Tải lại cấu hình</button></div>'}
+        </div>
+      </div>`;
+  }
+
+  function paypalTopupCard() {
+    return `
+      <div class="card">
+        <div class="card-head"><h2>Nạp tiền vào ví</h2><span class="tag tag-info">${ico('shield-check', 12)} PayPal Sandbox</span></div>
+        <div class="card-body stack">
+          <div class="field">
+            <label for="topupAmount">Số tiền ghi vào ví (VND)</label>
+            <div class="chips">${TOPUP_PRESETS.map((v) =>
+              `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
+            <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
+          </div>
+          <div id="topupIntent" aria-live="polite"></div>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Đây là <b>PayPal Sandbox</b> (môi trường thử): dùng tài khoản Sandbox, không chuyển tiền thật. Sau khi tạo yêu cầu,
+              <b>máy chủ</b> chốt số VND ghi vào ví và số USD Sandbox phải trả theo tỷ giá mô phỏng; giao diện không tự tính.</span>
+          </div>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Số dư chỉ tăng khi <b>máy chủ xác nhận</b> đã thu tiền. Quay lại từ PayPal, đóng cửa sổ hay huỷ không làm tăng số dư và
+              cũng không làm yêu cầu thất bại. Ví, ký quỹ, hoàn tiền và giải ngân tranh chấp vẫn tính bằng VND trong ví nội bộ; hệ thống
+              không hoàn tiền hay chi tiền qua PayPal.</span>
+          </div>
+          <div><button class="btn btn-primary btn-lg" data-act="topup-create">${ico('wallet', 18)} Tạo yêu cầu nạp PayPal</button></div>
+        </div>
+      </div>`;
+  }
+
+  /** Báo giá do máy chủ chốt. Chỉ KIỂM nhất quán (không dùng để tính số hiển thị): usdValue là chuỗi của máy chủ. */
+  function validQuote(q, amount) {
+    if (!q || typeof q !== 'object' || Array.isArray(q)) return false;
+    if (q.currency !== 'USD' || q.amountVnd !== amount) return false;
+    if (!Number.isSafeInteger(q.usdCents) || q.usdCents <= 0) return false;
+    if (typeof q.usdValue !== 'string' || !/^\d{1,9}\.\d{2}$/.test(q.usdValue)) return false;
+    if (q.usdValue.replace('.', '').replace(/^0+(?=\d)/, '') !== String(q.usdCents)) return false;
+    if (!Number.isSafeInteger(q.rateVndPerUsd) || q.rateVndPerUsd <= 0 || q.rateKind !== 'DEMO_FIXED') return false;
+    return typeof q.rateLabel === 'string' && !!q.rateLabel.trim() && q.rateLabel.length <= 200;
+  }
+
+  /**
+   * Một dòng yêu cầu PayPal Sandbox đọc từ máy chủ có đủ và đúng dữ liệu để dựa vào không? Kiểm id / số tiền / requestId / provider
+   * khớp yêu cầu đang theo dõi (khi biết), báo giá hợp lệ, giai đoạn thuộc bộ đã biết, và status SUCCEEDED <=> stage SUCCEEDED.
+   * Trả về dòng hoặc null.
+   */
+  function readPaypalRow(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    if (typeof r.id !== 'string' || !r.id || r.provider !== PAYPAL_PROVIDER || r.sandbox !== true) return null;
+    if (!PAYMENT_STATUSES.includes(r.status) || !PAYPAL_STAGES.includes(r.stage)) return null;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0 || typeof r.requestId !== 'string' || !REQUEST_ID_RE.test(r.requestId)) return null;
+    if (!SUBMISSION_STATUSES.includes(r.submissionStatus) || !validQuote(r.quote, r.amount)) return null;
+    if ((r.status === 'SUCCEEDED') !== (r.stage === 'SUCCEEDED')) return null;
+    if (expect && expect.id !== undefined && r.id !== expect.id) return null;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return null;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return null;
+    return r;
+  }
+
+  function paypalMatchesIntent(row, intent) {
+    return !!intent && intent.provider === PAYPAL_PROVIDER && row.requestId === intent.requestId && row.amount === intent.amount
+      && (!intent.paymentId || intent.paymentId === row.id);
+  }
+
+  function paypalHistoryAction(p) {
+    if (!PAYPAL_STAGES.includes(p.stage)) return '';
+    const id = esc(p.id);
+    switch (p.stage) {
+      case 'AWAITING_APPROVAL': return `<button class="btn btn-sm" data-act="paypal-approve" data-id="${id}">Mở PayPal Sandbox</button>`;
+      case 'CREATING': case 'CAPTURING': case 'RECONCILING':
+        return `<button class="btn btn-sm" data-act="topup-check" data-id="${id}">Kiểm tra</button>`;
+      case 'CREATE_RECOVERY_REQUIRED': case 'RECOVERY_REQUIRED':
+        return `<span class="muted small">Cần hỗ trợ — mã tham chiếu ${esc(shortId(p.id))}</span>`;
+      default: return '';
+    }
+  }
+
+  /** Khung thông báo PayPal theo giai đoạn. Chỉ có nút ĐÚNG với giai đoạn đó (ví dụ chỉ AWAITING_APPROVAL mới có nút xác nhận). */
+  function paypalNoticeHtml(notice, intent) {
+    const r = notice.row;
+    const q = r.quote;
+    const id = esc(r.id);
+    const ref = shortId(r.id);
+    const ui = PAYPAL_STAGE_UI[r.stage];
+    const matched = paypalMatchesIntent(r, intent);
+    const quote = `
+      <span class="price-row"><span>Ghi vào ví (VND)</span><span class="val">${money(r.amount)}</span></span>
+      <span class="price-row"><span>PayPal Sandbox thu (USD)</span><span class="val">${esc(q.usdValue)} USD</span></span>
+      <span class="muted small">${esc(q.rateLabel)} — ${Number(q.rateVndPerUsd).toLocaleString('vi-VN')} VND/USD, do máy chủ chốt; giao diện không tính lại.</span>`;
+    const hint = notice.extra && notice.extra.outcome && PAYPAL_OUTCOME_HINT[notice.extra.outcome]
+      ? `<br><span class="small">${esc(PAYPAL_OUTCOME_HINT[notice.extra.outcome])}</span>` : '';
+    const timed = notice.timedOut ? '<br><span class="small">Chưa có kết quả mới sau thời gian theo dõi — bấm "Kiểm tra lại".</span>' : '';
+    const check = `<button class="btn btn-sm" data-act="topup-check" data-id="${id}">Kiểm tra lại</button>`;
+    const dismiss = '<button class="btn btn-sm btn-ghost" data-act="topup-dismiss">Đã hiểu</button>';
+    const fresh = '<button class="btn btn-sm btn-ghost" data-act="topup-new">Bắt đầu lần nạp mới</button>';
+    const wrap = (tone, icon, text, buttons) =>
+      `<div class="note ${tone}">${ico(icon, 18)}<span>${text}${hint}${timed}${buttons ? `<span class="row mt-2px">${buttons}</span>` : ''}</span></div>`;
+
+    switch (r.stage) {
+      case 'CREATING':
+        return wrap('note-warning', 'loader-circle',
+          `<b>Đang tạo yêu cầu PayPal Sandbox cho khoản nạp ${money(r.amount)}…</b> Chưa có order. Có thể kiểm tra lại, hoặc thử lại cùng yêu cầu (cùng mã, không tạo trùng).`,
+          check + '<button class="btn btn-sm btn-primary" data-act="topup-retry">Thử lại cùng yêu cầu</button>');
+      case 'AWAITING_APPROVAL': {
+        const canCapture = !!notice.returned && !notice.unverified && matched;
+        const note = notice.unverified
+          ? '<b>Yêu cầu này không khớp với ý định nạp lưu trên thiết bị này</b> nên không cho xác nhận thu tiền ở đây; chỉ hiển thị trạng thái.'
+          : notice.returned
+            ? '<b>Bạn đã quay lại từ PayPal.</b> Bấm xác nhận để hoàn tất; số dư chỉ tăng khi máy chủ xác nhận đã thu tiền.'
+            : notice.cancelled
+              ? '<b>Bạn đã quay lại mà chưa hoàn tất phê duyệt.</b> Huỷ hay đóng cửa sổ không làm yêu cầu thất bại; yêu cầu vẫn mở và chưa thu tiền.'
+              : '<b>Chờ bạn phê duyệt ở PayPal Sandbox.</b> Số dư chỉ tăng sau khi bạn phê duyệt và máy chủ xác nhận.';
+        return wrap('', 'shield-check', `${note}${quote}`,
+          `<button class="btn btn-sm ${canCapture ? '' : 'btn-primary'}" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
+          + (canCapture ? `<button class="btn btn-sm btn-primary" data-act="paypal-capture" data-id="${id}">Xác nhận và hoàn tất thanh toán</button>` : '')
+          + check);
+      }
+      case 'CAPTURING':
+        return wrap('note-warning', 'loader-circle',
+          `<b>Đang xác nhận thanh toán với PayPal…</b> Đừng thao tác lặp; chưa phải thành công cũng chưa phải thất bại.${quote}`, check);
+      case 'RECONCILING':
+        return wrap('note-warning', 'clock',
+          `<b>Chưa rõ kết quả thanh toán; hệ thống đang đối soát.</b> Đây không phải thất bại và cũng chưa phải thành công; số dư chưa đổi.${quote}`, check);
+      case 'CREATE_RECOVERY_REQUIRED':
+        return wrap('note-warning', 'triangle-alert',
+          `<b>Chưa tạo được order PayPal và hệ thống KHÔNG tự tạo order mới.</b> Cần hỗ trợ đối soát — hãy gửi mã tham chiếu <b>${esc(ref)}</b>.`,
+          (intent ? fresh : '') + dismiss);
+      case 'RECOVERY_REQUIRED':
+        return wrap('note-warning', 'triangle-alert',
+          `<b>Có bằng chứng thu tiền nhưng yêu cầu đã đóng — cần xử lý thủ công.</b> Giao diện không tự cộng ví. Mã tham chiếu <b>${esc(ref)}</b>.`, dismiss);
+      case 'NOT_CAPTURED':
+        return wrap('', 'info', '<b>Không tiếp tục thu tiền cho yêu cầu này.</b> Ví không đổi. (Đóng hay huỷ cửa sổ PayPal không tự là trạng thái này.)', dismiss);
+      default: // FAILED
+        return wrap('note-warning', 'triangle-alert', `<b>${esc(ui.label)}:</b> yêu cầu nạp đã đóng; ví không đổi.`, dismiss);
+    }
+  }
+
+  /** Xác nhận SUCCEEDED bằng GET /payments/:id khớp id / số tiền / requestId / provider. Lỗi hay không khớp -> null. */
+  async function confirmPaypalByGet(row, ctx) {
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(row.id)); } catch (_) { return null; }
+    if (!ctxAlive(ctx)) return null;
+    return readPaypalRow(raw, { id: row.id, amount: row.amount, requestId: row.requestId });
+  }
+
+  /**
+   * Xử lý một dòng PayPal. `fromGet`: dòng đã được đọc bằng GET (theo dõi / kiểm tra / return) hay là phản hồi POST tạo yêu cầu.
+   * SUCCEEDED chỉ được báo khi GET khớp nói SUCCEEDED. Mọi giai đoạn khác hiển thị đúng như máy chủ nói; không giả thành công/thất bại.
+   */
+  async function settlePaypalRow(row, { ctx, fromGet, returned, cancelled, unverified, extra }) {
+    if (!ctxAlive(ctx)) return;
+    const intent = ctx.requestId && !ctx.released ? loadIntent() : null;
+    // Chỉ GHI NHỚ id yêu cầu khi ý định chưa có id và dòng đúng là của ý định này. Không bao giờ ghi đè id đã có:
+    // một lần quay lại mang id lạ không được tự biến thành "khớp ý định".
+    if (intent && !intent.paymentId && row.id && row.requestId === intent.requestId && row.amount === intent.amount) {
+      saveIntent({ ...intent, paymentId: row.id });
+    }
+
+    if (row.stage === 'SUCCEEDED') {
+      const confirmed = fromGet ? row : await confirmPaypalByGet(row, ctx);
+      if (!ctxAlive(ctx)) return;
+      if (!confirmed || confirmed.stage !== 'SUCCEEDED') {
+        setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+        toast('Chưa xác nhận được kết quả nạp tiền từ máy chủ. Hãy bấm "Kiểm tra lại".');
+        return;
+      }
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      setTopupNotice(null);
+      toast(`Nạp tiền thành công: ${money(confirmed.amount)} đã vào ví (PayPal Sandbox ${confirmed.quote.usdValue} USD).`, 'ok');
+      await refreshWallet();
+      if (!ctxAlive(ctx)) return;
+      if (currentHead() === 'wallet') route(); else renderChrome();
+      return;
+    }
+
+    setTopupNotice({ kind: 'paypal', row, returned, cancelled, unverified, extra });
+    // Yêu cầu đã đóng ở máy chủ: mở khoá số tiền để người dùng nạp tiếp (thông báo vẫn còn). Giai đoạn còn mở thì giữ ý định.
+    if (['FAILED', 'NOT_CAPTURED', 'RECOVERY_REQUIRED'].includes(row.stage)) {
+      if (ctx.requestId && !ctx.released) { releaseIntent(ctx); renderTopupIntent(); }
+      if (row.stage === 'FAILED') toast('Yêu cầu nạp PayPal đã đóng. Ví của bạn không thay đổi.', 'err');
+      return;
+    }
+    if (['CREATING', 'CAPTURING', 'RECONCILING'].includes(row.stage)) {
+      const res = await pollPayment(row.id, (r) => !['CREATING', 'CAPTURING', 'RECONCILING'].includes(r.stage), ctx);
+      if (res.cancelled || !ctxAlive(ctx)) return;
+      const fresh = res.row ? readPaypalRow(res.row, { id: row.id, amount: row.amount, requestId: row.requestId }) : null;
+      if (res.done && fresh) return settlePaypalRow(fresh, { ctx, fromGet: true });
+      setTopupNotice({ kind: 'paypal', row: fresh || row, timedOut: true });
+    }
+  }
+
+  /** Tạo yêu cầu nạp PayPal Sandbox. requestId/số tiền của ý định được giữ qua retry, tải lại, 5xx, timeout. */
+  async function createPaypalTopup(btn) {
+    let intent = loadIntent();
+    if (!intent) {
+      const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
+      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      intent = startIntent(amount, PAYPAL_PROVIDER); // lưu TRƯỚC khi gửi
+    }
+    const ctx = topupCtx(intent.requestId);
+    let raw;
+    try {
+      raw = await guard('topup-create', btn, async () => {
+        try {
+          return await api('/payments/paypal/topup', { method: 'POST', body: { amount: intent.amount, requestId: intent.requestId } });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
+      const code = e && e.code;
+      if (PAYPAL_DEFINITE_CODES.includes(code)) {
+        releaseIntent(ctx);
+        setTopupNotice(null);
+        if (code === 'PAYPAL_DISABLED') { // cấu hình đã đổi: không tự chuyển sang cổng khác, vẽ lại theo cấu hình mới
+          state.payConfig = { paypal: false, mock: false, state: 'ok' };
+          if (currentHead() === 'wallet') route();
+        }
+      } else if (PAYPAL_STOP_CODES.includes(code)) {
+        setTopupNotice({ kind: 'paypal-stop', code }); // dừng tự động; giữ ý định để kiểm tra
+      } else {
+        setTopupNotice({ kind: 'unknown' }); // mạng/timeout/5xx/429/...: có thể đã tạo -> giữ ý định, cùng khoá
+        if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      }
+      return;
+    }
+    if (raw === undefined) return; // bấm lặp
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { amount: intent.amount, requestId: intent.requestId });
+    if (!row) {
+      setTopupNotice({ kind: 'unknown' });
+      toast('Máy chủ trả về dữ liệu PayPal không đầy đủ hoặc không khớp nên chưa rõ yêu cầu nạp đã được tạo hay chưa. Hãy bấm "Kiểm tra trạng thái".', 'err');
+      await loadTopupHistory().catch(() => {});
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: false });
+  }
+
+  /** "Mở PayPal Sandbox": lấy URL mới bằng GET .../checkout, kiểm chặt rồi mới điều hướng. Không bao giờ tự dựng URL. */
+  async function openPaypalApproval(btn) {
+    const intent = loadIntent();
+    const mine = intent && intent.provider === PAYPAL_PROVIDER ? intent : null;
+    const id = (btn && btn.dataset && btn.dataset.id) || (mine && mine.paymentId) || null;
+    if (!id) return;
+    const ctx = topupCtx(mine ? mine.requestId : null);
+    let raw;
+    try {
+      raw = await guard('paypal-approve', btn, async () => {
+        try {
+          return await api('/payments/paypal/' + encodeURIComponent(id) + '/checkout');
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (_) {
+      return; // lỗi đã được báo (hoặc của phiên cũ, im lặng)
+    }
+    if (raw === undefined || !ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id, requestId: mine ? mine.requestId : undefined, amount: mine ? mine.amount : undefined });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không hợp lệ nên chưa mở PayPal. Hãy bấm "Kiểm tra lại".', 'err');
+      return;
+    }
+    if (row.stage !== 'AWAITING_APPROVAL') {
+      await settlePaypalRow(row, { ctx, fromGet: true });
+      return;
+    }
+    const url = validApprovalUrl(row.approvalUrl);
+    if (!url) {
+      toast('PayPal trả về địa chỉ phê duyệt không hợp lệ nên chưa mở. Hãy thử lại sau hoặc liên hệ hỗ trợ.', 'err');
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    goTo(url);
+  }
+
+  /** Người dùng chủ động bấm xác nhận sau khi quay lại từ PayPal. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
+  async function capturePaypal(btn) {
+    const intent = loadIntent();
+    const id = (btn && btn.dataset && btn.dataset.id) || (intent && intent.paymentId) || null;
+    if (!intent || intent.provider !== PAYPAL_PROVIDER || !id) return;
+    const ctx = topupCtx(intent.requestId);
+    let body;
+    try {
+      body = await guard('paypal-capture', btn, async () => {
+        try {
+          return await api('/payments/paypal/' + encodeURIComponent(id) + '/capture', { method: 'POST' });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
+      // Timeout / mất kết nối / 429 / 5xx / CLAIM_LOST / CONFLICT: kết quả có thể chưa rõ. KHÔNG gửi lại POST; hỏi trạng thái.
+      await refreshPaypalState(id, ctx, { stop: PAYPAL_STOP_CODES.includes(e && e.code) ? e.code : null });
+      return;
+    }
+    if (body === undefined || !ctxAlive(ctx)) return; // bấm lặp
+    const outcome = body && typeof body === 'object' && typeof body.outcome === 'string' ? body.outcome : null;
+    await refreshPaypalState(id, ctx, { outcome });
+  }
+
+  /** GET /payments/:id (chứng cứ) rồi hiển thị đúng giai đoạn. GET lỗi/không khớp -> "chưa xác nhận", không suy ra thành công/thất bại. */
+  async function refreshPaypalState(id, ctx, { outcome, stop } = {}) {
+    const intent = loadIntent();
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(id)); } catch (_) { raw = null; }
+    if (!ctxAlive(ctx)) return;
+    const row = raw ? readPaypalRow(raw, { id, requestId: intent ? intent.requestId : undefined, amount: intent ? intent.amount : undefined }) : null;
+    if (!row) {
+      if (stop) setTopupNotice({ kind: 'paypal-stop', code: stop });
+      else setTopupNotice({ kind: 'unconfirmed', paymentId: id });
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: true, extra: outcome ? { outcome } : null });
+  }
+
+  /** "Kiểm tra trạng thái / Kiểm tra lại" cho dòng PayPal (đã lấy bằng GET /payments/:id hoặc từ danh sách). */
+  async function finishPaypalCheck(raw, { intent, knownId, ctx }) {
+    const row = readPaypalRow(raw, {
+      id: knownId || undefined,
+      requestId: intent ? intent.requestId : undefined,
+      amount: intent ? intent.amount : undefined,
+    });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu PayPal không đầy đủ hoặc không khớp. Hãy thử kiểm tra lại sau ít phút.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: true });
+  }
+
+  /** URL ?paypal=return|cancel&paymentRequestId=<id>: chỉ lấy loại và id, rồi dọn query. token/PayerID không phải chứng cứ. */
+  function readPaypalCallbackFromUrl() {
+    let kind;
+    let id;
+    try {
+      const q = new URLSearchParams(window.location.search || '');
+      kind = q.get('paypal');
+      id = q.get('paymentRequestId');
+      if (q.has('paypal') || q.has('paymentRequestId')) {
+        // Dọn query khỏi thanh địa chỉ: tải lại trang không xử lý lại, và token/PayerID không nằm lại trong lịch sử.
+        window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      }
+    } catch (_) { return null; }
+    if ((kind !== 'return' && kind !== 'cancel') || !/^[A-Za-z0-9-]{8,64}$/.test(id || '')) return null;
+    return { kind, id };
+  }
+
+  /**
+   * Xử lý lần quay lại từ PayPal (một lần). Return/cancel đều chỉ GET trạng thái để xác minh chủ sở hữu / id / số tiền / requestId /
+   * provider; cancel không capture, không đánh FAILED, không tạo yêu cầu mới. Return cho phép NGƯỜI DÙNG bấm xác nhận (capture) chỉ
+   * khi dữ liệu khớp ý định lưu trên thiết bị này.
+   */
+  async function processPaypalCallback() {
+    const cb = state.paypalCallback;
+    if (!cb || !state.user || !state.token) return;
+    state.paypalCallback = null; // dùng một lần
+    const intent = loadIntent();
+    const mine = intent && intent.provider === PAYPAL_PROVIDER ? intent : null;
+    const ctx = topupCtx(mine ? mine.requestId : null);
+    let raw;
+    try {
+      raw = await api('/payments/' + encodeURIComponent(cb.id));
+    } catch (e) {
+      if (e && e.stale) return;
+      if (ctxAlive(ctx)) toast(e && e.message ? e.message : 'Không kiểm tra được yêu cầu nạp vừa quay lại từ PayPal.', 'err');
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id: cb.id });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không khớp với lần quay lại từ PayPal nên không xử lý. Hãy xem Lịch sử nạp tiền.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    const matched = paypalMatchesIntent(row, mine);
+    await settlePaypalRow(row, {
+      ctx, fromGet: true, returned: cb.kind === 'return', cancelled: cb.kind === 'cancel', unverified: !matched,
+    });
   }
 
   async function openCheckout(paymentRequestId, providerRef, ctx) {
@@ -3807,6 +4342,10 @@ const App = (() => {
     'topup-check': (el) => checkTopupStatus(el),
     'topup-new': () => askNewTopup(),
     'topup-new-confirm': () => confirmNewTopup(),
+    'topup-dismiss': () => { state.topupNotice = null; renderTopupIntent(); },
+    'paypal-approve': (el) => openPaypalApproval(el),
+    'paypal-capture': (el) => capturePaypal(el),
+    'paypal-config-retry': () => route(),
     'checkout-open': (el) => openCheckout(el.dataset.id, el.dataset.ref),
     'checkout-pay': (el) => payCheckout(el),
     'notif-open': (el) => openNotification(el),
@@ -3843,6 +4382,9 @@ const App = (() => {
       state.filters.q = ($('#topSearchInput').value || '').trim();
       goHome();
     });
+
+    // Có thể vừa được PayPal đưa quay lại (?paypal=return|cancel): đọc và dọn query TRƯỚC khi làm gì khác.
+    state.paypalCallback = readPaypalCallbackFromUrl();
 
     // Khôi phục phiên: xác nhận lại token với server thay vì tin localStorage.
     if (state.token) {
