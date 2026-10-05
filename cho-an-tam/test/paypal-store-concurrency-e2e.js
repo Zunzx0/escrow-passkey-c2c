@@ -7,7 +7,12 @@
  *   node test/paypal-store-concurrency-e2e.js --pg=<url>            thêm PostgreSQL
  *
  * <url> phải trỏ tới một CSDL có tên kết thúc bằng "_store_test" (ví dụ enclave_paypal_store_test):
- * bộ test XOÁ schema app/mock_provider của CSDL đó rồi dựng lại từ schema.pg.sql. Tạo CSDL nếu chưa có.
+ * bộ test XOÁ schema app/mock_provider của CSDL đó rồi dựng lại. Tạo CSDL nếu chưa có.
+ *
+ * Mỗi nền chạy hai lược đồ:
+ *   migration  CSDL dựng bằng CHÍNH db.js trong process con (SQLite: migrate() + schema.sqlite.005;
+ *              PostgreSQL: PG_MIGRATIONS v1..v5 thật của ứng dụng).
+ *   proposed   bindingSchema() của store (+ providerSchema() khi nền thiếu cột/trigger provider).
  *
  * Mức đồng thời:
  *   - SQLite: hai store dùng CHUNG một kết nối (hai kết nối đồng bộ trong một process Node khoá chết nhau);
@@ -24,7 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { SqliteAsyncDatabase, PgAsyncDatabase } = require('../src/lib/asyncDb');
-const { createPayPalPaymentStore, proposedSchema } = require('../src/lib/paypalPaymentStore');
+const { createPayPalPaymentStore, providerSchema, bindingSchema } = require('../src/lib/paypalPaymentStore');
 
 const ROOT = path.join(__dirname, '..');
 let failures = 0;
@@ -57,9 +62,24 @@ function quoteFor(amountVnd, rate = 25000) {
 // ------------------------------------------------------------------------------------------
 // Fixture
 // ------------------------------------------------------------------------------------------
-async function sqliteFixture() {
+// Dựng CSDL bằng CHÍNH db.js trong một process con: đúng đường khởi động thật của ứng dụng
+// (SQLite: schema.sql + migrate() + schema.sqlite.005; PostgreSQL: PG_MIGRATIONS v1..v5).
+function bootRealMigrations(env) {
+  const { spawnSync } = require('child_process');
+  const childEnv = { ...process.env, ...env };
+  for (const k of Object.keys(childEnv)) if (k.startsWith('ADMIN_BOOTSTRAP_')) delete childEnv[k];
+  const r = spawnSync(process.execPath, ['-e', "require('./src/db').db.ready.then(() => console.log('MIGRATED'))"], {
+    cwd: ROOT, env: childEnv, encoding: 'utf8', timeout: 120000,
+  });
+  if (r.status !== 0 || !/MIGRATED/.test(r.stdout)) {
+    throw new Error(`Khởi động db.js để dựng migration thật thất bại: ${(r.stderr || r.stdout || '').slice(0, 400)}`);
+  }
+  return r.stdout;
+}
+
+async function sqliteFixture(schemaMode) {
   const Database = require('../src/lib/sqlite');
-  const file = path.join(ROOT, 'data', 'test', `paypal-store-${Date.now()}.db`);
+  const file = path.join(ROOT, 'data', 'test', `paypal-store-${schemaMode}-${Date.now()}.db`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const open = () => {
     const raw = new Database(file);
@@ -68,16 +88,21 @@ async function sqliteFixture() {
     raw.pragma('busy_timeout = 5000');
     return new SqliteAsyncDatabase(raw);
   };
-  const setup = open();
-  setup.raw.exec(fs.readFileSync(path.join(ROOT, 'src', 'schema.sql'), 'utf8'));
-  const hasProvider = setup.raw.prepare('PRAGMA table_info(payment_requests)').all().some(c => c.name === 'provider');
-  for (const sql of proposedSchema('sqlite')) {
-    if (hasProvider && sql.startsWith('ALTER TABLE payment_requests ADD COLUMN provider')) continue;
-    setup.raw.exec(sql);
+  if (schemaMode === 'migration') {
+    const env = { DB_PATH: file };
+    bootRealMigrations({ ...env, DATABASE_URL: '' });
+  } else {
+    const setup = open();
+    setup.raw.exec(fs.readFileSync(path.join(ROOT, 'src', 'schema.sql'), 'utf8'));
+    const hasProvider = setup.raw.prepare('PRAGMA table_info(payment_requests)').all().some((c) => c.name === 'provider');
+    // schema.sql mới đã có cột provider (v4), nhưng trigger bất biến do db.js#migrate() tạo: chỉ bỏ câu ALTER.
+    const provider = providerSchema('sqlite').filter((sql) => !(hasProvider && sql.startsWith('ALTER TABLE')));
+    for (const sql of [...provider, ...bindingSchema('sqlite')]) setup.raw.exec(sql);
+    await setup.close();
   }
-  await setup.close();
   return {
     dialect: 'sqlite',
+    schemaMode,
     childTarget: { dialect: 'sqlite', file },
     // Hai kết nối SQLite ĐỒNG BỘ trong cùng một process Node sẽ khoá chết nhau: BEGIN IMMEDIATE của
     // kết nối thứ hai chặn event loop trong lúc transaction async của kết nối thứ nhất cần event loop
@@ -87,12 +112,15 @@ async function sqliteFixture() {
     sharedConnection: true,
     open,
     async cleanup() {
-      for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(file + s); } catch (_) { /* file tạm */ } }
+      const base = file.replace(/\.db$/, '');
+      for (const f of [file, `${base}.mock-provider.db`]) {
+        for (const s of ['', '-wal', '-shm']) { try { fs.unlinkSync(f + s); } catch (_) { /* file tạm */ } }
+      }
     },
   };
 }
 
-async function pgFixture(url) {
+async function pgFixture(url, schemaMode) {
   const pg = require('pg');
   const name = decodeURIComponent(new URL(url).pathname.replace(/^\//, ''));
   if (!/_store_test$/.test(name)) throw new Error(`--pg phải trỏ tới CSDL tên kết thúc "_store_test" (nhận "${name}")`);
@@ -110,17 +138,28 @@ async function pgFixture(url) {
   const setup = new pg.Client({ connectionString: url, ssl });
   await setup.connect();
   await setup.query('DROP SCHEMA IF EXISTS app CASCADE; DROP SCHEMA IF EXISTS mock_provider CASCADE;');
-  await setup.query(fs.readFileSync(path.join(ROOT, 'src', 'schema.pg.sql'), 'utf8'));
-  for (const sql of proposedSchema('pg')) await setup.query(sql);
-  await setup.end();
+  if (schemaMode === 'migration') {
+    await setup.end();
+    const out = bootRealMigrations({ DATABASE_URL: url });
+    console.log(`  (migration thật: ${(out.match(/đã áp migration \d+/g) || []).map((s) => s.replace('đã áp migration ', 'v')).join(', ')})`);
+  } else {
+    await setup.query(fs.readFileSync(path.join(ROOT, 'src', 'schema.pg.sql'), 'utf8'));
+    const hasProvider = (await setup.query(
+      "SELECT 1 FROM information_schema.columns WHERE table_schema='app' AND table_name='payment_requests' AND column_name='provider'"
+    )).rowCount === 1;
+    for (const sql of [...(hasProvider ? [] : providerSchema('pg')), ...bindingSchema('pg')]) await setup.query(sql);
+    await setup.end();
+  }
 
   const pools = [];
   return {
     dialect: 'pg',
+    schemaMode,
     childTarget: { dialect: 'pg', url },
     open() {
-      const pool = new pg.Pool({ connectionString: url, ssl, max: 4, allowExitOnIdle: true });
-      pool.on('connect', (c) => { c.query('SET search_path TO app, public').catch(() => {}); });
+      // search_path đặt bằng tham số khởi động kết nối, không bằng một query chạy song song lúc connect
+      // (cách đó sinh DeprecationWarning "client.query() when the client is already executing a query").
+      const pool = new pg.Pool({ connectionString: url, ssl, max: 4, allowExitOnIdle: true, options: '-c search_path=app,public' });
       pools.push(pool);
       return new PgAsyncDatabase(pool);
     },
@@ -145,8 +184,8 @@ const CHILD_SCRIPT = `
   } else {
     const pg = require('pg');
     pg.types.setTypeParser(20, (v) => v === null ? null : Number(v));
-    const pool = new pg.Pool({ connectionString: t.url, ssl: /sslmode=disable/.test(t.url) ? false : { rejectUnauthorized: false }, max: 2 });
-    pool.on('connect', (c) => { c.query('SET search_path TO app, public').catch(() => {}); });
+    const pool = new pg.Pool({ connectionString: t.url, ssl: /sslmode=disable/.test(t.url) ? false : { rejectUnauthorized: false },
+      max: 2, options: '-c search_path=app,public' });
     db = new PgAsyncDatabase(pool);
   }
   const store = createPayPalPaymentStore({ db });
@@ -200,7 +239,7 @@ function runTwoProcesses(target, ids) {
 
 // ------------------------------------------------------------------------------------------
 async function runSuite(fx) {
-  console.log(`\n=========== STORE PAYPAL — ${fx.dialect.toUpperCase()} ===========`);
+  console.log(`\n=========== STORE PAYPAL — ${fx.dialect.toUpperCase()} / lược đồ ${fx.schemaMode} ===========`);
   let dbA = fx.open();
   let dbB = fx.sharedConnection ? dbA : fx.open();
   let A = createPayPalPaymentStore({ db: dbA });
@@ -389,7 +428,8 @@ async function runSuite(fx) {
     assert((await B.markCaptureVerified(id, `CAPW-${id}`)).ok, 'Webhook lặp cùng capture ID: idempotent');
     const conflict = await B.markCaptureVerified(id, 'CAP-KHAC');
     assert(!conflict.ok && conflict.reason === 'CAPTURE_ID_CONFLICT', 'Capture ID khác: CAPTURE_ID_CONFLICT');
-    assert((await A.claimCapture(id, users.owner, uid(), iso(), iso(-60000))).outcome === 'REPLAY', 'Sau VERIFIED: claim trả REPLAY');
+    assert((await A.claimCapture(id, users.owner, uid(), iso(), iso(-60000))).outcome === 'SETTLEMENT_REQUIRED',
+      'Sau VERIFIED mà request vẫn PENDING: claim trả SETTLEMENT_REQUIRED (ví chưa cộng)');
     const z = await newPayPal(); await A.bindOrder(z, `ORD-${z}`);
     const dup = await A.markCaptureVerified(z, `CAPW-${id}`);
     assert(!dup.ok && dup.reason === 'CAPTURE_ID_CONFLICT', 'Một capture ID không gắn được cho hai request (UNIQUE)');
@@ -469,6 +509,32 @@ async function runSuite(fx) {
   // Một "PayPal" giả trong test: POST capture là một promise chỉ hoàn tất khi test cho phép (barrier),
   // GET trả trạng thái do test quyết định. Không có sleep ngẫu nhiên.
   const deferred = () => { let resolve; const p = new Promise((r) => { resolve = r; }); return { p, resolve }; };
+
+  // Thứ tự settlement đã chốt (phản hồi Codex mục 5), với bước ghi ví MÔ PHỎNG bằng một UPDATE:
+  // transaction ngoài -> finish/mark trên dữ liệu mới nhất -> ok: settle cùng transaction;
+  // RECOVERY_REQUIRED: commit bằng chứng, KHÔNG credit; lý do khác: rollback.
+  const simulatedSettle = (db, id) =>
+    db.prepare("UPDATE payment_requests SET status = 'SUCCEEDED' WHERE id = ? AND status = 'PENDING'").run(id);
+  async function inSettlement(db, id, step) {
+    try {
+      return await db.transaction(async () => {
+        const res = await step();
+        if (res.ok) {
+          if ((await simulatedSettle(db, id)).changes !== 1) throw Object.assign(new Error('settle lost'), { res: { ok: false, reason: 'SETTLE_LOST' } });
+          return res;
+        }
+        if (res.outcome === 'RECOVERY_REQUIRED') return res;      // commit bằng chứng, không credit
+        throw Object.assign(new Error('rollback'), { res });
+      })();
+    } catch (e) {
+      if (e.res) return e.res;
+      throw e;
+    }
+  }
+  const settleFinish = (store, db, id, claim, captureId) =>
+    inSettlement(db, id, () => store.finishCaptureAttempt(id, claim, { state: 'VERIFIED', captureId }));
+  const settleEvidence = (store, db, id, captureId) =>
+    inSettlement(db, id, () => store.markCaptureVerified(id, captureId));
   const hasPostMarker = typeof A.markCapturePostSent === 'function';
 
   // =====================================================================================
@@ -479,8 +545,9 @@ async function runSuite(fx) {
     if (hasPostMarker) assert((await A.markCapturePostSent(id, 'holder-A', iso(-119000))).ok, 'A ghi dấu đã gửi POST capture');
     const postA = deferred();                                  // POST của A đang treo trên mạng
     const aFlight = postA.p.then(async (resp) => {
-      const fin = await A.finishCaptureAttempt(id, 'holder-A', { state: 'VERIFIED', captureId: resp.captureId });
-      const mark = fin.ok ? fin : await A.markCaptureVerified(id, resp.captureId);
+      // finish + settle trong một transaction; STALE_CLAIM -> rollback, rồi transaction MỚI: bằng chứng + settle.
+      const fin = await settleFinish(A, dbA, id, 'holder-A', resp.captureId);
+      const mark = fin.ok ? fin : await settleEvidence(A, dbA, id, resp.captureId);
       return { fin, mark };
     });
 
@@ -496,11 +563,11 @@ async function runSuite(fx) {
 
     postA.resolve({ captureId: `CAP-LATE-${id}` });            // POST của A hoàn tất muộn: PayPal ĐÃ thu tiền
     const { fin, mark } = await aFlight;
-    assert(!fin.ok && fin.reason === 'STALE_CLAIM', 'Token A đã hết hiệu lực: finish của A không ghi đè');
-    assert(mark.ok === true, `Bằng chứng thu tiền của A vẫn được ghi nhận qua markCaptureVerified (nhận ${JSON.stringify(mark)})`);
+    assert(!fin.ok && fin.reason === 'STALE_CLAIM', 'Token A đã hết hiệu lực: finish của A không ghi đè, credit đi kèm rollback');
+    assert(mark.ok === true, `Transaction mới: bằng chứng của A + settle cùng commit (nhận ${JSON.stringify(mark)})`);
     const fr = await raw(id);
-    assert(fr.capture_state === 'VERIFIED' && fr.capture_id === `CAP-LATE-${id}` && (await reqRow(id)).status === 'PENDING',
-      'Kết quả: VERIFIED với capture của A, request PENDING chờ settlement (không FAILED)');
+    assert(fr.capture_state === 'VERIFIED' && fr.capture_id === `CAP-LATE-${id}` && (await reqRow(id)).status === 'SUCCEEDED',
+      'Kết quả: VERIFIED với capture của A và request SUCCEEDED — không có VERIFIED đứng riêng trên PENDING');
   });
 
   await group('K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối', async () => {
@@ -509,11 +576,28 @@ async function runSuite(fx) {
     if (hasPostMarker) await A.markCapturePostSent(id, 'holder-A', iso(-119000));
     const b = await B.claimCapture(id, null, 'holder-B', iso(), iso(-60000));
     assert(b.outcome === 'CLAIMED', 'B đang giữ quyền');
-    const finA = await A.finishCaptureAttempt(id, 'holder-A', { state: 'VERIFIED', captureId: `CAPA-${id}` });
-    assert(!finA.ok && (await raw(id)).capture_claim === 'holder-B', 'finish của A không ghi đè token của B');
-    assert((await A.markCaptureVerified(id, `CAPA-${id}`)).ok, 'Bằng chứng của A ghi nhận được');
+    const finA = await settleFinish(A, dbA, id, 'holder-A', `CAPA-${id}`);
+    const afterRollback = await raw(id);
+    assert(!finA.ok && afterRollback.capture_claim === 'holder-B' && (await reqRow(id)).status === 'PENDING',
+      'finish của A không ghi đè token của B; credit đi kèm đã rollback');
+    assert((await settleEvidence(A, dbA, id, `CAPA-${id}`)).ok, 'Transaction mới: bằng chứng của A + settle cùng commit');
     const finB = await B.finishCaptureAttempt(id, 'holder-B', { state: 'UNKNOWN' });
-    assert(!finB.ok && (await raw(id)).capture_state === 'VERIFIED', 'B ghi UNKNOWN sau đó: bị từ chối, VERIFIED giữ nguyên');
+    assert(!finB.ok && (await raw(id)).capture_state === 'VERIFIED' && (await reqRow(id)).status === 'SUCCEEDED',
+      'B ghi UNKNOWN sau đó: bị từ chối, VERIFIED và SUCCEEDED giữ nguyên');
+  });
+
+  await group('K6: VERIFIED đứng riêng trên PENDING không được coi là đã cộng ví', async () => {
+    const id = await newPayPal(); await A.bindOrder(id, `ORD-${id}`);
+    // Ví dụ một lớp tích hợp viết sai: ghi bằng chứng ngoài transaction settlement rồi dừng.
+    assert((await A.markCaptureVerified(id, `CAPV-${id}`)).ok, 'Bằng chứng được ghi (chưa có settlement)');
+    const c = await B.claimCapture(id, null, uid(), iso(), iso(-60000));
+    assert(c.outcome === 'SETTLEMENT_REQUIRED', `claimCapture báo SETTLEMENT_REQUIRED, không phải REPLAY (nhận ${c.outcome})`);
+    assert((await B.loadByRequestId(id)).status === 'PENDING', 'Request vẫn PENDING: store không giả định ví đã cộng');
+    const s = await settleEvidence(B, dbB, id, `CAPV-${id}`);
+    assert(s.ok && (await reqRow(id)).status === 'SUCCEEDED', 'Phục hồi: transaction settlement với cùng bằng chứng (idempotent) cộng đúng một lần');
+    assert((await A.claimCapture(id, users.owner, uid(), iso(), iso(-60000))).outcome === 'REPLAY', 'Sau settlement: REPLAY');
+    const again = await settleEvidence(A, dbA, id, `CAPV-${id}`);
+    assert(again.reason === 'SETTLE_LOST' && (await reqRow(id)).status === 'SUCCEEDED', 'Settle lần hai không cộng thêm (claim PENDING đã mất)');
   });
 
   await group('K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại', async () => {
@@ -554,6 +638,16 @@ async function runSuite(fx) {
     await A.markCapturePostSent(id, 'h1', iso());
     assert(!!(await rejectsWith(() => A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'ORDER_APPROVED' }), 'VALIDATION_ERROR')),
       'APPROVED không phải bằng chứng kết thúc: bị từ chối');
+    assert(!!(await rejectsWith(() => A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'CAPTURE_DECLINED' }), 'VALIDATION_ERROR')),
+      'CAPTURE_DECLINED không phải bằng chứng kết thúc toàn order: bị store từ chối');
+    // Lớp CSDL: lược đồ đề xuất chặn CAPTURE_DECLINED; migration v5 thật hiện còn cho phép (báo Codex).
+    const dbRejectsDeclined = await rejects(() => dbA.prepare(
+      "UPDATE paypal_payment_bindings SET not_captured_evidence = 'CAPTURE_DECLINED' WHERE payment_request_id = ?").run(id));
+    if (fx.schemaMode === 'proposed') {
+      assert(dbRejectsDeclined, 'Lược đồ đề xuất: CHECK của CSDL từ chối CAPTURE_DECLINED');
+    } else {
+      console.log(`  ⚠ migration v5 thật: CSDL ${dbRejectsDeclined ? 'đã từ chối' : 'VẪN CHO PHÉP'} not_captured_evidence = CAPTURE_DECLINED (store chặn ở tầng ứng dụng; cần sửa CHECK của v5)`);
+    }
     assert((await A.finishCaptureAttempt(id, 'h1', { state: 'NOT_CAPTURED', evidence: 'ORDER_VOIDED' })).ok, 'Order VOIDED: NOT_CAPTURED');
     assert((await B.closeUncaptured(id, { nowIso: iso(), reason: 'ORDER_VOIDED' })).closed, 'Sau NOT_CAPTURED: đóng được');
 
@@ -603,12 +697,15 @@ async function runSuite(fx) {
 
 async function main() {
   const pgArg = process.argv.find((a) => a.startsWith('--pg='));
-  const fixtures = [await sqliteFixture()];
-  if (pgArg) fixtures.push(await pgFixture(pgArg.slice('--pg='.length)));
-  for (const fx of fixtures) {
+  // migration: CSDL dựng bằng db.js thật (v4 + v5 của Codex). proposed: bindingSchema() của store.
+  const modes = ['migration', 'proposed'];
+  const plans = modes.map((m) => () => sqliteFixture(m));
+  if (pgArg) for (const m of modes) plans.push(() => pgFixture(pgArg.slice('--pg='.length), m));
+  for (const make of plans) {
+    const fx = await make();
     const before = { passes, failures };
     await runSuite(fx);
-    console.log(`\n  [${fx.dialect}] ${passes - before.passes} đạt, ${failures - before.failures} hỏng`);
+    console.log(`\n  [${fx.dialect}/${fx.schemaMode}] ${passes - before.passes} đạt, ${failures - before.failures} hỏng`);
     await fx.cleanup();
   }
   if (!pgArg) console.log('\n  (PostgreSQL chưa chạy: thêm --pg=<url CSDL _store_test riêng>)');
