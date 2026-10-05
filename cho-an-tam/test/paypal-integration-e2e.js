@@ -129,6 +129,17 @@ async function main(){
   const unauth=await http('/api/payments/paypal/'+row.id+'/capture','POST');ok(unauth.status===401,'capture route requires real session token');
   const outsider=await http('/api/payments/paypal/'+row.id+'/capture','POST',b.token);ok(outsider.status===403,'HTTP owner check rejects other account');
   const own=await http('/api/payments/paypal/'+row.id+'/capture','POST',a.token);ok(own.status===200&&own.body.status==='SUCCEEDED'&&own.body.outcome==='DUPLICATE','authenticated HTTP replay returns durable status');
+  // Model a legacy role edited past the promotion guard, only inside this disposable test DB.
+  await db.transaction(async()=>{
+    if(process.env.DATABASE_URL){await db.exec('ALTER TABLE users DISABLE TRIGGER trg_users_no_admin_promotion');await db.prepare("UPDATE users SET role='ADMIN' WHERE id=?").run(a.user.id);await db.exec('ALTER TABLE users ENABLE TRIGGER trg_users_no_admin_promotion');}
+    else{const trigger=await db.prepare("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trg_users_no_admin_promotion'").get();await db.exec('DROP TRIGGER trg_users_no_admin_promotion');await db.prepare("UPDATE users SET role='ADMIN' WHERE id=?").run(a.user.id);await db.exec(trigger.sql);}
+  })();
+  try {
+    for(const [route,method,body] of [['/'+row.id+'/capture','POST',{}],['/'+row.id+'/checkout','GET'],['/topup','POST',{amount:10000,requestId:uuid()}]]) {
+      const r=await http('/api/payments/paypal'+route,method,a.token,body);
+      ok(r.status===403&&r.body.error==='FORBIDDEN','unproven ADMIN cannot use PayPal wallet route '+route);
+    }
+  } finally {await db.prepare("UPDATE users SET role='BUYER' WHERE id=?").run(a.user.id);}
   const missing=await http('/api/payments/paypal/topup','POST',a.token,{amount:10000});ok(missing.status===400&&missing.body.error==='VALIDATION_ERROR','PayPal HTTP creation requires requestId');
   const disabled=createPayPalRuntime({config:{...config,enabled:false},provider:createSandboxProvider(config,{fetchImpl:transport})});
   ok(!disabled.publicConfig().paypalSandbox.enabled,'disabled configuration fails closed');

@@ -14,7 +14,7 @@ Không có client secret, merchant credential, DB URL hoặc webhook secret. ena
 
 ## 2. Tạo và mở lại yêu cầu
 
-POST /api/payments/paypal/topup, Authorization: Bearer accessToken. Body chỉ dùng amount (số nguyên JSON VND), requestId (bắt buộc 8–100 ký tự A-Za-z0-9._:-). Ví dụ:
+POST /api/payments/paypal/topup, Authorization: Bearer accessToken. Các tuyến topup/checkout/capture chỉ nhận vai trò BUYER hoặc SELLER; ADMIN/ADMIN_UNVERIFIED bị từ chối, kể cả có ví bất thường. Body chỉ dùng amount (số nguyên JSON VND), requestId (bắt buộc 8–100 ký tự A-Za-z0-9._:-). Ví dụ:
 
 ```json
 {"amount":100000,"requestId":"topup-<uuid>"}
@@ -98,3 +98,5 @@ Fake transport không có endpoint/biến môi trường công khai. Trong test 
 Bút toán là TOPUP_CREDIT, available_delta=quote.amountVnd, locked_delta=0, request_id=id, idempotency_key=topup:<id>. Ba kiểm tra PayPal trong src/lib/paypalInvariants.js tách khỏi chín bất biến cũ; không tự đổi số liệu luận văn từ 9 thành 12.
 
 Tài liệu API chính thức: https://developer.paypal.com/api/orders/v2 và https://developer.paypal.com/api/webhooks/v1. Chưa kiểm chứng approval/cookie/PayPal/Passkey thật bằng trình duyệt.
+
+Worker chạy trong process server qua backgroundJobs/startReconciler, mặc định mỗi 60 giây và chỉ xét yêu cầu >=30 giây; RECONCILE_INTERVAL_SECONDS=0 tắt. scripts/reconcile.js chạy một lượt bằng cùng reconcileOnce. Không có HTTP endpoint reconcile hoặc settlement để người dùng/admin gọi trực tiếp.
