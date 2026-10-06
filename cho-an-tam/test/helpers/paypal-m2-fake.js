@@ -70,17 +70,79 @@ function applyDescriptor(st, d) {
   throw new Error(`fake: unknown route ${d.route}`);
 }
 
-function createDurableFake({ statePath }) {
+function createDurableFake({ statePath, lockHooks = {} }) {
   const waiters = new Map();
-  const read = () => {
-    try { return JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch (_) { return EMPTY(); }
+  const lockPath=statePath+'.lock';
+  const sleeper=new Int32Array(new SharedArrayBuffer(4));
+  const pause=()=>Atomics.wait(sleeper,0,0,10);
+  const transient=e=>['EACCES','EPERM','EBUSY'].includes(e.code);
+  function retrySharing(fn) {
+    const end=Date.now()+5000;
+    for(;;) {try{return fn();}catch(e){if(!transient(e)||Date.now()>=end)throw e;pause();}}
+  }
+  function withStateLock(fn) {
+    const end=Date.now()+5000;
+    const ownerName=`owner-${process.pid}-${crypto.randomBytes(16).toString('hex')}`;
+    const prepared=lockPath+'.prepared-'+ownerName;
+    // Publish only a NONEMPTY directory with its immutable owner name already durable.
+    fs.mkdirSync(prepared);
+    try{fs.writeFileSync(prepared+'/'+ownerName,'');}
+    catch(error){try{fs.unlinkSync(prepared+'/'+ownerName);}catch(e){if(e.code!=='ENOENT')error.cleanupError=e;}try{fs.rmdirSync(prepared);}catch(e){error.cleanupError=e;}throw error;}
+    let acquired=false,originalFailure;
+    try {
+      while(!acquired) {
+        try{fs.renameSync(prepared,lockPath);acquired=true;}
+        catch(error) {
+          let owners;
+          try{owners=fs.readdirSync(lockPath);}catch(e){if(e.code==='ENOENT'){if(Date.now()>=end)throw error;pause();continue;}throw e;}
+          if(owners.length===0){try{fs.rmdirSync(lockPath);}catch(e){if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(e.code))throw e;}}
+          else {
+            if(owners.length!==1 || !/^owner-\d+-[a-f0-9]{32}$/.test(owners[0]))throw Error('invalid fake state lock owner');
+            const oldName=owners[0],oldPid=Number(oldName.split('-')[1]);
+            let dead=false;
+            try{process.kill(oldPid,0);}catch(e){if(e.code==='ESRCH')dead=true;else if(e.code!=='EPERM')throw e;}
+            if(dead) {
+              if(lockHooks.beforeStaleCleanup)lockHooks.beforeStaleCleanup(oldName);
+              // Never unlink a fixed owner path: another waiter may already own the directory.
+              try{retrySharing(()=>fs.unlinkSync(lockPath+'/'+oldName));}catch(e){if(e.code!=='ENOENT')throw e;}
+              try{retrySharing(()=>fs.rmdirSync(lockPath));}catch(e){if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(e.code))throw e;}
+              if(lockHooks.afterStaleCleanup)lockHooks.afterStaleCleanup(oldName);
+            }
+          }
+          if(Date.now()>=end)throw Error('fake provider state lock timed out');
+          pause();
+        }
+      }
+      let result,original;
+      try{if(lockHooks.afterAcquire)lockHooks.afterAcquire(ownerName);result=fn();}catch(error){original=error;}
+      try{retrySharing(()=>fs.unlinkSync(lockPath+'/'+ownerName));retrySharing(()=>fs.rmdirSync(lockPath));}
+      catch(error){if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(error.code)){if(original)original.cleanupError=error;else original=error;}}
+      if(original)throw original;
+      return result;
+    } catch(error){originalFailure=error;throw error;} finally {
+      if(!acquired){
+        try{try{retrySharing(()=>fs.unlinkSync(prepared+'/'+ownerName));}catch(e){if(e.code!=='ENOENT')throw e;}try{retrySharing(()=>fs.rmdirSync(prepared));}catch(e){if(e.code!=='ENOENT')throw e;}}
+        catch(error){if(originalFailure)originalFailure.cleanupError=error;else throw error;}
+      }
+    }
+  }
+
+  const readUnlocked=()=>{
+    let raw;
+    try{raw=retrySharing(()=>fs.readFileSync(statePath,'utf8'));}catch(e){if(e.code==='ENOENT')return EMPTY();throw e;}
+    return JSON.parse(raw);
   };
-  const write = (st) => {
-    const tmp = `${statePath}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
-    fs.writeFileSync(tmp, JSON.stringify(st));
-    fs.renameSync(tmp, statePath);
+  const read=()=>withStateLock(readUnlocked);
+  const write=st=>{
+    const tmp=`${statePath}.${process.pid}.${crypto.randomBytes(3).toString('hex')}.tmp`;
+    fs.writeFileSync(tmp,JSON.stringify(st));
+    // Every reader/writer holds the same cross-process lock. Retry transient Windows sharing errors only.
+    let original;
+    try{retrySharing(()=>fs.renameSync(tmp,statePath));}catch(error){original=error;}
+    try{retrySharing(()=>fs.unlinkSync(tmp));}catch(error){if(error.code!=='ENOENT'){if(original)original.cleanupError=error;else original=error;}}
+    if(original)throw original;
   };
-  const mutate = (fn) => { const st = read(); const out = fn(st); write(st); return out; };
+  const mutate=fn=>withStateLock(()=>{const st=readUnlocked();const out=fn(st);write(st);return out;});
 
   function take(st, route) {
     const q = st.plan[route];

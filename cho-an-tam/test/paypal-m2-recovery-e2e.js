@@ -18,6 +18,132 @@ async function waitFor(fn, label, ms = 15000) {
   throw new Error(`hết thời gian chờ: ${label}`);
 }
 
+async function killAndWait(child) {
+  if(child.exitCode!==null || child.signalCode!==null)return;
+  let timer,onExit,onError;
+  const exit=new Promise((resolve,reject)=>{
+    onExit=resolve;onError=reject;
+    child.once('exit',onExit);child.once('error',onError);
+    timer=setTimeout(()=>reject(Error('capture child did not exit within cleanup deadline')),3000);
+  });
+  try {
+    if(!child.kill('SIGKILL'))throw Error('capture child kill returned false');
+    await exit;
+  } finally {
+    clearTimeout(timer);child.removeListener('exit',onExit);child.removeListener('error',onError);
+    // If kill itself failed, suppress the orphan Promise rejection, then preserve the original error.
+    exit.catch(()=>{});
+  }
+}
+async function waitForPendingPost(child,condition) {
+  let stderr='';
+  child.stderr.on('data',chunk=>{stderr=(stderr+chunk.toString()).slice(-4000);});
+  try {
+    await waitFor(async()=>{
+      if(child.exitCode!==null || child.signalCode!==null)throw Error('capture child exited before durable POST barrier: '+child.exitCode+' '+child.signalCode+' '+stderr);
+      return await condition();
+    },'POST đã gửi và đang treo');
+  } catch(error) {
+    try{await killAndWait(child);}catch(cleanupError){error.cleanupError=cleanupError;}
+    error.message+='; child stderr='+stderr;
+    throw error;
+  }
+}
+async function cleanupKids(children,original) {
+  const outcomes=await Promise.allSettled(children.map(child=>killAndWait(child)));
+  const errors=outcomes.filter(outcome=>outcome.status==='rejected').map(outcome=>outcome.reason);
+  if(errors.length){if(original)original.cleanupErrors=errors;else throw new AggregateError(errors,'capture child cleanup failed');}
+}
+
+function checkDurableFakeFailures(t) {
+  const fs=require('fs');
+  const file=statePath+'.io-regression.json';
+  try{fs.unlinkSync(file);}catch(e){if(e.code!=='ENOENT')throw e;}
+  const fake=createDurableFake({statePath:file});
+  fake.plan('capture','hold');
+  const originalRename=fs.renameSync;
+  let injected=false,writeError;
+  fs.renameSync=(...args)=>{if(args[1]===file && !injected){injected=true;throw Object.assign(Error('controlled sharing failure'),{code:'EBUSY'});}return originalRename(...args);};
+  try{fake.plan('get','lose');}catch(e){writeError=e;}finally{fs.renameSync=originalRename;}
+  t.ok(!writeError && injected && JSON.stringify(JSON.parse(fs.readFileSync(file,'utf8')).plan)===JSON.stringify({capture:['hold'],get:['lose']}),'fake: rename EBUSY tạm thời giữ cả trạng thái cũ và mới');
+  const before=fs.readFileSync(file,'utf8');
+  const originalRead=fs.readFileSync;
+  let readInjected=false,readError;
+  fs.readFileSync=(...args)=>{if(args[0]===file && !readInjected){readInjected=true;throw Object.assign(Error('controlled read failure'),{code:'EIO'});}return originalRead(...args);};
+  try{fake.plan('create','hold');}catch(e){readError=e;}finally{fs.readFileSync=originalRead;}
+  t.ok(readInjected && readError && readError.code==='EIO','fake: lỗi đọc phải bị từ chối, không thay bằng EMPTY');
+  t.eq(fs.readFileSync(file,'utf8'),before,'fake: lỗi đọc không ghi đè trạng thái bền');
+  const originalUnlink=fs.unlinkSync;
+  let writeFailure;
+  fs.renameSync=(...args)=>{if(args[1]===file)throw Object.assign(Error('primary rename EIO'),{code:'EIO'});return originalRename(...args);};
+  fs.unlinkSync=(...args)=>{if(String(args[0]).startsWith(file+'.')&&String(args[0]).endsWith('.tmp'))throw Object.assign(Error('secondary unlink EACCES'),{code:'EACCES'});return originalUnlink(...args);};
+  try{fake.plan('write-failure','hold');}catch(e){writeFailure=e;}finally{fs.renameSync=originalRename;fs.unlinkSync=originalUnlink;}
+  t.ok(writeFailure?.code==='EIO'&&writeFailure.message==='primary rename EIO'&&writeFailure.cleanupError?.code==='EACCES','rename EIO giữ lỗi gốc khi cleanup unlink EACCES');
+  t.eq(fs.readFileSync(file,'utf8'),before,'rename thất bại không thay trạng thái đã commit');
+  for(const name of fs.readdirSync(path.dirname(file))){if(name.startsWith(path.basename(file)+'.')&&name.endsWith('.tmp'))fs.unlinkSync(path.join(path.dirname(file),name));}
+}
+
+async function checkLockRecovery(t) {
+  const fs=require('fs'),{EventEmitter}=require('events');
+  const file=statePath+'.lock-regression.json',lock=file+'.lock';
+  for(const role of ['A','B'])for(const suffix of ['stale','release-stale','owned','cleaned','release-owned']){
+    try{fs.unlinkSync(file+'.'+role+'.'+suffix);}catch(e){if(e.code!=='ENOENT')throw e;}
+  }
+  try{fs.unlinkSync(file+'.crash-held');}catch(e){if(e.code!=='ENOENT')throw e;}
+  const fake=createDurableFake({statePath:file});
+  fake.plan('get','lose');
+  const originalWrite=fs.writeFileSync;
+  let injected=false,error;
+  fs.writeFileSync=(...args)=>{if(String(args[0]).includes('.prepared-owner-')&&!injected){injected=true;throw Object.assign(Error('owner write failed'),{code:'EIO'});}return originalWrite(...args);};
+  try{fake.plan('capture','hold');}catch(e){error=e;}finally{fs.writeFileSync=originalWrite;}
+  t.ok(injected && error && error.code==='EIO' && !fs.existsSync(lock),'owner write failure never publishes ownerless lock');
+  fake.plan('capture','hold');
+  t.ok(JSON.parse(fs.readFileSync(file,'utf8')).plan.capture[0]==='hold','owner preparation failure leaves next acquisition usable');
+  const stub=new EventEmitter();stub.exitCode=null;stub.signalCode=null;stub.kill=()=>false;
+  await t.rejects(()=>killAndWait(stub),'Error','kill false fails promptly instead of waiting forever');
+  let attempts=0;
+  const failingKids=[0,1].map(()=>{const k=new EventEmitter();k.exitCode=null;k.signalCode=null;k.kill=()=>{attempts++;return false;};return k;});
+  const originalBarrier=Error('original barrier failure');
+  await cleanupKids(failingKids,originalBarrier);
+  t.ok(attempts===2&&originalBarrier.cleanupErrors?.length===2&&originalBarrier.message==='original barrier failure','cleanup thử cả hai child và giữ lỗi barrier gốc');
+
+  // Two stale contenders both observe the SAME dead owner before either cleans it.
+  const oldName='owner-2147483647-'+('a'.repeat(32));
+  fs.mkdirSync(lock);fs.writeFileSync(lock+'/'+oldName,'');
+  const code=`const fs=require('fs'),{createDurableFake}=require(${JSON.stringify(path.join(__dirname,'helpers','paypal-m2-fake.js'))});
+    const f=process.env.LOCK_TEST_FILE,r=process.env.LOCK_TEST_ROLE;
+    const sleeper=new Int32Array(new SharedArrayBuffer(4));
+    function wait(file){const end=Date.now()+5000;while(!fs.existsSync(file)){if(Date.now()>end)throw Error('test barrier '+file);Atomics.wait(sleeper,0,0,5);}}
+    const fake=createDurableFake({statePath:f,lockHooks:{beforeStaleCleanup(){fs.writeFileSync(f+'.'+r+'.stale','');wait(f+'.'+r+'.release-stale');},afterStaleCleanup(){fs.writeFileSync(f+'.'+r+'.cleaned','');},afterAcquire(name){fs.writeFileSync(f+'.'+r+'.owned',name);wait(f+'.'+r+'.release-owned');}}});
+    fake.plan(r,'hold');`;
+  const kids=['A','B'].map(role=>spawn(process.execPath,['-e',code],{stdio:['ignore','pipe','pipe'],env:{...process.env,LOCK_TEST_FILE:file,LOCK_TEST_ROLE:role}}));
+  const stderr=[];kids.forEach((k,i)=>k.stderr.on('data',c=>{stderr[i]=(stderr[i]||'')+c;}));
+  let contenderError;
+  try {
+    await waitFor(()=>fs.existsSync(file+'.A.stale')&&fs.existsSync(file+'.B.stale'),'both stale contenders observed old owner');
+    fs.writeFileSync(file+'.A.release-stale','');
+    await waitFor(()=>fs.existsSync(file+'.A.owned'),'A acquired fresh lock');
+    const fresh=fs.readFileSync(file+'.A.owned','utf8');
+    fs.writeFileSync(file+'.B.release-stale','');
+    await waitFor(()=>fs.existsSync(file+'.B.cleaned'),'B completed stale cleanup');
+    t.ok(fs.existsSync(lock+'/'+fresh) && !fs.existsSync(file+'.B.owned'),'second stale contender cannot unlink fresh owner or acquire its lock');
+    fs.writeFileSync(file+'.A.release-owned','');
+    await waitFor(()=>fs.existsSync(file+'.B.owned'),'B acquired only after A released');
+    fs.writeFileSync(file+'.B.release-owned','');
+    await waitFor(()=>kids.every(k=>k.exitCode!==null),'both stale contenders exited');
+    t.ok(kids.every(k=>k.exitCode===0),'both contenders complete without cleanup failure '+stderr.join(' '));
+    const plans=JSON.parse(fs.readFileSync(file,'utf8')).plan;
+    t.ok(plans.A?.[0]==='hold'&&plans.B?.[0]==='hold','both serialized contender mutations retained');
+  } catch(error){contenderError=error;throw error;} finally {await cleanupKids(kids,contenderError);}
+
+  const crashCode=`const fs=require('fs'),{createDurableFake}=require(${JSON.stringify(path.join(__dirname,'helpers','paypal-m2-fake.js'))});const f=process.env.LOCK_TEST_FILE;createDurableFake({statePath:f,lockHooks:{afterAcquire(){fs.writeFileSync(f+'.crash-held','');Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0);}}}).plan('crash','hold');`;
+  const crashed=spawn(process.execPath,['-e',crashCode],{stdio:['ignore','pipe','pipe'],env:{...process.env,LOCK_TEST_FILE:file}});
+  let crashError;
+  try{await waitFor(()=>fs.existsSync(file+'.crash-held'),'lock holder acquired before crash');}catch(error){crashError=error;throw error;}finally{await cleanupKids([crashed],crashError);}
+  fake.plan('recovered','hold');
+  t.ok(JSON.parse(fs.readFileSync(file,'utf8')).plan.recovered?.[0]==='hold'&&!fs.existsSync(lock),'dead holder lock recovers without losing persisted state');
+}
+
 function childEnv(extra) {
   return { ...process.env, PPM2_STATE: statePath, ...extra };
 }
@@ -28,6 +154,9 @@ async function main() {
   const { createPayPalRuntime } = require('../src/lib/paypalRuntime');
 
   const t = H.tally('M2 phục hồi');
+  t.section('Fixture bền — lỗi chia sẻ tệp được tiêm có kiểm soát');
+  checkDurableFakeFailures(t);
+  await checkLockRecovery(t);
   const cfg = H.config();                                  // timeout 500 ms
   const cfgLong = H.config({ timeoutMs: 5000, leaseMs: 30000 });
   const makeRuntime = (c = cfg) => createPayPalRuntime({ config: c,
@@ -90,11 +219,12 @@ async function main() {
     const before = await balance();
     const child = spawn(process.execPath, [CHILD], { cwd: H.ROOT, stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv({ PPM2_REQUEST: r.id, PPM2_USER: buyer.id, PPM2_PLAN: 'hold', PPM2_TIMEOUT_MS: '5000', PPM2_LEASE_MS: '30000' }) });
-    await waitFor(async () => fakeView().pendingEffects().length >= 1 && Boolean((await bindingRow(r.id))?.capture_post_sent_at),
-      'POST đã gửi và đang treo');
+    child.stdout.on('data',chunk=>console.log('[observe-child-stdout] '+String(chunk).trim()));
+    child.stderr.on('data',chunk=>console.log('[observe-child-stderr] '+String(chunk).trim()));
+    child.on('exit',(code,signal)=>console.log('[observe-child-exit] '+code+' '+signal));
+    await waitForPendingPost(child,async () => fakeView().pendingEffects().length >= 1 && Boolean((await bindingRow(r.id))?.capture_post_sent_at));
     const orphan = fakeView().pendingEffects()[0];
-    child.kill('SIGKILL');
-    await new Promise((resolve) => child.once('exit', resolve));
+    await killAndWait(child);
     t.ok(fakeView().pendingEffects().includes(orphan), 'lệnh treo còn trong trạng thái bền sau khi tiến trình chết (fake sống qua restart)');
     t.eq(fakeView().order(r.orderId).status, 'APPROVED', 'PayPal chưa thu khi lệnh treo còn treo');
     const restarted = makeRuntime(cfgLong);
@@ -116,11 +246,12 @@ async function main() {
     const before = await balance();
     const child = spawn(process.execPath, [CHILD], { cwd: H.ROOT, stdio: ['ignore', 'pipe', 'pipe'],
       env: childEnv({ PPM2_REQUEST: r.id, PPM2_USER: buyer.id, PPM2_PLAN: 'hold', PPM2_TIMEOUT_MS: '5000', PPM2_LEASE_MS: '30000' }) });
-    await waitFor(async () => fakeView().pendingEffects().length >= 1 && Boolean((await bindingRow(r.id))?.capture_post_sent_at),
-      'POST đã gửi và đang treo');
+    child.stdout.on('data',chunk=>console.log('[observe-child-stdout] '+String(chunk).trim()));
+    child.stderr.on('data',chunk=>console.log('[observe-child-stderr] '+String(chunk).trim()));
+    child.on('exit',(code,signal)=>console.log('[observe-child-exit] '+code+' '+signal));
+    await waitForPendingPost(child,async () => fakeView().pendingEffects().length >= 1 && Boolean((await bindingRow(r.id))?.capture_post_sent_at));
     const orphan = fakeView().pendingEffects()[0];
-    child.kill('SIGKILL');
-    await new Promise((resolve) => child.once('exit', resolve));
+    await killAndWait(child);
     fakeView().completeEffect(orphan);
     t.eq(fakeView().order(r.orderId).status, 'COMPLETED', 'PayPal đã thu theo lệnh treo hoàn tất');
     const restarted = makeRuntime();
