@@ -10,7 +10,7 @@ GET /api/payments/paypal/config, không cần phiên. HTTP 200:
 {"paypalSandbox":{"enabled":true,"mode":"sandbox","rateKind":"DEMO_FIXED"},"mockPayments":{"enabled":false}}
 ```
 
-Không có client secret, merchant credential, DB URL hoặc webhook secret. enabled chỉ true khi flag và toàn bộ cấu hình server hợp lệ. UI thiếu cấu hình/lỗi/shape sai phải tắt PayPal, không đoán từ hostname. Chỉ mở mock nếu server trả mockPayments.enabled=true; khi flag PayPal bật, mock topup và checkout bị tắt ngay cả khi cấu hình PayPal thiếu.
+Không có client secret, merchant credential, DB URL hoặc webhook secret. enabled chỉ true khi flag và toàn bộ cấu hình server hợp lệ. UI thiếu cấu hình/lỗi/shape sai hoặc HTTP 404 phải tắt cả hai cổng, không fallback sang mock và không đoán từ hostname. Chỉ mở mock nếu server trả mockPayments.enabled=true; khi flag PayPal bật, mock topup và checkout bị tắt ngay cả khi cấu hình PayPal thiếu.
 
 ## 2. Tạo và mở lại yêu cầu
 
@@ -30,7 +30,7 @@ amount và amountVnd là VND được ghi ví; usdValue là chuỗi thập phân
 
 Cùng user + requestId + amount/provider giữ một request, order và quote. Đổi amount/provider với cùng key: 409 IDEMPOTENCY_KEY_REUSED. Gửi lại không tạo ý định mới sau timeout. Unbound CREATE quá 5 phút từ lần thử đầu: 409 PAYPAL_CREATE_RECOVERY_REQUIRED, không gọi create order mới; cần đối soát vận hành. Đã gắn order thì luôn GET order cũ, không create lại dù thời gian dài.
 
-GET /api/payments/paypal/:id/checkout, có Bearer, chủ sở hữu: trả cùng shape với approvalUrl hiện tại nếu còn READY/PENDING. Dùng endpoint này để mở lại approval; lịch sử/GET trạng thái thường trả approvalUrl=null và không gọi mạng. Thiếu URL không được tự dựng URL PayPal.
+GET /api/payments/paypal/:id/checkout, có Bearer, chủ sở hữu: trả cùng shape với approvalUrl hiện tại nếu còn READY/PENDING. Dùng endpoint này để mở lại approval; lịch sử/GET trạng thái thường trả approvalUrl=null và serialize dữ liệu đã lưu. Ngoại lệ: UNKNOWN với lastError=PAYPAL_PAYER_ACTION_REQUIRED làm runtime GET order mới để xác minh trước khi hiển thị AWAITING_APPROVAL. Lỗi đã lưu không đủ để cấp approval URL; GET mới lỗi/timeout không chứng minh chưa thu tiền. Thiếu URL không được tự dựng URL PayPal.
 
 ## 3. Kiểm approval URL
 
@@ -100,3 +100,9 @@ Bút toán là TOPUP_CREDIT, available_delta=quote.amountVnd, locked_delta=0, re
 Tài liệu API chính thức: https://developer.paypal.com/api/orders/v2 và https://developer.paypal.com/api/webhooks/v1. Chưa kiểm chứng approval/cookie/PayPal/Passkey thật bằng trình duyệt.
 
 Worker chạy trong process server qua backgroundJobs/startReconciler, mặc định mỗi 60 giây và chỉ xét yêu cầu >=30 giây; RECONCILE_INTERVAL_SECONDS=0 tắt. scripts/reconcile.js chạy một lượt bằng cùng reconcileOnce. Không có HTTP endpoint reconcile hoặc settlement để người dùng/admin gọi trực tiếp.
+
+## 9. Phạm vi origin và nghiệm thu
+
+Code route, DB, coordinator, settlement, webhook, worker và UI đã được nối trên nền tích hợp c4ed8bc; các phép kiểm HTTP giả lập không thay thế nghiệm thu Sandbox, cookie, redirect hoặc Windows Hello thật. Chưa suy ra feature đã triển khai/bật trên web chính.
+
+public/js/config.js hiện hướng mọi hostname *.vercel.app tới API production https://api.enclave.id.vn. Preview không phải staging DB riêng và không chạy Passkey với RP ID enclave.id.vn. Nghiệm thu cần frontend HTTPS và API/DB thử nghiệm đã cô lập; local HTTP không đáp ứng PAYPAL_FRONTEND_ORIGIN HTTPS. Refresh cookie HttpOnly/SameSite=Strict/Secure cần kiểm lại qua proxy và redirect thực tế. Xem PAYPAL-SANDBOX-INTEGRATION.md để phân biệt phạm vi code với việc còn phải nghiệm thu.

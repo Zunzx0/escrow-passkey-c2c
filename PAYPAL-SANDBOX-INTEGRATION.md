@@ -1,128 +1,103 @@
-# PayPal Sandbox cho Enclave: bộ kết nối và ranh giới tích hợp
+# PayPal Sandbox cho Enclave: tích hợp và nghiệm thu
 
-## 1. Trạng thái thực tế
+## 1. Trạng thái và phạm vi
 
-Nhánh này bổ sung hai module độc lập, tắt theo mặc định:
+Tài liệu này cập nhật mô tả theo nền tích hợp `c4ed8bc` do root giao để rà soát. Tính năng mặc định tắt. Code đã có route HTTP, lưu trữ bền vững trên SQLite/PostgreSQL, coordinator capture, settlement ví/sổ cái, webhook, worker đối soát và giao diện ví. Không còn ở giai đoạn hai module adapter/service độc lập.
 
-- `cho-an-tam/src/lib/paypalSandboxProvider.js`: OAuth phía máy chủ, tạo Orders v2, capture, truy vấn, xác minh webhook qua API PayPal.
-- `cho-an-tam/src/lib/paypalSandboxService.js`: kiểm tra chủ sở hữu, đọc báo giá đã lưu, gắn order với yêu cầu, chuyển kết quả đã xác minh tới hàm tất toán được truyền vào.
+Các bộ kiểm thử với HTTP provider giả lập đã có kết quả đạt trong quá trình duyệt nhánh tích hợp; kết quả UI độc lập trên bản bổ sung test của Pro là 208/208. Đây không phải bằng chứng PayPal Sandbox thật, redirect/cookie thật hoặc Windows Hello thật. Không suy ra tính năng đã triển khai hay được bật trên web chính từ trạng thái code/test.
 
-Chưa nối route HTTP, cơ sở dữ liệu, worker hay giao diện. Vì Claude Max đang sửa đúng các file thanh toán dùng chung, PR này không chỉnh `payments.js`, `paymentService.js`, `reconciler.js`, `mockPaymentProvider.js`, `db.js`, schema, `public/` hoặc bộ chạy test. Bộ kết nối độc lập chưa có nghĩa website đã thanh toán được bằng PayPal. Cần PR tích hợp tiếp theo sau khi hợp đồng của Claude Max được duyệt.
+Phạm vi chỉ gồm **nạp PayPal Sandbox vào ví nội bộ**. Hoàn tiền và giải ngân tranh chấp chuyển giữa các ví Enclave; không có payout, refund PayPal tự động hoặc thanh toán PayPal live. Sandbox và ví đồ án không đại diện một dịch vụ giữ tiền thật.
 
-Không có thông tin ứng dụng Sandbox trong workspace này; kiểm thử độc lập dùng HTTP giả lập. Chưa gọi PayPal bằng thông tin của người dùng, chưa dùng DB production, chưa triển khai.
+## 2. Các thành phần đã nối
 
-## 2. Chính sách tiền tệ của bản trình diễn
+- `src/lib/paypalSandboxProvider.js`: OAuth phía máy chủ, Orders v2, capture, GET order và xác minh webhook.
+- `src/lib/paypalSandboxService.js`: kiểm owner, order/quote, tạo/mở lại order, webhook và đối soát.
+- `src/lib/paypalPaymentStore.js`: binding bền vững, quyền create/capture, bằng chứng thu tiền và trạng thái phục hồi.
+- `src/lib/paypalCaptureCoordinator.js`: claim và commit trước khi gọi mạng, xử lý kết quả chưa rõ, không giữ transaction qua mạng.
+- `src/lib/paypalSettlement.js`: bằng chứng xác minh, request SUCCEEDED, ví và TOPUP_CREDIT trong cùng transaction.
+- `src/lib/paypalRuntime.js`: đọc cấu hình, kiểm readiness, tạo request/báo giá và serialize trạng thái.
+- `src/routes/paypal.js`: API công khai config, API có phiên/owner cho topup/checkout/capture, webhook riêng.
+- `src/lib/reconciler.js`: đối soát theo provider; PayPal worker chỉ GET, không tự capture.
+- Các migration SQLite/PostgreSQL trong `src/` và `src/db.js`: provider discriminator, binding, ràng buộc bằng chứng/order/capture.
+- `public/js/app.js`: báo giá, approval, return/cancel, xác nhận GET, bảo vệ phiên và khôi phục ý định nạp.
 
-Ví và sổ cái Enclave vẫn dùng số nguyên VND. PayPal Sandbox nhận USD. VND không có trong danh sách tiền tệ REST PayPal được công bố tại thời điểm rà soát.
+Hợp đồng request/response chi tiết nằm trong `HOP-DONG-API-PAYPAL-P2-M2.md`; trạng thái store nằm trong `PAYPAL-STORE-DESIGN.md`. Khi thay đổi contract phải cập nhật code, test và tài liệu cùng nhau.
 
-Máy chủ tạo báo giá thử nghiệm bằng `createQuote(amountVnd, rateVndPerUsd)`. Tỷ lệ mặc định trong bộ kết nối là **25.000 VND/USD**, chỉ là cấu hình trình diễn, không phải tỷ giá thị trường/PayPal, không được dùng cho tiền thật. Số cent USD bằng `ceil(amountVnd * 100 / rateVndPerUsd)` bằng số nguyên BigInt; không dùng số thực cho phép tính tiền. Ví dụ 100.000 VND ở tỷ lệ này tương ứng 4,00 USD Sandbox.
+## 3. Tiền tệ và báo giá
 
-Một báo giá có dạng:
+Ví/sổ cái giữ số nguyên VND; bản tích hợp PayPal Sandbox sử dụng USD. Máy chủ tính `ceil(amountVnd * 100 / rateVndPerUsd)` bằng BigInt và lưu báo giá trước lần gọi provider đầu tiên. Tỷ lệ mặc định 25.000 VND/USD là tỷ lệ mô phỏng, không phải tỷ giá thị trường hay tỷ giá PayPal. Ví dụ 100.000 VND tương ứng 4,00 USD Sandbox với tỷ lệ này.
 
-```json
-{"version":1,"amountVnd":100000,"currency":"USD","usdCents":400,"usdValue":"4.00","rateVndPerUsd":25000}
-```
+Báo giá, amount, provider, owner và merchant gắn với yêu cầu không được đổi sau tạo. Thay biến môi trường tỷ lệ không tính lại order cũ. UI chỉ hiển thị giá trị USD/VND từ server, không tự tính hoặc tự cộng số dư.
 
-Báo giá phải lưu nguyên vẹn cùng yêu cầu nạp trước lần gọi PayPal đầu tiên. Sau đó đổi biến tỷ giá không làm thay đổi yêu cầu đã có. Người dùng cần thấy cả số VND ghi ví, USD thử nghiệm phải trả và tỷ lệ trước khi phê duyệt. Làm tròn lên có thể tạo chênh nhỏ; giao diện phải hiển thị số USD đã chốt.
+## 4. Luồng API và bằng chứng thành công
 
-## 3. Hợp đồng bộ kết nối
+1. `GET /api/payments/paypal/config` xác nhận cổng được bật. Lỗi, dữ liệu sai dạng hoặc 404 làm UI tắt cả hai cổng. Mock chỉ mở khi cấu hình hợp lệ xác nhận `mockPayments.enabled=true`; không dùng fallback ngầm.
+2. `POST /api/payments/paypal/topup` nhận `{amount, requestId}`; vai trò BUYER/SELLER và owner lấy từ phiên máy chủ. Cùng owner/key/amount/provider dùng lại một request, order và quote. Timeout không được đổi requestId để thử lại.
+3. `GET /api/payments/paypal/:id/checkout` kiểm owner và lấy approval URL hiện tại qua provider khi phù hợp. UI không dựng URL từ token/order/query; chỉ nhận HTTPS đúng origin `https://www.sandbox.paypal.com`, không userinfo hoặc cổng lạ.
+4. PayPal đưa người dùng về `/?paypal=return|cancel&paymentRequestId=<id>#/wallet`. `token`, `PayerID` và query không phải chứng cứ thu tiền. UI dọn query rồi GET request để xác nhận id, provider, amount, requestId.
+5. Cancel không capture, không tự FAILED, không tạo order mới. Return cũng không tự capture; người dùng chủ động bấm xác nhận khi ý định khớp.
+6. `POST /api/payments/paypal/:id/capture` dùng order/quote đã lưu phía server. HTTP 200, APPLIED, DUPLICATE hay BUSY không đủ để UI báo thành công. UI GET lại và chỉ báo/đọc ví khi dữ liệu khớp nói SUCCEEDED.
+7. Webhook tại `POST /api/payments/paypal/webhook` xác minh chữ ký qua PayPal, GET order và kiểm merchant/metadata/amount/capture; payload không quyết VND credit. Chỉ PAYMENT.CAPTURE.COMPLETED được xử lý cho luồng này.
+8. Worker đối soát chỉ truy vấn provider và tất toán bằng chứng hợp lệ, không chủ động gửi capture. Không có HTTP endpoint cho người dùng/admin gọi settlement trực tiếp.
 
-```js
-const { createSandboxProvider } = require('./src/lib/paypalSandboxProvider');
-const provider = createSandboxProvider({
-  enabled: false, // chỉ true sau khi hoàn tất các hook và cấu hình
-  clientId: process.env.PAYPAL_SANDBOX_CLIENT_ID,
-  clientSecret: process.env.PAYPAL_SANDBOX_CLIENT_SECRET,
-  webhookId: process.env.PAYPAL_SANDBOX_WEBHOOK_ID,
-  merchantId: process.env.PAYPAL_SANDBOX_MERCHANT_ID,
-  rateVndPerUsd: 25000,
-  frontendOrigin: 'https://enclave.id.vn',
-  timeoutMs: 10000,
-});
-```
+### Ngoại lệ GET trạng thái có thể gọi mạng
 
-Đây là ví dụ hợp đồng, chưa phải đoạn khởi tạo chạy trong ứng dụng. `enabled` phải là boolean `true`; thiếu thông tin bắt buộc thì từ chối. Client Secret chỉ ở máy chủ. HTTP chỉ gửi tới `https://api-m.sandbox.paypal.com`; live hoặc endpoint tự chọn bị chặn. URL phê duyệt chỉ được dùng `https://www.sandbox.paypal.com`; URL quay lại phải cùng HTTPS origin của giao diện đã cấu hình. Không theo redirect HTTP tự động. Timeout áp dụng cả fetch và đọc body, tối đa 30 giây; phản hồi quá lớn hoặc sai JSON bị từ chối.
+`GET /api/payments/:id` và danh sách lịch sử thường serialize dữ liệu đã lưu; không được hiểu là luôn ngoại tuyến. Khi binding ở UNKNOWN với `lastError=PAYPAL_PAYER_ACTION_REQUIRED`, runtime GET order mới để xác minh người mua còn phải phê duyệt trước khi hiển thị AWAITING_APPROVAL. Lỗi cũ đã lưu chỉ là gợi ý phải kiểm lại, không tự cấp approval URL hoặc chứng minh trạng thái hiện tại.
 
-Các phương thức:
+Nếu GET mới timeout/lỗi thì API/UI giữ kết quả chưa xác nhận, không suy ra chưa thu tiền hoặc tự báo thành công. GET checkout mới là đường lấy approval URL cho thao tác mở cổng; lịch sử không phải nguồn URL cached để điều hướng.
 
-- `provider.createQuote(amountVnd)`.
-- `provider.createOrder({paymentRequestId, quote, returnUrl, cancelUrl})`.
-- `provider.captureOrder({orderId, paymentRequestId, quote})`.
-- `provider.getOrder({orderId, paymentRequestId, quote})`.
-- `provider.verifyWebhook({headers, event})`: chỉ `verification_status === 'SUCCESS'` là hợp lệ.
+## 5. Hàng rào tiền và phục hồi
 
-Order phải có một purchase unit, `intent=CAPTURE`, `reference_id` và `custom_id` cùng bằng ID yêu cầu nội bộ, đúng merchant ID, đúng USD và đúng cent đã lưu. Create dùng POST rồi GET để đọc dữ liệu đầy đủ. Capture kiểm tra GET **trước** khi yêu cầu thu tiền, POST capture với khóa ổn định rồi GET lại để xác minh trạng thái. Chỉ một capture đầy đủ `final_capture=true`, capture `COMPLETED` và order `COMPLETED` mới trở thành `SUCCEEDED`. Pending, approved, denied, reversed/refunded không tạo lần ghi ví mới. Các trạng thái sau thanh toán như hoàn tiền PayPal/chargeback cần quy trình riêng; module này không triển khai xử lý chargeback.
+- Mock và PayPal được phân biệt trong DB, route, worker và settlement; mock không tất toán PayPal và ngược lại.
+- Capture claim cùng token ngăn holder cũ ghi đè holder mới. `markCapturePostSent` được commit trước POST. Đã từng POST mà kết quả chưa rõ không được quay READY hoặc đóng FAILED chỉ vì timeout.
+- Chỉ ORDER_VOIDED là bằng chứng NOT_CAPTURED trong chính sách hiện tại; CAPTURE_DECLINED/PENDING/APPROVED không đủ để đóng một lần thu tiền chưa rõ.
+- VERIFIED + request PENDING cần settlement phục hồi, không được hiểu là ví đã cộng. STALE_CLAIM rollback credit rồi mở transaction mới xác minh/tất toán.
+- Bằng chứng thu đến sau request FAILED được giữ ở RECOVERY_REQUIRED, không tự credit, không mở lại request. Không sửa số dư bằng SQL để bỏ trạng thái này; cần quy trình đối soát do root chốt.
+- Settlement kiểm provider/quote/capture và ghi TOPUP_CREDIT với key `topup:<requestId>` cùng request SUCCEEDED, ví và evidence trong một transaction. Lỗi giữa transaction phải rollback toàn bộ; callback sau commit hỏng không có nghĩa tiền rollback.
 
-`PayPal-Request-Id` là SHA-256 rút gọn 32 ký tự của phase + ID yêu cầu. Create và capture dùng khóa khác nhau, retry cùng thao tác dùng cùng khóa. Khi PayPal trả `ORDER_ALREADY_CAPTURED`, bộ kết nối đọc lại order và xác minh; không coi lỗi đó tự nó là thanh toán thành công.
+Chín bất biến tài chính gốc vẫn giữ nguyên ý nghĩa. Các kiểm tra PayPal bổ sung nằm riêng trong `src/lib/paypalInvariants.js`; không tự đổi số bất biến báo cáo đồ án từ 9 thành 12.
 
-## 4. Hợp đồng service và store bắt buộc
+## 6. Cấu hình server đang được đọc
 
-```js
-const { createSandboxPaymentService } = require('./src/lib/paypalSandboxService');
-const service = createSandboxPaymentService({
-  provider, store, settle: applyProviderResult,
-  returnUrl: 'https://enclave.id.vn/#/wallet',
-  cancelUrl: 'https://enclave.id.vn/#/wallet',
-});
-```
+| Biến | Ý nghĩa |
+| --- | --- |
+| PAYPAL_SANDBOX_ENABLED | Chỉ `1` mới yêu cầu bật; mặc định tắt |
+| PAYPAL_SANDBOX_CLIENT_ID / PAYPAL_SANDBOX_CLIENT_SECRET | Ứng dụng Sandbox; secret chỉ phía server |
+| PAYPAL_SANDBOX_MERCHANT_ID | Merchant business Sandbox khớp order |
+| PAYPAL_SANDBOX_WEBHOOK_ID | Webhook của ứng dụng Sandbox |
+| PAYPAL_FRONTEND_ORIGIN | HTTPS origin thuần, không path/query/userinfo; mặc định https://enclave.id.vn |
+| PAYPAL_DEMO_VND_PER_USD | Số nguyên dương, mặc định 25000; tỷ lệ mô phỏng |
+| PAYPAL_TIMEOUT_MS | 100–30000 ms, mặc định 10000 |
+| PAYPAL_CAPTURE_LEASE_SECONDS | Mặc định 120; phải đủ ít nhất `(4*timeoutMs+10000)/1000` |
 
-`store` do PR tích hợp cung cấp, sử dụng CSDL ứng dụng:
+Thiếu/sai cấu hình khiến config công khai không bật PayPal. Khi flag PayPal được yêu cầu bật, mock topup/checkout không được dùng làm fallback dù thông tin PayPal thiếu. Cửa sổ retry CREATE chưa gắn order là 5 phút từ lần thử đầu; có order rồi không create order khác.
 
-- `loadByRequestId(paymentRequestId)` trả dữ liệu tin cậy hoặc null.
-- `loadByOrderId(orderId)` tra liên kết order duy nhất, trả dữ liệu tin cậy hoặc null.
-- `claimCreateAttempt(paymentRequestId, nowIso)` thực hiện cập nhật có điều kiện, ghi timestamp lần thử đầu nếu đang null; tuyệt đối không làm mới timestamp khi retry. Trả lại toàn bộ liên kết đã lưu mới nhất.
-- `bindOrder(paymentRequestId, orderId)` thực hiện cập nhật có điều kiện nguyên tử. Trả true khi đã gắn cùng order hoặc lần đầu gắn thành công; false khi khác order/xung đột. Có chỉ mục UNIQUE cho order PayPal.
+Adapter chỉ gọi API Sandbox cố định; không đổi base sang live, không bỏ certificate validation. Fake provider injection chỉ được cho phép APP_ENV=test với DB thử nghiệm cô lập theo kiểm tra runtime. Không có endpoint hoặc biến môi trường công khai cho người dùng chọn fake transport.
 
-Dữ liệu tin cậy:
+## 7. Origin, cookie, staging và thiết bị
 
-```js
-{
-  provider: 'PAYPAL_SANDBOX', paymentRequestId, userId, providerRef,
-  amountVnd, quote, status: 'PENDING', orderId: null, createAttemptAt: null
-}
-```
+Web chính dự kiến frontend `https://enclave.id.vn`, API `https://api.enclave.id.vn`: CORS exact origin, credentials cho refresh cookie, WebAuthn RP ID `enclave.id.vn` và expected origin `https://enclave.id.vn`. Cookie refresh HttpOnly, SameSite=Strict; Secure phụ thuộc server nhận HTTPS đúng qua proxy. Kiểm TRUST_PROXY theo hạ tầng triển khai trước nghiệm thu.
 
-`providerRef` là mã nội bộ đã lưu trong `payment_requests`; `orderId` là mã PayPal riêng, không được tráo hai mã. Quote/provider/user/amount phải bất biến sau tạo; đọc từ server, không nhận nguyên object từ client. `claimCreateAttempt` phải trả đúng yêu cầu/chủ sở hữu/báo giá/mã provider ban đầu. Cửa sổ retry create chưa biết order tối đa 5 phút, ngắn hơn thời gian lưu khóa mặc định của PayPal; hết cửa sổ, service trả `PAYPAL_CREATE_RECOVERY_REQUIRED` và không gửi thêm create. Timestamp này phải bền vững qua restart.
+`public/js/config.js` hiện hướng cả hostname `*.vercel.app` tới API production. Vì vậy preview chỉ được dùng xem giao diện; không dùng làm staging DB riêng hoặc nghiệm thu Passkey nếu chưa chốt cấu hình API độc lập. Không cho thử đồng thời tác động DB production.
 
-`status` là trạng thái yêu cầu nội bộ `PENDING|SUCCEEDED|FAILED`, bắt buộc lấy từ CSDL. FAILED chặn create/capture trước khi gọi provider; SUCCEEDED chỉ GET order đã gắn khi thử lại. Yêu cầu SUCCEEDED thiếu order binding bị từ chối. Kiểm tra trạng thái trước capture chưa đủ để chống một luồng khác đóng request trong lúc gọi mạng. PR tích hợp phải dành quyền capture trong state machine hoặc cấm chuyển FAILED/hết hạn khi chưa biết kết quả PayPal, rồi đối soát thay thế. **Không áp dụng logic hết hạn/mock expire của Claude Max cho yêu cầu PayPal.** Module độc lập không giữ transaction CSDL qua mạng; đây là điều kiện chặn bật feature trước khi nối hoàn chỉnh.
+Local HTTP dùng API cùng origin và RP ID localhost, expected origin đúng cổng. Không dùng `127.0.0.1` thay localhost. PayPal frontend origin bắt buộc HTTPS; nghiệm thu Sandbox thật cần origin HTTPS đã cô lập, không giả định local HTTP được chấp nhận.
 
-Khi order đã gắn, mọi lần mở lại dùng GET cùng order, kể cả nhiều giờ sau; không tạo order mới. Nếu timeout create làm mất order ID và đã quá cửa sổ retry, giữ yêu cầu để quản trị viên đối soát trong Sandbox Dashboard, phục hồi binding theo dữ liệu đã xác minh; không tự tạo order thay thế, không tự đánh dấu FAILED hoặc cộng ví.
+Sau redirect PayPal phải kiểm refresh cookie và khôi phục phiên trên trình duyệt thật, bao gồm access token hết hạn khi ở trang PayPal. Epoch/session/owner phải giữ ý nghĩa khi logout rồi login lại cùng tài khoản. Windows Hello/PIN/biometric do người dùng thực hiện; jsdom/software authenticator không thay thế bằng chứng thiết bị thật.
 
-Service cung cấp:
+## 8. Checklist nghiệm thu còn lại trước bật feature
 
-- `createOrder({paymentRequestId,userId})`: userId lấy từ phiên máy chủ; không cộng ví.
-- `capture({paymentRequestId,userId})`: lấy order/quote từ store; xác minh chủ sở hữu; kết quả server capture dùng source `RECONCILER` vì đây là kênh server hỏi provider, tương thích enum hiện tại.
-- `reconcile({paymentRequestId})`: API server truy vấn order; nguồn `RECONCILER`.
-- `webhook({headers,event})`: xác minh chữ ký trước. Chỉ xử lý `PAYMENT.CAPTURE.COMPLETED`, tra order ID trong event qua store, GET order PayPal, kiểm tra capture ID rồi tất toán nguồn `WEBHOOK`. Payload webhook không tự quyết số VND ghi ví.
+1. Duyệt bản ghép cuối, chạy suite SQLite/PostgreSQL và UI với số đếm đúng; đối chiếu migration và các bất biến.
+2. Chuẩn bị ứng dụng, business và personal Sandbox, credentials phía server và webhook HTTPS; không chép secret vào Git/chat/báo cáo.
+3. Trình duyệt thật: config, quote, approval URL, cancel, return, capture chủ động, GET xác nhận, reload, session refresh, logout/login lại cùng user.
+4. Sandbox thật: đối chiếu order/capture/merchant, số USD thu thử và số VND vào ví; đúng một TOPUP_CREDIT dù capture/webhook/worker gửi lặp.
+5. Thử mất webhook/GET timeout, restart giữ order/quote, tài khoản khác không truy cập/capture request, mock không xử lý PayPal.
+6. Thực hiện Passkey thật cho các thao tác nhạy cảm độc lập với nạp tiền, rồi kiểm escrow/tranh chấp bằng dữ liệu thử.
+7. Ghi hash, môi trường, kết quả và giới hạn; chỉ gộp/triển khai/bật theo quyết định root sau nghiệm thu. Không khẳng định đã hoạt động trên web chính khi chỉ có code và HTTP giả lập.
 
-`settle` phải là hàm tất toán hiện có, bảo đảm conditional claim PENDING, tăng ví, ledger trong cùng transaction và idempotency chống lặp. Service không thay thế hàng rào CSDL. Production hook cần thêm kiểm tra provider discriminator để đường mock không thể tất toán yêu cầu PayPal.
+## 9. Tài liệu tham khảo của bộ kết nối
 
-## 5. Những hook còn phải tích hợp sau PR Claude Max
+- https://developer.paypal.com/api/orders/v2
+- https://developer.paypal.com/api/webhooks/v1
+- https://developer.paypal.com/api/rest/reference/idempotency/
 
-1. Thêm migration có provider discriminator (`MOCK` mặc định cho dữ liệu cũ), báo giá bất biến, order ID UNIQUE và create-attempt timestamp; kiểm tra trên SQLite/PostgreSQL. Có thể dùng bảng riêng `paypal_payment_bindings` gắn FK với `payment_requests`; chưa chốt schema vì cần phối hợp Max.
-2. Tạo request PayPal và snapshot báo giá trong cùng transaction với kiểm tra ví/hạn mức/chống lặp theo hợp đồng Max. Khóa chống lặp cùng user không được đổi amount/provider. Client không quyết định quote hoặc order ID.
-3. Nối routes có xác thực cho create/capture, kiểm tra owner phía máy chủ. Một route webhook PayPal riêng có giới hạn body/rate và verify qua API. Chỉ trả mã lỗi an toàn; không trả/log OAuth token, Secret hoặc nguyên upstream body.
-4. Worker chọn adapter theo provider đã lưu. Với PayPal, truy vấn binding/order; với mock giữ đường cũ. Không đưa `provider_ref` PayPal vào kho mock.
-5. Mock checkout và mock webhook bắt buộc từ chối request `PAYPAL_SANDBOX`. PayPal webhook/service không nhận request MOCK. Hàm settlement kiểm tra provider đúng với kênh được gọi trong chính transaction.
-6. UI chọn PayPal Sandbox, hiển thị báo giá, mở URL phê duyệt đã kiểm tra, quay lại gọi capture có xác thực theo request ID nội bộ. Return URL, query `token`, nút client báo thành công không được dùng làm bằng chứng để cộng ví.
-7. Xác minh kết quả toàn luồng với HTTP PayPal giả lập, SQLite/PostgreSQL và 9 bất biến; tiếp đó test tài khoản PayPal Sandbox thật bằng credentials người dùng nhập tại host. Chỉ triển khai sau khi webhook/order/capture được kiểm tra.
-
-## 6. Cấu hình và thử nghiệm Sandbox thật (sau khi nối xong)
-
-1. Trong PayPal Developer Dashboard tạo app **Sandbox**, dùng tài khoản business Sandbox nhận tiền và personal Sandbox phê duyệt.
-2. Lấy Client ID, Secret, merchant ID của business Sandbox. Tạo webhook HTTPS của API ứng dụng cho `PAYMENT.CAPTURE.COMPLETED`, lưu webhook ID cùng app Sandbox. Không đăng Secret trong Git/PR/chat công khai.
-3. Đặt các biến `PAYPAL_SANDBOX_CLIENT_ID`, `PAYPAL_SANDBOX_CLIENT_SECRET`, `PAYPAL_SANDBOX_WEBHOOK_ID`, `PAYPAL_SANDBOX_MERCHANT_ID`; PR tích hợp sẽ đọc chúng và bật feature rõ ràng. Các tên env này là hợp đồng đề xuất, chưa có server đọc hiện tại.
-4. Test số VND/USD chốt, huỷ phê duyệt, PENDING, capture thành công, retry capture, hai capture đồng thời, webhook trùng, webhook giả, webhook mất và worker đối soát; kiểm tra ledger chỉ một credit.
-5. Test restart giữ quote/order/timestamp; đổi cấu hình tỷ lệ không đổi quote cũ; một user khác không capture được request; mock không xử lý request PayPal.
-6. Số tiền Sandbox chỉ phục vụ trình diễn, không rút/chuyển tiền thật. Giải ngân/hoàn tiền tranh chấp hiện vẫn chuyển giữa ví nội bộ Enclave; không có payout PayPal hoặc refund PayPal tự động.
-
-## 7. Nguồn chính thức đã đối chiếu
-
-- [Orders v2](https://developer.paypal.com/api/orders/v2)
-- [Create order](https://developer.paypal.com/api/orders/v2/orders-create)
-- [Capture order](https://developer.paypal.com/api/orders/v2/orders-capture)
-- [Webhook signature verification](https://developer.paypal.com/api/webhooks/v1/verify-webhook-signature-post)
-- [PayPal currencies](https://developer.paypal.com/api/codes/currency)
-- [Idempotency](https://developer.paypal.com/api/rest/reference/idempotency/)
-
-Các bài kiểm thử độc lập nằm ở nhánh agent kiểm thử. Thành công với HTTP giả lập không thay thế chạy Sandbox thật sau khi có credentials và hook đầy đủ.
+Các liên kết trên là tài liệu kỹ thuật tham khảo đã có trong bản cũ; bản cập nhật này tập trung đối chiếu code cục bộ, không chứng nhận đã kiểm dịch vụ PayPal hiện tại qua mạng.
