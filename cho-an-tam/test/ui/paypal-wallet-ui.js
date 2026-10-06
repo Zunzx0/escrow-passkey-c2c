@@ -709,21 +709,48 @@ async function main() {
   p.close();
 
   // Đăng xuất rồi đăng nhập lại CÙNG tài khoản: userId, token và ý định lưu đều khớp lại, chỉ sessionEpoch còn phân biệt được phiên cũ.
+  // Phản hồi capture được giữ bằng Promise deferred (không dựa vào delay): chỉ được giải quyết SAU khi phiên mới hoàn tất,
+  // và test tự chứng minh POST capture đã phát đúng một lần, phản hồi còn treo, trước khi đăng xuất.
   srv = fakeServer();
-  srv.captureResult = () => delay(700, json(200, { ...srv.row, outcome: 'APPLIED' }));
+  const capturePath = 'POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture';
+  const statusPath = 'GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a';
+  let releaseCapture = () => {};
+  let captureDelivered = false;
+  const captureGate = new Promise((resolve) => { releaseCapture = resolve; });
+  srv.captureResult = () => captureGate.then(() => {
+    captureDelivered = true;
+    return json(200, { ...srv.row, outcome: 'APPLIED' });
+  });
+  const stateOf = (promise) => Promise.race([promise.then(() => 'resolved'), sleep(0).then(() => 'pending')]);
   p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 5000 });
-  p.click(p.noticeBtn('paypal-capture'));
-  await sleep(30);
-  const getsBeforeRelogin = p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a');
-  srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() });
-  await logoutUi(p);
-  await loginUi(p, BUYER);
-  p.w.location.hash = '#/wallet';
-  await sleep(1100);
-  ok(p.toasts().every((t) => !/Nạp tiền thành công/.test(t.text)), 'Capture chậm + đăng xuất/đăng nhập lại CÙNG tài khoản: phản hồi của phiên cũ KHÔNG báo "nạp thành công"');
-  ok(p.intent() && p.intent().requestId === KEY && p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') === getsBeforeRelogin,
-    'Capture chậm + đăng nhập lại CÙNG tài khoản: phiên cũ không đọc trạng thái và không xoá ý định của phiên mới');
-  p.close();
+  try {
+    p.click(p.noticeBtn('paypal-capture'));
+    const emitDeadline = Date.now() + 1000;
+    while (p.count(capturePath) < 1 && Date.now() < emitDeadline) await sleep(10);
+    await sleep(50); // thêm một nhịp để bắt cả lần phát thứ hai nếu có
+    const getsBeforeRelogin = p.count(statusPath);
+    const inFlight = p.count(capturePath) === 1 && srv.captures === 1 && !captureDelivered && (await stateOf(captureGate)) === 'pending';
+    ok(inFlight, `Điều kiện dựng đúng: POST capture đã phát đúng 1 lần (log=${p.count(capturePath)}, máy chủ=${srv.captures}) và phản hồi còn treo trước khi đăng xuất`);
+    if (inFlight) {
+      srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() });
+      await logoutUi(p);
+      await loginUi(p, BUYER);
+      p.w.location.hash = '#/wallet';
+      await sleep(1100);
+      ok(p.count('POST /api/passkeys/session/logout') === 1 && p.count('POST /api/passkeys/login/password') === 1 && !!p.d.querySelector('[data-act="logout"]'),
+        'Phiên mới đã hoàn tất (1 đăng xuất, 1 đăng nhập, giao diện đã đăng nhập) TRƯỚC khi giải quyết phản hồi capture cũ');
+      ok(!captureDelivered && p.count(capturePath) === 1, 'Phản hồi capture cũ vẫn chưa được giao cho tới khi phiên mới sẵn sàng, và không có capture thứ hai');
+      releaseCapture();
+      await sleep(400);
+      ok(captureDelivered, 'Phản hồi capture của phiên cũ đã thực sự được giao sau khi đăng nhập lại (assert bên dưới không đạt giả)');
+      ok(p.toasts().every((t) => !/Nạp tiền thành công/.test(t.text)), 'Capture chậm + đăng xuất/đăng nhập lại CÙNG tài khoản: phản hồi của phiên cũ KHÔNG báo "nạp thành công"');
+      ok(p.intent() && p.intent().requestId === KEY && p.count(statusPath) === getsBeforeRelogin,
+        'Capture chậm + đăng nhập lại CÙNG tài khoản: phiên cũ không đọc trạng thái và không xoá ý định của phiên mới');
+    }
+  } finally {
+    releaseCapture();
+    p.close();
+  }
 
   srv = fakeServer();
   srv.approvalUrl = SANDBOX;
