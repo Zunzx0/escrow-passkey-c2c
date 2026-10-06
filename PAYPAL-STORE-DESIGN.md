@@ -1,5 +1,7 @@
 # Store PayPal Sandbox — thiết kế và hợp đồng (Claude Max: C1, M1, sửa theo phản hồi Codex)
 
+> **Ghi chú cập nhật trạng thái:** Nội dung bên dưới là hồ sơ bàn giao và giới hạn kiểm thử M1 ở mức store theo các hash nền được ghi trong tài liệu, không mô tả đầy đủ hệ thống tích hợp hiện tại. Trên nền `codex/payment-provider-isolation@c4ed8bc`, route, adapter, coordinator capture, settlement ví/sổ cái, webhook, worker và giao diện đã được nối; các giới hạn “chưa có ví/ledger/route/worker” bên dưới chỉ áp dụng cho fixture store M1. Migration v6 đã siết bằng chứng `NOT_CAPTURED` chỉ còn `ORDER_VOIDED`; cảnh báo CHECK v5 vẫn nhận `CAPTURE_DECLINED` là ghi nhận lịch sử đã được xử lý. Kết quả HTTP giả lập và kiểm thử store không thay thế nghiệm thu PayPal Sandbox, redirect/cookie và Passkey trên thiết bị thật; cũng không xác nhận tính năng đã được bật trên web chính. Trạng thái tích hợp và checklist nghiệm thu hiện hành nằm trong `PAYPAL-SANDBOX-INTEGRATION.md` và `HOP-DONG-API-PAYPAL-P2-M2.md`.
+
 Phạm vi: `cho-an-tam/src/lib/paypalPaymentStore.js`, `cho-an-tam/test/paypal-store-concurrency-e2e.js` và tài liệu này. Không sửa `public/`, provider/service PayPal, route, `db.js`, schema/migration, `paymentService.js`, `reconciler.js`, `package.json` hay `run-suite.js`.
 
 Lịch sử nền của nhánh `claude/paypal-store` (đều là merge thường):
