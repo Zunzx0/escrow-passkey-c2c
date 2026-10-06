@@ -63,15 +63,20 @@ function createPayPalRuntime({config=configFromEnvironment(),provider=null}={}) 
   async function serializePayPal(id,{approval=false}={}) {
     const binding=await store.loadByRequestId(id);if(!binding)return {};
     const pr=await db.prepare('SELECT * FROM payment_requests WHERE id=?').get(id);
-    let approvalUrl=null;
-    if(approval && enabled && binding.status==='PENDING'&&binding.orderId && binding.capture.state==='READY') {
+    let approvalUrl=null,payerActionVerified=false;
+    const actionHint=binding.capture.state==='UNKNOWN' && binding.capture.lastError==='PAYPAL_PAYER_ACTION_REQUIRED';
+    if(enabled && binding.status==='PENDING' && binding.orderId && ((approval && binding.capture.state==='READY') || actionHint)) {
       await owned(id,binding.userId);
-      approvalUrl=(await adapter.getOrder({orderId:binding.orderId,paymentRequestId:id,quote:binding.quote})).approvalUrl||null;
+      const current=await adapter.getOrder({orderId:binding.orderId,paymentRequestId:id,quote:binding.quote});
+      if (!current || current.orderId!==binding.orderId || current.paymentRequestId!==id || current.amount!==binding.amountVnd) throw new AppError(409,'PAYPAL_ORDER_MISMATCH','Bằng chứng PayPal không khớp yêu cầu');
+      payerActionVerified=current.status==='PENDING' && current.payerActionRequired===true && !current.captureId;
+      // Stored error only prompts GET; it cannot authorize an approval URL.
+      if (approval && (payerActionVerified || (binding.capture.state==='READY' && current.status==='PENDING' && !current.captureId))) approvalUrl=current.approvalUrl||null;
     }
     const stage=binding.capture.recoveryRequiredAt || binding.capture.state==='RECOVERY_REQUIRED'?'RECOVERY_REQUIRED':
       binding.status==='SUCCEEDED'?'SUCCEEDED':binding.status==='FAILED'?'FAILED':
       binding.capture.state==='VERIFIED'?'RECONCILING':binding.capture.state==='IN_FLIGHT'?'CAPTURING':
-      binding.capture.state==='UNKNOWN'?'RECONCILING':binding.capture.state==='NOT_CAPTURED'?'NOT_CAPTURED':
+      binding.capture.state==='UNKNOWN'?(payerActionVerified?'AWAITING_APPROVAL':'RECONCILING'):binding.capture.state==='NOT_CAPTURED'?'NOT_CAPTURED':
       binding.orderId?'AWAITING_APPROVAL':binding.createAttemptAt && Date.now()-Date.parse(binding.createAttemptAt)>=300000?'CREATE_RECOVERY_REQUIRED':'CREATING';
     return {id,amount:binding.amountVnd,status:binding.status,requestId:pr.client_request_id,providerRef:binding.providerRef,
       provider:'PAYPAL_SANDBOX',submissionStatus:binding.orderId?'SUBMITTED':'SUBMITTING',createdAt:pr.created_at,resolvedAt:pr.resolved_at,

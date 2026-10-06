@@ -75,7 +75,8 @@ function verifyOrder(order, { orderId, paymentRequestId, quote, merchantId }) {
   }
   if (captures.length === 0) {
     if (order.status === 'COMPLETED') fail('PAYPAL_RESPONSE_INVALID', 'Completed order has no capture');
-    return { orderId, paymentRequestId, status: 'PENDING', amount: expected.amountVnd, captureId: null };
+    return { orderId, paymentRequestId, status: 'PENDING', amount: expected.amountVnd, captureId: null,
+      orderStatus: order.status, payerActionRequired: ['CREATED', 'SAVED', 'PAYER_ACTION_REQUIRED'].includes(order.status) };
   }
   const capture = captures[0];
   if (!capture || !identifier(capture.id) || capture.final_capture !== true || !capture.amount ||
@@ -86,7 +87,7 @@ function verifyOrder(order, { orderId, paymentRequestId, quote, merchantId }) {
     return { orderId, paymentRequestId, status: 'SUCCEEDED', amount: expected.amountVnd, captureId: capture.id };
   }
   // Reversed/refunded/denied/pending captures NEVER become new wallet credits.
-  return { orderId, paymentRequestId, status: 'PENDING', amount: expected.amountVnd, captureId: capture.id };
+  return { orderId, paymentRequestId, status: 'PENDING', amount: expected.amountVnd, captureId: capture.id, orderStatus: order.status, payerActionRequired: false };
 }
 
 function createSandboxProvider(config = {}, { fetchImpl = globalThis.fetch, now = Date.now } = {}) {
@@ -124,8 +125,8 @@ function createSandboxProvider(config = {}, { fetchImpl = globalThis.fetch, now 
           try { body = JSON.parse(raw); } catch (_) { fail('PAYPAL_RESPONSE_INVALID', 'PayPal returned invalid JSON'); }
           if (!response.ok) {
             // Keep only whitelisted upstream issue needed for an already-captured retry.
-            const issue = Array.isArray(body.details) && body.details.some(d => d.issue === 'ORDER_ALREADY_CAPTURED')
-              ? 'ORDER_ALREADY_CAPTURED' : null;
+            const issue = Array.isArray(body.details) && body.details.some(d => d && ['ORDER_ALREADY_CAPTURED','PAYER_ACTION_REQUIRED'].includes(d.issue))
+              ? body.details.find(d => d && ['ORDER_ALREADY_CAPTURED','PAYER_ACTION_REQUIRED'].includes(d.issue)).issue : null;
             const error = new PayPalSandboxError(response.status === 401 ? 'PAYPAL_AUTH_FAILED' : 'PAYPAL_API_ERROR',
               'PayPal Sandbox request was rejected');
             error.upstreamStatus = response.status;
@@ -243,8 +244,13 @@ function createSandboxProvider(config = {}, { fetchImpl = globalThis.fetch, now 
       // Validate identity/amount BEFORE requesting a capture, then independently
       // validate current authoritative state afterward. Never charge a tampered
       // or wrong-payee order and only discover its mismatch after capture.
-      const before = verifyOrder(await api(path), expected);
+      const preflight = await api(path);
+      const before = verifyOrder(preflight, expected);
       if (before.status === 'SUCCEEDED') return before;
+      // Buyer action is a UI hint, never evidence that a previous POST cannot settle.
+      if (before.payerActionRequired || before.captureId || before.orderStatus !== 'APPROVED') {
+        return { ...before, approvalUrl: before.payerActionRequired ? approvalAddress(preflight) : null };
+      }
       try {
         if (input.beforeCapture !== undefined) {
           if (typeof input.beforeCapture !== 'function') fail('VALIDATION_ERROR', 'beforeCapture must be a function', 400);
@@ -256,6 +262,13 @@ function createSandboxProvider(config = {}, { fetchImpl = globalThis.fetch, now 
           fail('PAYPAL_ORDER_MISMATCH', 'Capture response order ID does not match', 409);
         }
       } catch (error) {
+        if (error.upstreamStatus === 422 && error.issue === 'PAYER_ACTION_REQUIRED') {
+          // POST has been sent. Query authoritative state; retain uncertainty and its marker.
+          const currentOrder = await api(path);
+          const current = verifyOrder(currentOrder, expected);
+          return { ...current, captureUncertain: true,
+            approvalUrl: current.payerActionRequired ? approvalAddress(currentOrder) : null };
+        }
         if (error.upstreamStatus !== 422 || error.issue !== 'ORDER_ALREADY_CAPTURED') throw error;
       }
       return verifyOrder(await api(path), expected);

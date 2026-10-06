@@ -37,6 +37,10 @@ function createCaptureCoordinator({store, provider, settle, now=Date.now, leaseM
       if (claim.mustVerifyFirst) {
         const previous=checked(await provider.getOrder(input),current);
         if (previous.status==='SUCCEEDED') return await settlement(previous,claimId);
+        if (previous.payerActionRequired === true || previous.captureId) {
+          await store.finishCaptureAttempt(paymentRequestId,claimId,{state:'UNKNOWN',errorCode:previous.payerActionRequired === true?'PAYPAL_PAYER_ACTION_REQUIRED':'PAYPAL_CAPTURE_UNRESOLVED'});
+          return {status:'PENDING',outcome:previous.payerActionRequired === true?'AWAITING_APPROVAL':'RECONCILING'};
+        }
       }
       const result=checked(await provider.captureOrder({...input,beforeCapture:async()=>{
         const mark=await store.markCapturePostSent(paymentRequestId,claimId,new Date(now()).toISOString());
@@ -44,8 +48,10 @@ function createCaptureCoordinator({store, provider, settle, now=Date.now, leaseM
         posted=true;
       }}),current);
       if (result.status==='SUCCEEDED') return await settlement(result,claimId);
-      await store.finishCaptureAttempt(paymentRequestId,claimId,{state:posted||claim.mustVerifyFirst?'UNKNOWN':'READY'});
-      return {status:'PENDING',outcome:posted||claim.mustVerifyFirst?'RECONCILING':'AWAITING_APPROVAL'};
+      const uncertain=posted||claim.mustVerifyFirst;
+      await store.finishCaptureAttempt(paymentRequestId,claimId,{state:uncertain?'UNKNOWN':'READY',
+        errorCode:result.payerActionRequired === true?'PAYPAL_PAYER_ACTION_REQUIRED':null});
+      return {status:'PENDING',outcome:result.payerActionRequired === true?'AWAITING_APPROVAL':uncertain?'RECONCILING':'AWAITING_APPROVAL'};
     } catch (error) {
       // Unknown after POST stays pending; never infer FAILED from network error or timeout.
       try { await store.finishCaptureAttempt(paymentRequestId,claimId,{state:'UNKNOWN',errorCode:error.code||'PAYPAL_CAPTURE_UNRESOLVED'}); }
