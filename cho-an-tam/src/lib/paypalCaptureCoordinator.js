@@ -48,7 +48,7 @@ function createCaptureCoordinator({store, provider, settle, now=Date.now, leaseM
         posted=true;
       }}),current);
       if (result.status==='SUCCEEDED') return await settlement(result,claimId);
-      const uncertain=posted||claim.mustVerifyFirst;
+      const uncertain=posted||claim.mustVerifyFirst||!!result.captureId;
       await store.finishCaptureAttempt(paymentRequestId,claimId,{state:uncertain?'UNKNOWN':'READY',
         errorCode:result.payerActionRequired === true?'PAYPAL_PAYER_ACTION_REQUIRED':null});
       return {status:'PENDING',outcome:result.payerActionRequired === true?'AWAITING_APPROVAL':uncertain?'RECONCILING':'AWAITING_APPROVAL'};
