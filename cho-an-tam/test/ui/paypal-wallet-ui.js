@@ -708,6 +708,23 @@ async function main() {
   ok(p.intent(OTHER) === null && p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') <= 1, 'Capture chậm + đổi tài khoản: không đọc trạng thái/ví cho phiên mới thay cho phiên cũ');
   p.close();
 
+  // Đăng xuất rồi đăng nhập lại CÙNG tài khoản: userId, token và ý định lưu đều khớp lại, chỉ sessionEpoch còn phân biệt được phiên cũ.
+  srv = fakeServer();
+  srv.captureResult = () => delay(700, json(200, { ...srv.row, outcome: 'APPLIED' }));
+  p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 5000 });
+  p.click(p.noticeBtn('paypal-capture'));
+  await sleep(30);
+  const getsBeforeRelogin = p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a');
+  srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() });
+  await logoutUi(p);
+  await loginUi(p, BUYER);
+  p.w.location.hash = '#/wallet';
+  await sleep(1100);
+  ok(p.toasts().every((t) => !/Nạp tiền thành công/.test(t.text)), 'Capture chậm + đăng xuất/đăng nhập lại CÙNG tài khoản: phản hồi của phiên cũ KHÔNG báo "nạp thành công"');
+  ok(p.intent() && p.intent().requestId === KEY && p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') === getsBeforeRelogin,
+    'Capture chậm + đăng nhập lại CÙNG tài khoản: phiên cũ không đọc trạng thái và không xoá ý định của phiên mới');
+  p.close();
+
   srv = fakeServer();
   srv.approvalUrl = SANDBOX;
   p = await wallet({
