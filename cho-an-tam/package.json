@@ -45,7 +45,8 @@
     "test:paypal-store": "node test/paypal-store-concurrency-e2e.js",
     "test:paypal-migration": "node test/paypal-binding-migration-e2e.js",
     "test:paypal-integration": "node --env-file=.env.test scripts/run-suite.js --only=paypal-integration-e2e",
-    "test:paypal-modules": "node --test test/paypal-sandbox-adapter.test.js test/paypal-sandbox-service.test.js test/paypal-capture-coordinator.test.js"
+    "test:paypal-modules": "node --test test/paypal-sandbox-adapter.test.js test/paypal-sandbox-service.test.js test/paypal-capture-coordinator.test.js test/paypal-payer-action-regression.test.js test/paypal-payer-action-runtime.test.js",
+    "test:paypal-m2": "node test/paypal-m2-settlement-e2e.js && node test/paypal-m2-api-e2e.js && node test/paypal-m2-recovery-e2e.js"
   },
   "keywords": [],
   "author": "",
