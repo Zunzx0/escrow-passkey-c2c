@@ -915,6 +915,29 @@ async function main() {
     ok(isOk(rn, 'ALREADY_ABANDONED') && same(await snap(n.r.id), sn), '(c) replay thường (không có capture): vẫn 200 ALREADY_ABANDONED, không đổi', `nhận ${rn.status} ${rn.body && (rn.body.outcome || rn.body.error)}`);
   });
 
+  await runCase('C17', 'Codex: recovery between final binding read and DTO serialization', async () => {
+    const {u,r}=await abandoned('codex-c17');
+    const row=await rtLong.store.loadByRequestId(r.id);
+    const arrived=defer(),release=defer();
+    let held=false;
+    const svc=createAbandonment({store:rtLong.store,provider:providerLong,db,serialize:async(id,o)=>{
+      held=true;arrived.resolve();await release.promise;return rtLong.serializePayPal(id,o);
+    }});
+    const pending=svc.abandon(row,{req:{user:{id:u.id},method:'POST',ip:'127.0.0.1'},nowIso:nowIso()}).then(v=>({v}),e=>({e}));
+    try {
+      const at=await Promise.race([arrived.promise.then(()=>true),pending.then(()=>false),sleep(5000).then(()=>false)]);
+      ok(at && held,'C17 precondition: replay passed fresh binding check and waits before serialize');
+      if(!at)return;
+      const balanceBefore=await balance(u),ledgerBefore=await ledger(u);
+      await lateCap(r.orderId);
+      const rec=await rtLong.store.markCaptureVerified(r.id,'CAP'+r.orderId);
+      ok(rec.outcome==='RECOVERY_REQUIRED','C17 precondition: recovery persisted before DTO read');
+      release.resolve();const result=await pending;
+      ok(result.e && result.e.status===409 && result.e.code==='PAYPAL_ABANDON_UNSAFE','C17 must refuse replay when final DTO shows recovery',JSON.stringify(result.v || {code:result.e && result.e.code}));
+      ok((await balance(u))===balanceBefore && (await ledger(u))===ledgerBefore,'C17 preserves wallet and ledger');
+    } finally {release.resolve();await pending;}
+  });
+
   await runCase('C14', 'R2b: replay 409 khi bằng chứng xung đột/VERIFIED cũ; cột last_reconcile_error không phải nguồn; thứ tự và biên của nhóm quét abandon', async () => {
     // (1) CAPTURE_ID_CONFLICT trên request đã abandon: A giữ lastError CONFLICTING_CAPTURE, state READY, capture_id NULL
     const A = await abandoned('c14a');

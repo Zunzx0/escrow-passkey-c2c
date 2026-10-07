@@ -44,7 +44,12 @@ function createAbandonment({ store, provider, db, serialize }) {
           /^(CONFLICTING_CAPTURE|CAPTURED_AFTER_REQUEST_CLOSED)/.test(b.capture.lastError || '')) throw unsafe();
       return done('ALREADY_ABANDONED');
     };
-    const done = async (outcome) => ({ ...await serialize(id, { allowProviderLookup: false }), outcome });
+    const done = async (outcome) => {
+      const dto = await serialize(id, { allowProviderLookup: false });
+      // Evidence may arrive after the replay check. Never attach an abandoned outcome to a recovery DTO.
+      if (dto.status !== 'FAILED' || dto.stage !== 'FAILED') throw unsafe();
+      return { ...dto, outcome };
+    };
     if (row.status === 'FAILED') return replay();
     const c = row.capture;
     if (row.status !== 'PENDING' || !row.orderId || c.state !== 'READY' || c.postSentAt !== null || c.claimedAt !== null) throw unsafe();

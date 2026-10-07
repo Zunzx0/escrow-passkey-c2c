@@ -28,7 +28,7 @@ Giữ nhánh `claude/paypal-abandon-request`, chỉ thêm commit (không force-p
 | Full suite SQLite | 1006 PASS / 0 FAIL (997 assertion thật + 9 runner cộng cho `check-invariants`), 26 mục | 0 |
 | Full suite PostgreSQL | 997 PASS / 0 FAIL (988 thật + 9), 26 mục | 0 |
 | 9 bất biến tài chính | đúng ở bước cuối mỗi full suite; `check-invariants.js` chạy độc lập sau suite: "Không có vi phạm nào trên 9 bất biến" trên SQLite và PostgreSQL | 0 |
-| `paypal-abandonment-e2e` SQLite / PostgreSQL | 394 / 394 đạt, 0 hỏng mỗi nền (C1…C16 + C9 bất biến) | 0 / 0 |
+| `paypal-abandonment-e2e` SQLite / PostgreSQL (bản `8af54be`, trước patch C17) | 394 / 394 đạt, 0 hỏng mỗi nền (C1…C16 + C9 bất biến); sau patch C17: 399 / 399 mỗi nền (mục 0.6) | 0 / 0 |
 | `paypal-history-isolation` (F-05) SQLite / PG | 27 / 27 | 0 / 0 |
 | `node --test` module PayPal (6 tệp) | 53 pass, 0 fail, 0 skip | 0 |
 | M2 HTTP / settlement / recovery, SQLite và PG | 67 / 85 / 47 đạt mỗi nền | 0 |
@@ -45,6 +45,15 @@ Không có skip. Đỏ/xanh của test mới: trên bản sao nguyên vẹn củ
 - Không bị bắt, ghi nhận: bỏ `recovery_required_at IS NULL` (gần như mutant tương đương vì `capture_state='READY'` đã loại các hàng đó); bỏ chặn trùng id (mã thừa vì hai truy vấn rời nhau nhờ `capture_post_sent_at`); đảo thứ tự replay và bỏ riêng `VERIFIED`/`captureId` (dư thừa, mức thấp); C13(b) dựng `createAbandonment` với request giả không qua router (router đã được kiểm ở C2/C5).
 
 **0.5 Tệp thay đổi trong R2:** `cho-an-tam/src/lib/reconciler.js`, `cho-an-tam/src/lib/paypalAbandonment.js`, `cho-an-tam/test/paypal-abandonment-e2e.js`, `PRO-PAYPAL-ABANDONMENT-BACKEND-NOTES.md`, `PRO-PAYPAL-ABANDONMENT-TEST-REPORT.md`, `PRO-PAYPAL-ABANDONMENT-SAFETY-REVIEW.md`, `PRO-PAYPAL-ABANDONMENT-REPORT.md` (tệp này) và `cho-an-tam/test/evidence/pro-abandon-r2/` (các tệp `.log` thêm bằng `git add -f` do quy tắc `*.log` của `.gitignore`). Bằng chứng vòng 1 ở `test/evidence/pro-abandon/` giữ nguyên.
+
+**0.6 C17 — patch review R2 của Codex (áp lên `8af54be`).** Codex phát hiện một khe còn lại: giữa lần đọc binding mới ở `replay()` và `serialize` (đọc binding lần nữa để dựng DTO), recovery có thể xuất hiện; khi đó phản hồi trả `200 ALREADY_ABANDONED` kèm DTO `stage:'RECOVERY_REQUIRED'`. Patch `CODEX-F03-C17-8af54be.patch` chỉ sửa hai tệp: `paypalAbandonment.js` (hàm `done()` kiểm DTO cuối: nếu `status` hoặc `stage` khác `FAILED` thì ném `409 PAYPAL_ABANDON_UNSAFE`, không gắn `outcome`) và `paypal-abandonment-e2e.js` (ca C17, 5 assert, barrier ngay trước `serialize`, lưu `RECOVERY_REQUIRED` rồi mới thả, giải phóng trong `finally`). Pro đã `git apply --check` rồi áp lên worktree sạch đúng `8af54be`; `git diff` chỉ đúng hai tệp (+29/−1), các dòng thêm/bớt giống hệt patch (chỉ đổi kiểu xuống dòng của phần patch cho tệp test từ CRLF sang LF để khớp tệp đích; xem `test/evidence/pro-abandon-r2/c17/README.md`).
+
+Hệ quả cho hợp đồng/UI: (a) `ABANDONED`/`ALREADY_ABANDONED` chỉ đi kèm DTO có `status:'FAILED'` VÀ `stage:'FAILED'`; nếu recovery đã có ở lần đọc cuối thì trả `409 PAYPAL_ABANDON_UNSAFE` (ví, sổ cái, bằng chứng không đổi). (b) Trường hợp biên: nếu một lượt abandon ĐÃ đóng thành công nhưng recovery xuất hiện giữa lúc đóng và lúc dựng DTO, request đã là FAILED với hàng audit abandon nhưng phản hồi là 409; UI phải coi 409 là "không xác nhận được" và đọc lại chi tiết bằng GET, ưu tiên `stage`. (c) Theo Codex: snapshot được đọc trước một sự kiện mới vẫn có thể cũ khi tới trình duyệt; đây không phải cam kết khoá dữ liệu đến lúc người dùng nhận phản hồi, nên UI luôn ưu tiên `stage` và xác nhận lại bằng GET.
+
+Số liệu, tách bạch người chạy:
+- **Codex tự chạy (không phải số của Pro):** abandonment trên `8af54be` 394/394 SQLite và 394/394 PostgreSQL, exit 0; với C17 trên `8af54be` chưa vá 398 PASS / 1 FAIL (đúng assert từ chối replay: thực tế `ALREADY_ABANDONED` + `stage:'RECOVERY_REQUIRED'`); sau patch 399/399 SQLite và 399/399 PostgreSQL, exit 0 (cluster riêng của Codex, cổng 54338). Codex không chạy lại full suite trong lượt review này.
+- **Pro tự chạy lại sau khi áp patch:** test mới trên mã chưa vá: 398 đạt / 1 hỏng (C17 4/1), exit 1; sau patch: abandonment 399/399 SQLite và 399/399 PostgreSQL (C17 5/5), hồi quy lịch sử 27/27 mỗi nền, M2 HTTP 67 mỗi nền, `node --test` module PayPal 53/53, mọi lệnh exit 0. Log: `test/evidence/pro-abandon-r2/c17/`. Pro không chạy lại full suite hai nền sau patch; các tổng full suite ở mục 0.3 là của bản `8af54be` trước patch (patch chỉ đổi `done()` và thêm một ca vào bộ độc lập).
+- Tệp đổi trong commit này: `cho-an-tam/src/lib/paypalAbandonment.js`, `cho-an-tam/test/paypal-abandonment-e2e.js`, báo cáo này, `PRO-PAYPAL-ABANDONMENT-TEST-REPORT.md` (ghi chú C17) và `test/evidence/pro-abandon-r2/c17/`. Không sửa `public/`; không merge/deploy. Nhánh bổ sung log `claude/paypal-release-review` (`b7bb032`) giữ riêng, không ghép vào F03.
 
 ## 1. Hợp đồng API để Codex tích hợp UI
 
@@ -70,7 +79,7 @@ Không có skip. Đỏ/xanh của test mới: trên bản sao nguyên vẹn củ
 | 401 | (xác thực) | thiếu/hết hạn token | không đổi |
 | 403 | `FORBIDDEN` | không phải chủ request, hoặc vai trò không được (ADMIN) | không đổi |
 | 404 | `PAYMENT_REQUEST_NOT_FOUND` | id không phải request PayPal | không đổi |
-| 409 | `PAYPAL_ABANDON_UNSAFE` | không thể bỏ an toàn: chưa bind order/create mơ hồ, đã có dấu POST capture hoặc claim, capture IN_FLIGHT/UNKNOWN/VERIFIED/NOT_CAPTURED/RECOVERY_REQUIRED, SUCCEEDED, FAILED vì lý do khác, FAILED do abandon nhưng đã có bằng chứng thu tiền sau đó (RECOVERY_REQUIRED, VERIFIED, có capture ID, hoặc lỗi capture xung đột `CONFLICTING_CAPTURE`/`CAPTURED_AFTER_REQUEST_CLOSED`), order PayPal có capture hoặc trạng thái không thuộc nhóm chưa thu | không đổi; giữ requestId, bằng chứng và ví nguyên, chờ xử lý thủ công/đối soát |
+| 409 | `PAYPAL_ABANDON_UNSAFE` | không thể bỏ an toàn: chưa bind order/create mơ hồ, đã có dấu POST capture hoặc claim, capture IN_FLIGHT/UNKNOWN/VERIFIED/NOT_CAPTURED/RECOVERY_REQUIRED, SUCCEEDED, FAILED vì lý do khác, FAILED do abandon nhưng đã có bằng chứng thu tiền sau đó (RECOVERY_REQUIRED, VERIFIED, có capture ID, hoặc lỗi capture xung đột `CONFLICTING_CAPTURE`/`CAPTURED_AFTER_REQUEST_CLOSED`), DTO cuối cho thấy `status`/`stage` khác `FAILED` (recovery xuất hiện giữa lần đọc binding và lúc dựng DTO, mục 0.6), order PayPal có capture hoặc trạng thái không thuộc nhóm chưa thu | không đổi; giữ requestId, bằng chứng và ví nguyên, chờ xử lý thủ công/đối soát |
 | 409 | `PAYPAL_ORDER_MISMATCH` | bằng chứng PayPal không khớp (order/request/số tiền/merchant) | không đổi |
 | 429 | rate limit | quá 10 lần/phút/IP | không đổi |
 | 503 | `PAYPAL_DISABLED` | PayPal Sandbox chưa bật/đủ cấu hình | không đổi |

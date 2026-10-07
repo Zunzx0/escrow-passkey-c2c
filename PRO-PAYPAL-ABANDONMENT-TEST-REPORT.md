@@ -163,3 +163,8 @@ Mutant/khoảng trống Pro chấp nhận, ghi tại đây (không thêm ca): R1
 - Audit atomic chỉ chứng minh được khi INSERT audit nằm cùng transaction đóng; nếu không, ca C7 đỏ.
 - S5 không dựng được trực tiếp (order_id bất biến); thay bằng provider trả id khác.
 - Không kiểm UI, không browser, không rate-limit (limiter được reset trước mỗi lời gọi).
+
+
+## 5i. C17 (Codex) — recovery giữa lần đọc binding cuối và dựng DTO
+
+Ca C17 (5 assert) do Codex viết và Pro áp nguyên văn từ patch CODEX-F03-C17-8af54be.patch (xem 	est/evidence/pro-abandon-r2/c17/README.md). Barrier đặt ngay trước serialize: precondition chứng minh replay đã qua kiểm binding mới và đang chờ, recovery được lưu trước khi thả; kỳ vọng 409 PAYPAL_ABANDON_UNSAFE, ví/sổ cái không đổi. Số của Codex (cluster riêng 54338): trên 8af54be 398 PASS / 1 FAIL, sau patch 399/399 SQLite và 399/399 PostgreSQL. Số tự chạy lại của Pro: trên mã chưa vá 398 đạt / 1 hỏng (C17 4/1), sau patch 399/399 SQLite, 399/399 PostgreSQL (enclave_pro_abandon_test, read committed), exit 0. Nhãn: C17 phần precondition và 'ví/sổ cái không đổi' đạt cả trước và sau patch (guard); chỉ assert từ chối replay đỏ trước patch.
