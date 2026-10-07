@@ -3,7 +3,7 @@ const express = require('express');
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
-const { verifyProviderSignature } = require('../lib/mockPaymentProvider');
+const { verifyProviderSignature, isCheckoutEnabled } = require('../lib/mockPaymentProvider');
 const { applyProviderResult, claimSubmission, submitToProvider } = require('../lib/paymentService');
 const { getUserWallet } = require('../lib/walletOps');
 
@@ -75,7 +75,7 @@ async function replayExisting(res, existing, amount) {
 // (user_id, client_request_id) là lưới an toàn thứ hai. Không gửi requestId thì giữ hành vi cũ.
 router.post('/topup', requireAuth, async (req, res, next) => {
   try {
-    if(process.env.PAYPAL_SANDBOX_ENABLED==='1') throw new AppError(503,'MOCK_PAYMENTS_DISABLED','Cổng mô phỏng đã tắt; hãy dùng PayPal Sandbox');
+    if (!isCheckoutEnabled()) throw new AppError(503, 'MOCK_PAYMENTS_DISABLED', 'Cổng thanh toán mô phỏng hiện đã tắt. Vui lòng kiểm tra cấu hình thanh toán hoặc thử lại sau.');
     const amount = parseAmount((req.body || {}).amount);
     const clientRequestId = parseClientRequestId((req.body || {}).requestId);
 
