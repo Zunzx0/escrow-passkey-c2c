@@ -335,7 +335,7 @@ const App = (() => {
     }
   }
 
-  async function api(path, { method = 'GET', body } = {}, retried = false) {
+  async function api(path, { method = 'GET', body, allowAuthRetry = true } = {}, retried = false) {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
@@ -353,10 +353,10 @@ const App = (() => {
     }
     if (state.sessionEpoch !== epoch) throw oldSession();
 
-    if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
+    if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token && allowAuthRetry) {
       const refreshed = !retried && await refreshSession();
       if (state.sessionEpoch !== epoch) throw oldSession();
-      if (refreshed) return api(path, { method, body }, true);
+      if (refreshed) return api(path, { method, body, allowAuthRetry }, true);
       clearSession();
       renderChrome();
       route();
@@ -515,7 +515,7 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; }
+  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; state.paypalAbandonConfirmation = null; }
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
   // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
@@ -2588,6 +2588,7 @@ const App = (() => {
     stopTopupPoll();
     state.topupIntent = null;
     state.topupNotice = null;
+    state.paypalAbandonConfirmation = null;
   }
 
   function startIntent(amount, provider) {
@@ -3077,7 +3078,7 @@ const App = (() => {
     if (!PAYPAL_STAGES.includes(p.stage)) return '';
     const id = esc(p.id);
     switch (p.stage) {
-      case 'AWAITING_APPROVAL': return `<button class="btn btn-sm" data-act="paypal-approve" data-id="${id}">Mở PayPal Sandbox</button>`;
+      case 'AWAITING_APPROVAL': return `<button class="btn btn-sm" data-act="paypal-approve" data-id="${id}">Mở PayPal Sandbox</button>` + paypalAbandonButton(p);
       case 'CREATING': case 'CAPTURING': case 'RECONCILING':
         return `<button class="btn btn-sm" data-act="topup-check" data-id="${id}">Kiểm tra</button>`;
       case 'CREATE_RECOVERY_REQUIRED': case 'RECOVERY_REQUIRED':
@@ -3124,7 +3125,7 @@ const App = (() => {
         return wrap('', 'shield-check', `${note}${quote}`,
           `<button class="btn btn-sm ${canCapture ? '' : 'btn-primary'}" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
           + (canCapture ? `<button class="btn btn-sm btn-primary" data-act="paypal-capture" data-id="${id}">Xác nhận và hoàn tất thanh toán</button>` : '')
-          + check);
+          + check + paypalAbandonButton(r));
       }
       case 'CAPTURING':
         return wrap('note-warning', 'loader-circle',
@@ -3288,6 +3289,74 @@ const App = (() => {
     }
     if (!ctxAlive(ctx)) return;
     goTo(url);
+  }
+
+  function paypalAbandonButton(row) {
+    if (row.status !== 'PENDING' || row.stage !== 'AWAITING_APPROVAL' || !row.orderId) return '';
+    return `<button class="btn btn-sm btn-ghost" data-act="paypal-abandon" data-id="${esc(row.id)}" data-request-id="${esc(row.requestId)}" data-amount="${esc(row.amount)}">Bỏ yêu cầu nạp</button>`;
+  }
+
+  async function openPaypalAbandon(btn) {
+    const id = btn && btn.dataset.id;
+    const expected = { id, requestId: btn && btn.dataset.requestId, amount: Number(btn && btn.dataset.amount) };
+    if (!id || !expected.requestId || !Number.isSafeInteger(expected.amount)) return;
+    const intent = loadIntent();
+    const matched = intent && intent.provider === PAYPAL_PROVIDER && intent.paymentId === id
+      && intent.requestId === expected.requestId && intent.amount === expected.amount;
+    const ctx = topupCtx(matched ? intent.requestId : null);
+    let raw;
+    try { raw = await guard('paypal-abandon-open', btn, () => api('/payments/' + encodeURIComponent(id))); }
+    catch (_) { return; }
+    if (raw === undefined || !ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, expected);
+    if (!row) { toast('Chưa xác nhận được yêu cầu nạp. Hãy kiểm tra lại trạng thái.', 'err'); return; }
+    if (row.status !== 'PENDING' || row.stage !== 'AWAITING_APPROVAL' || !row.orderId) {
+      setTopupNotice({ kind: 'paypal', row });
+      toast('Trạng thái đã thay đổi; chưa thể bỏ yêu cầu này.');
+      return;
+    }
+    stopTopupPoll();
+    openModal({ title: 'Bỏ yêu cầu nạp PayPal?', body: `<p>Bạn muốn bỏ yêu cầu nạp <b>${money(row.amount)}</b> này?</p>
+      <p>Máy chủ chỉ đóng khi xác nhận chưa gửi lệnh thu tiền. Đây không phải hoàn tiền và không huỷ order tại PayPal.</p>
+      <p>Nếu đã thu tiền hoặc chưa rõ kết quả, yêu cầu sẽ được giữ để đối soát. Đóng cửa sổ PayPal không tự bỏ yêu cầu.</p>`,
+      footer: '<button class="btn" data-act="modal-close">Giữ yêu cầu</button><button class="btn btn-primary" data-act="paypal-abandon-confirm">Xác nhận bỏ yêu cầu</button>' });
+    state.paypalAbandonConfirmation = { ctx, row };
+  }
+
+  async function confirmPaypalAbandon(btn) {
+    const pending = state.paypalAbandonConfirmation;
+    if (!pending || !ctxAlive(pending.ctx) || state.busy.has('paypal-abandon')) return;
+    const { ctx, row } = pending;
+    closeModal();
+    let body = null;
+    try {
+      body = await guard('paypal-abandon', btn, () => api('/payments/paypal/' + encodeURIComponent(row.id) + '/abandon',
+        { method: 'POST', body: {}, allowAuthRetry: false }));
+    } catch (e) { if ((e && e.stale) || !ctxAlive(ctx)) return; }
+    if (!ctxAlive(ctx)) return;
+    // POST (including 409/timeout) is never proof of the final state. Do not retry it automatically.
+    const fresh = await confirmPaypalByGet(row, ctx);
+    if (!ctxAlive(ctx)) return;
+    if (!fresh) {
+      setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+      toast('Chưa xác nhận được kết quả bỏ yêu cầu. Hãy kiểm tra lại trạng thái.');
+      return;
+    }
+    if (fresh.stage === 'SUCCEEDED') {
+      await settlePaypalRow(fresh, { ctx, fromGet: true });
+      return;
+    }
+    // Recovery evidence wins over FAILED. Keep the intent and never report an abandoned outcome for it.
+    setTopupNotice({ kind: 'paypal', row: fresh });
+    if (fresh.status === 'FAILED' && fresh.stage === 'FAILED') {
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      renderTopupIntent();
+      const confirmed = readPaypalRow(body, { id: row.id, requestId: row.requestId, amount: row.amount });
+      const abandoned = confirmed && confirmed.status === 'FAILED' && confirmed.stage === 'FAILED'
+        && ['ABANDONED', 'ALREADY_ABANDONED'].includes(body.outcome);
+      toast(abandoned ? 'Đã bỏ yêu cầu nạp. Ví không đổi; lần nạp mới sẽ dùng mã mới.' : 'Yêu cầu nạp đã đóng theo trạng thái máy chủ.');
+    }
+    await loadTopupHistory().catch(() => {});
   }
 
   /** Người dùng chủ động bấm xác nhận sau khi quay lại từ PayPal. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
@@ -4342,6 +4411,8 @@ const App = (() => {
     'topup-dismiss': () => { state.topupNotice = null; renderTopupIntent(); },
     'paypal-approve': (el) => openPaypalApproval(el),
     'paypal-capture': (el) => capturePaypal(el),
+    'paypal-abandon': (el) => openPaypalAbandon(el),
+    'paypal-abandon-confirm': (el) => confirmPaypalAbandon(el),
     'paypal-config-retry': () => route(),
     'checkout-open': (el) => openCheckout(el.dataset.id, el.dataset.ref),
     'checkout-pay': (el) => payCheckout(el),

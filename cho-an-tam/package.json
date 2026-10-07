@@ -42,6 +42,7 @@
     "freeze:verify": "node scripts/freeze-experiment.js --verify",
     "test:count-marks": "node test/count-marks-unit.js",
     "test:paypal-history": "node test/paypal-history-isolation-e2e.js",
+    "test:paypal-abandonment": "node test/paypal-abandonment-e2e.js",
     "test:mock-admission": "node test/mock-topup-admission-e2e.js",
     "test:provider-isolation": "node --env-file=.env.test test/payment-provider-isolation-e2e.js",
     "test:paypal-store": "node test/paypal-store-concurrency-e2e.js",
