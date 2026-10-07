@@ -1,142 +1,155 @@
-/**
- * Runner kiểm thử trình duyệt thật cho luồng nạp PayPal Sandbox (fixture, KHÔNG phải Sandbox/backend thật).
- *
- *   cd cho-an-tam
- *   # playwright-core nằm NGOÀI repo (không sửa package.json); dùng Chrome đã cài, không tải trình duyệt.
- *   $env:NODE_PATH = 'C:\Users\tranq\tools\pw-runner\node_modules'
- *   node test/browser/paypal-wallet-browser.js [--only=B1B2,B3B4,B5]
- *
- * Mỗi lần chỉ MỘT runner được giữ trình duyệt (khoá tệp trong thư mục tạm); runner khác chờ tới lượt.
- * Thoát 0 khi không có FAIL (SKIP không làm hỏng nhưng được in rõ); 1 khi có FAIL; 2 khi thiếu công cụ.
- * Số ca ở đây KHÔNG cộng vào 212 UI / 47 recovery / backend suite.
- */
+/** Real Chromium + isolated API fixtures. No real PayPal/backend claims. */
+'use strict';
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-
-let chromium;
-try {
-  ({ chromium } = require('playwright-core'));
-} catch (_) {
-  console.error('Thiếu playwright-core (đặt NODE_PATH tới node_modules ngoài repo). Các ca CHƯA CHẠY.');
-  process.exit(2);
-}
+const crypto = require('crypto');
 const h = require('./paypal/harness');
-
 const SPEC_DIR = path.join(__dirname, 'paypal');
 const SPECS = [
   { id: 'B1B2', file: 'payment-flow.browser.js' },
   { id: 'B3B4', file: 'session.browser.js' },
   { id: 'B5', file: 'config.browser.js' },
 ];
-const LOCK = path.join(os.tmpdir(), 'enclave-paypal-browser.lock');
 
-const only = (process.argv.find((a) => a.startsWith('--only=')) || '').slice(7).split(',').filter(Boolean);
-const t0 = Date.now();
-const totals = { pass: 0, fail: 0, skip: 0 };
-const failedCases = [];
-const skippedCases = [];
-
-const alive = (pid) => { try { process.kill(pid, 0); return true; } catch (e) { return e.code === 'EPERM'; } };
-async function acquireLock(maxMs = 15 * 60 * 1000) {
-  const end = Date.now() + maxMs;
-  while (Date.now() < end) {
-    try {
-      fs.mkdirSync(LOCK);
-      fs.writeFileSync(path.join(LOCK, 'pid'), String(process.pid));
-      return;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let owner = 0;
-      try { owner = Number(fs.readFileSync(path.join(LOCK, 'pid'), 'utf8')); } catch (_) { /* chủ đang tạo */ }
-      if (owner && !alive(owner)) { try { fs.rmSync(LOCK, { recursive: true, force: true }); } catch (_) { /* tranh chấp */ } continue; }
-      await h.sleep(500);
-    }
-  }
-  throw new Error('Không lấy được khoá trình duyệt trong 15 phút');
+function selectSpecs(args, specs = SPECS, exists = s => fs.existsSync(path.join(SPEC_DIR, s.file))) {
+  const filters = args.filter(a => a.startsWith('--only='));
+  if (args.some(a => !a.startsWith('--only=')) || filters.length > 1) throw Error('Invalid runner arguments');
+  const ids = filters.length ? filters[0].slice(7).split(',') : specs.map(s => s.id);
+  if (!ids.length || ids.some(id => !id || !specs.some(s => s.id === id))) throw Error('Unknown or empty --only group');
+  const selected = specs.filter(s => ids.includes(s.id));
+  if (!selected.length || selected.some(s => !exists(s))) throw Error('Required browser spec is missing');
+  return selected;
 }
-const releaseLock = () => { try { fs.rmSync(LOCK, { recursive: true, force: true }); } catch (_) { /* đã dọn */ } };
+
+function createLock(lockPath, { isAlive = pid => {
+  try { process.kill(pid, 0); return true; } catch (e) { if (e.code === 'ESRCH') return false; if (e.code === 'EPERM') return true; throw e; }
+}, sleep = h.sleep } = {}) {
+  const ownerFile = path.join(lockPath, 'owner-' + crypto.randomBytes(16).toString('hex') + '.json');
+  let owned = false;
+  return {
+    async acquire({ maxMs = 15 * 60 * 1000, signal } = {}) {
+      const end = Date.now() + maxMs;
+      let emptySince;
+      while (Date.now() < end) {
+        if (signal?.aborted) throw Error('Browser lock wait cancelled');
+        try {
+          fs.mkdirSync(lockPath);
+        } catch (e) {
+          if (e.code !== 'EEXIST') throw e;
+          let names;
+          try { names = fs.readdirSync(lockPath); } catch (readError) { if (readError.code === 'ENOENT') continue; throw readError; }
+          if (!names.length) {
+            emptySince ??= Date.now();
+            if (Date.now() - emptySince > 1000) throw Error('Incomplete browser lock; verify owner manually before cleanup');
+          } else {
+            emptySince = undefined;
+            if (names.length !== 1 || !/^owner-[a-f0-9]{32}\.json$/.test(names[0])) throw Error('Unrecognized browser lock; verify owner manually before cleanup');
+            let owner;
+            try { owner = JSON.parse(fs.readFileSync(path.join(lockPath, names[0]), 'utf8')); }
+            catch (readError) { if (readError.code === 'ENOENT') continue; throw readError; }
+            if (!Number.isInteger(owner.pid) || owner.pid < 1 || !isAlive(owner.pid)) throw Error('Stale browser lock; verify owner manually before cleanup');
+          }
+          await sleep(25);
+          continue;
+        }
+        try { fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid }), { flag: 'wx' }); owned = true; return; }
+        catch (error) {
+          try { fs.unlinkSync(ownerFile); } catch (cleanupError) { if (cleanupError.code !== 'ENOENT') error.cleanupError = cleanupError; }
+          try { fs.rmdirSync(lockPath); } catch (cleanupError) { error.cleanupError = cleanupError; }
+          throw error;
+        }
+      }
+      throw Error('Browser lock wait timed out');
+    },
+    release() {
+      if (!owned) return false;
+      // Immutable filename: a waiter or a previous holder never removes a new owner's file.
+      try { fs.unlinkSync(ownerFile); } catch (e) { if (e.code === 'ENOENT') { owned = false; return false; } throw e; }
+      owned = false;
+      fs.rmdirSync(lockPath);
+      return true;
+    },
+  };
+}
 
 class PreconditionFailed extends Error {}
-
-/** t.case(name, fn): chạy fn(c) với c.ok / c.precondition / c.skip / c.cleanup; dọn trong finally. */
-function makeT(specId) {
+function makeT(specId, totals, failedCases, skippedCases) {
   return {
-    section: (title) => console.log(`\n[${specId}] ${title}`),
+    section: title => console.log(`\n[${specId}] ${title}`),
     async case(name, fn) {
+      totals.cases++;
       const cleanups = [];
-      let caseFail = 0;
-      let caseSkip = null;
+      let caseFail = 0, caseSkip;
+      const fail = msg => { totals.fail++; caseFail++; console.log(`  ❌ ${msg}`); };
       const c = {
-        ok(cond, msg) {
-          if (cond) { totals.pass++; console.log(`  ✅ ${msg}`); } else { totals.fail++; caseFail++; console.log(`  ❌ ${msg}`); }
-          return !!cond;
-        },
-        precondition(cond, msg) {
-          if (cond) { totals.pass++; console.log(`  ✅ [điều kiện dựng] ${msg}`); return; }
-          totals.fail++; caseFail++;
-          console.log(`  ❌ [điều kiện dựng] ${msg} — dừng ca, KHÔNG chạy assert hành vi`);
-          throw new PreconditionFailed(msg);
-        },
+        ok(cond, msg) { if (cond) { totals.pass++; console.log(`  ✅ ${msg}`); } else fail(msg); return !!cond; },
+        precondition(cond, msg) { if (cond) { totals.pass++; console.log(`  ✅ [điều kiện dựng] ${msg}`); } else { fail('[điều kiện dựng] ' + msg); throw new PreconditionFailed(msg); } },
         skip(reason) { caseSkip = reason; throw new PreconditionFailed('SKIP ' + reason); },
         cleanup(fnc) { cleanups.push(fnc); },
       };
       console.log(`\n▶ ${name}`);
-      try {
-        await fn(c);
-      } catch (e) {
-        if (caseSkip) {
-          totals.skip++; skippedCases.push(`${name}: ${caseSkip}`);
-          console.log(`  ⏭  SKIP: ${caseSkip}`);
-        } else if (!(e instanceof PreconditionFailed)) {
-          totals.fail++; caseFail++;
-          console.log(`  ❌ Ngoại lệ trong ca: ${e && e.stack ? e.stack.split('\n').slice(0, 3).join(' | ') : e}`);
-        }
+      try { await fn(c); }
+      catch (e) {
+        if (caseSkip) { totals.skip++; skippedCases.push(`${name}: ${caseSkip}`); }
+        else if (!(e instanceof PreconditionFailed)) fail('Ngoại lệ trong ca: ' + (e.stack || e));
       } finally {
-        for (const fnc of cleanups.reverse()) { try { await fnc(); } catch (e) { console.log(`  ⚠ dọn lỗi: ${e && e.message}`); } }
+        for (const fnc of cleanups.reverse()) {
+          try { await h.withDeadline(fnc(), 5000, 'case cleanup'); } catch (e) { fail('Dọn tài nguyên: ' + e.message); }
+        }
       }
       if (caseFail) failedCases.push(name);
     },
   };
 }
 
-async function main() {
+async function main(args = process.argv.slice(2)) {
+  let specs;
+  try { specs = selectSpecs(args); } catch (e) { console.error(e.message); return 2; }
   const exe = h.findChrome();
-  if (!exe) { console.error('Không tìm thấy Chrome/Edge (đặt CHROME_PATH). Các ca CHƯA CHẠY.'); return 2; }
-  const specs = SPECS.filter((s) => !only.length || only.includes(s.id));
-  const present = specs.filter((s) => fs.existsSync(path.join(SPEC_DIR, s.file)));
-  for (const s of specs) if (!present.includes(s)) { console.log(`⏭  ${s.id}: thiếu ${s.file} — CHƯA CHẠY`); totals.skip++; skippedCases.push(`${s.id}: thiếu ${s.file}`); }
-
-  await acquireLock();
-  let browser;
+  if (!exe) { console.error('Chrome/Edge unavailable; no browser coverage'); return 2; }
+  let chromium;
+  try { ({ chromium } = require('playwright-core')); } catch (_) { console.error('playwright-core unavailable; no browser coverage'); return 2; }
+  const lock = createLock(path.join(os.tmpdir(), 'enclave-paypal-browser.lock'));
+  const abort = new AbortController();
+  const totals = { pass: 0, fail: 0, skip: 0, cases: 0 };
+  const failedCases = [], skippedCases = [];
+  const started = Date.now();
+  let browser, cleanupPromise, interrupted = false;
+  const cleanup = () => cleanupPromise ||= (async () => {
+    const results = await Promise.allSettled([
+      h.closeAllSessions(),
+      browser ? h.withDeadline(browser.close(), 5000, 'browser cleanup') : Promise.resolve(),
+    ]);
+    const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
+    // Failed cleanup retains the owner's lock: do not let a second runner overlap a possibly live browser.
+    if (!errors.length) { try { lock.release(); } catch (e) { errors.push(e); } }
+    for (const e of errors) { totals.fail++; console.error('Cleanup failed:', e.message); }
+  })();
+  const onSignal = () => { interrupted = true; abort.abort(); if (browser) void cleanup(); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
   try {
-    browser = await chromium.launch({
-      executablePath: exe,
-      headless: true,
-      args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync'],
-    });
-    console.log(`Trình duyệt: ${exe} (${browser.version()}), playwright-core ${require('playwright-core/package.json').version}`);
-    for (const s of present) {
-      const spec = require(path.join(SPEC_DIR, s.file));
-      console.log(`\n==== ${s.id} — ${spec.title || s.file} ====`);
-      try {
-        await spec.run({ h, t: makeT(s.id), browser });
-      } catch (e) {
-        totals.fail++;
-        failedCases.push(`${s.id}: lỗi ngoài ca`);
-        console.log(`  ❌ Spec ${s.id} lỗi ngoài ca: ${e && e.stack}`);
+    await lock.acquire({ signal: abort.signal });
+    if (!interrupted) {
+      browser = await chromium.launch({ executablePath: exe, headless: true, handleSIGINT: false, handleSIGTERM: false,
+        args: ['--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1', '--no-first-run', '--no-default-browser-check', '--disable-extensions', '--disable-sync'] });
+      console.log(`Browser ${browser.version()}, playwright-core ${require('playwright-core/package.json').version}`);
+      for (const s of specs) {
+        if (interrupted) break;
+        try { await require(path.join(SPEC_DIR, s.file)).run({ h, t: makeT(s.id, totals, failedCases, skippedCases), browser }); }
+        catch (e) { totals.fail++; failedCases.push(s.id + ': ' + e.message); }
       }
     }
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-    releaseLock();
+  } catch (e) { if (!interrupted) { totals.fail++; console.error(e.stack || e); } }
+  finally {
+    await cleanup();
+    process.removeListener('SIGINT', onSignal); process.removeListener('SIGTERM', onSignal);
   }
-  const secs = ((Date.now() - t0) / 1000).toFixed(1);
-  console.log(`\nKết quả trình duyệt (fixture, ${secs}s): PASS ${totals.pass} · FAIL ${totals.fail} · SKIP ${totals.skip}`);
-  if (skippedCases.length) console.log('SKIP:\n  - ' + skippedCases.join('\n  - '));
-  if (failedCases.length) console.log('FAIL:\n  - ' + failedCases.join('\n  - '));
-  return totals.fail ? 1 : 0;
+  console.log(`Kết quả trình duyệt (fixture, ${((Date.now()-started)/1000).toFixed(1)}s): PASS ${totals.pass} · FAIL ${totals.fail} · SKIP ${totals.skip} · CASES ${totals.cases}`);
+  if (failedCases.length) console.error(failedCases.join('\n'));
+  if (skippedCases.length) console.error(skippedCases.join('\n'));
+  return interrupted ? 130 : totals.fail || totals.skip || !totals.cases ? 1 : 0;
 }
-
-process.on('SIGINT', () => { releaseLock(); process.exit(130); });
-main().then((code) => process.exit(code), (e) => { console.error(e); releaseLock(); process.exit(1); });
+module.exports = { createLock, selectSpecs, makeT, main };
+if (require.main === module) main().then(code => process.exit(code), e => { console.error(e); process.exit(1); });

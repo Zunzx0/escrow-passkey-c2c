@@ -7,11 +7,22 @@
  *   Điều hướng chính sang www.sandbox.paypal.com được GHI LẠI rồi trả trang giả; không bao giờ chạm PayPal thật.
  * - Request ngoài lọt ra (không đi qua route) = h.leaked(); mỗi ca phải assert bằng 0.
  *
- * Chữ ký spec (một lần, không đổi nếu không thông báo): xem paypal/README-HARNESS.md hoặc phần "Hợp đồng" ở cuối tệp này.
+ * Chữ ký spec (một lần, không đổi nếu không thông báo): xem phần "Hợp đồng" ở cuối tệp này.
  */
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const activeSessions = new Set();
+async function withDeadline(promise, ms, label) {
+  let timer;
+  try { return await Promise.race([promise, new Promise((_, reject) => { timer=setTimeout(() => reject(Error(label + ' timed out')), ms); })]); }
+  finally { clearTimeout(timer); }
+}
+async function closeAllSessions() {
+  const results = await Promise.allSettled([...activeSessions].map(close => close()));
+  const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
+  if (errors.length) throw new AggregateError(errors, 'Fixture cleanup failed');
+}
 
 const PUBLIC = path.join(__dirname, '..', '..', '..', 'public');
 const EVIDENCE_DIR = path.join(__dirname, 'evidence');
@@ -159,7 +170,19 @@ function startFixture(routes) {
 async function openSession(browser, opts = {}) {
   const { routes = {}, user = BUYER, cfg, hash = '#/wallet', search = '', storage = {}, timeoutMs = 5000, seedAuth = true } = opts;
   const fx = await startFixture({ ...baseRoutes(user, cfg), ...routes });
-  const ctx = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 1280, height: 900 }, locale: 'vi-VN' });
+  let ctx, closing;
+  const close = () => closing ||= (async () => {
+    const results = await Promise.allSettled([
+      ctx ? withDeadline(ctx.close(), 5000, 'context cleanup') : Promise.resolve(),
+      withDeadline(fx.close(), 5000, 'fixture cleanup'),
+    ]);
+    const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
+    if (errors.length) throw new AggregateError(errors, 'Session cleanup failed');
+    activeSessions.delete(close);
+  })();
+  activeSessions.add(close);
+  try {
+  ctx = await browser.newContext({ serviceWorkers: 'block', viewport: { width: 1280, height: 900 }, locale: 'vi-VN' });
   const navs = [];
   const external = [];
   const seenExternal = new Set();
@@ -244,12 +267,13 @@ async function openSession(browser, opts = {}) {
       await page.click('[data-act="do-login-password"]');
       await page.waitForSelector('[data-act="logout"]', { timeout: 4000 });
     },
-    close: async () => {
-      await ctx.close().catch(() => {});
-      await fx.close().catch(() => {});
-    },
+    close,
   };
   return s;
+  } catch (error) {
+    try { await close(); } catch (cleanupError) { error.cleanupError = cleanupError; }
+    throw error;
+  }
 }
 
 const hang = HANG;
@@ -259,7 +283,7 @@ module.exports = {
   PUBLIC, SANDBOX, PAYPAL_HOST, INTENT_PREFIX, ID, KEY, AMOUNT, BUYER, OTHER, WALLET,
   json, HANG: hang, hang, sleep, deferred, CFG, quote, ppRow, intentJson, baseRoutes, paypalServer,
   // hạ tầng
-  findChrome, startFixture, openSession,
+  findChrome, startFixture, openSession, withDeadline, closeAllSessions,
 };
 
 /*
