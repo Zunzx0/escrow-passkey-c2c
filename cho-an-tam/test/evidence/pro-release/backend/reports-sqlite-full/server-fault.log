@@ -1,0 +1,35 @@
+◇ injected env (0) from .env // tip: ⌘ suppress logs { quiet: true }
+
+Enclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:3910
+   WEBAUTHN_RP_ID=localhost  WEBAUTHN_ORIGIN=http://localhost:3910
+   Mở trình duyệt tại đúng địa chỉ trên (không dùng 127.0.0.1) để Passkeys hoạt động.
+   Môi trường: test · Cơ sở dữ liệu: SQLite C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\data\test\pro-release-sqlite.db
+   CORS: tắt (chỉ cùng origin) · Giao diện tĩnh: bật
+   Đối soát thanh toán: mỗi 60s, bỏ qua yêu cầu mới hơn 30s
+   Dọn challenge: mỗi 600s, ân hạn 3600s
+
+   ⚠  CHÈN LỖI CHỦ ĐỘNG ĐANG BẬT: FAULT_INJECT=release:after-wallet-update
+      Chỉ dùng cho kiểm thử rollback. KHÔNG bật khi thu kết quả chính thức.
+
+[error fa88de50-fd5c-4e31-9460-5d2cdb4b7355] POST /api/transactions/6358e000-6c27-48bc-a216-d8099d5495ed/release InjectedFault [Error]: Lỗi được chèn chủ động tại điểm "release:after-wallet-update" để kiểm thử rollback.
+    at maybeFail (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\faultInjection.js:62:9)
+    at applyOrderedWalletUpdates (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\walletOps.js:36:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:731:23
+    at async wrapped (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\asyncDb.js:172:26)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:730:5 {
+  status: 500,
+  code: 'INJECTED_FAULT',
+  point: 'release:after-wallet-update'
+}
+[error 35c00714-f819-4b84-8ea0-623ba1cce914] POST /api/transactions/6358e000-6c27-48bc-a216-d8099d5495ed/release InjectedFault [Error]: Lỗi được chèn chủ động tại điểm "release:after-wallet-update" để kiểm thử rollback.
+    at maybeFail (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\faultInjection.js:62:9)
+    at applyOrderedWalletUpdates (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\walletOps.js:36:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:731:23
+    at async wrapped (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\asyncDb.js:172:26)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:730:5 {
+  status: 500,
+  code: 'INJECTED_FAULT',
+  point: 'release:after-wallet-update'
+}

@@ -1,0 +1,46 @@
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+
+Chuẩn bị: quản trị viên, người bán, hai người mua
+  ✅ Ba tài khoản sẵn sàng
+
+R1: Một hồ sơ tranh chấp nhận HAI phiếu phân xử (REFUND và RELEASE), gửi đồng thời
+
+R0: Bên của giao dịch không thể tự phân xử dù đã bị nâng role lên ADMIN
+  ✅ BUYER bị nâng role vẫn không xem được các hồ sơ quản trị
+  ✅ BUYER đã mang role ADMIN vẫn không xin được challenge phân xử của mình
+  ✅ BUYER đã mang role ADMIN vẫn không xác minh được challenge phân xử của mình
+  ✅ BUYER đã mang role ADMIN và có grant vẫn không chuyển được tiền về mình
+  ✅ SELLER bị nâng role vẫn không xem được các hồ sơ quản trị
+  ✅ SELLER đã mang role ADMIN vẫn không xin được challenge phân xử của mình
+  ✅ SELLER đã mang role ADMIN vẫn không xác minh được challenge phân xử của mình
+  ✅ SELLER đã mang role ADMIN và có grant vẫn không chuyển được tiền về mình
+  ✅ ADMIN thật cũng không thể xin quyền phân xử khi chính mình là bên mua
+  ✅ ADMIN thật cũng không thể tự hoàn tiền khi là một bên giao dịch
+  ✅ Các lần thử leo quyền và tự phân xử được ghi vào nhật ký an toàn
+  ✅ Tranh chấp và tiền ký quỹ vẫn bị đóng băng sau các lần thử leo quyền
+  ✅ Số dư hai bên không đổi sau các lần thử leo quyền
+  ✅ Cấp được cả hai phiếu (REFUND + RELEASE) cho cùng một hồ sơ
+  [R1] refund -> 200 REFUNDED
+  [R1] release -> 409 DISPUTE_NOT_OPEN
+  ✅ Đúng một trong hai quyết định thành công (thực tế: 1)
+  ✅ R1 bên thua: không rơi vào lỗi mơ hồ CONSTRAINT_VIOLATION (nhận 409 DISPUTE_NOT_OPEN)
+  ✅ R1 bên thua: mã lỗi nằm trong tập đã định nghĩa {DISPUTE_NOT_OPEN} (thực tế: 409 DISPUTE_NOT_OPEN)
+  ✅ R1 bên thua: status HTTP khớp đúng mã lỗi DISPUTE_NOT_OPEN (kỳ vọng 409, nhận 409)
+  [R1] Δbuyer=300000  Δseller=0  (giá đơn = 300000)
+  ✅ Tổng tiền di chuyển đúng MỘT LẦN 300.000đ, cho đúng MỘT bên (không mất, không sinh ra, không nhân đôi)
+  ✅ Vẫn đọc được chuỗi nhật ký sau race (dữ liệu không hỏng)
+  ✅ 9 bất biến còn đúng sau R1 (violations=[])
+
+R2: Cùng một quyết định (REFUND), hai requestId khác nhau, cùng một phiếu, gửi đồng thời
+  ✅ Cấp được phiếu REFUND
+  [R2] request A -> 200 {"dispute":{"id":"2b814fb2-8a87-407b-9c35-e29a950e04d5","transactionId":"24eca755-42e4-4b5f-81b1-2a0526dc92b7","createdBy":"801e0616-6dec-4aad-afc8-377735488806
+  [R2] request B -> 409 {"error":"DISPUTE_NOT_OPEN","message":"Hồ sơ tranh chấp đã được xử lý ở nơi khác"}
+  ✅ Đúng một trong hai request thành công (thực tế: 1)
+  ✅ R2 bên thua: không rơi vào lỗi mơ hồ CONSTRAINT_VIOLATION (nhận 409 DISPUTE_NOT_OPEN)
+  ✅ R2 bên thua: mã lỗi nằm trong tập đã định nghĩa {DISPUTE_NOT_OPEN, REAUTH_REQUIRED} (thực tế: 409 DISPUTE_NOT_OPEN)
+  ✅ R2 bên thua: status HTTP khớp đúng mã lỗi DISPUTE_NOT_OPEN (kỳ vọng 409, nhận 409)
+  [R2] Δbuyer=300000 (giá đơn = 300000)
+  ✅ Người mua chỉ được hoàn tiền ĐÚNG MỘT LẦN, không nhân đôi
+  ✅ 9 bất biến còn đúng sau R2 (violations=[])
+
+ALL PASS

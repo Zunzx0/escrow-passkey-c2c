@@ -1,0 +1,52 @@
+◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+=== E2E TÍN HIỆU RỦI RO signCount: http://localhost:3910 ===
+
+C01: 0 -> 0 — Passkey đồng bộ luôn báo 0
+  ✅ Đăng ký xong, counter lưu = 0
+  ✅ Đăng nhập thành công (nhận 200)
+  ✅ Counter vẫn lưu = 0
+  ✅ KHÔNG ghi COUNTER_ANOMALY
+
+C02: 0 -> N — bộ xác thực bắt đầu đếm
+  ✅ Đăng nhập thành công (nhận 200)
+  ✅ Counter lưu = 5 (thực tế 5)
+  ✅ KHÔNG ghi COUNTER_ANOMALY
+
+C03: N -> N+1 — bình thường
+  ✅ Đăng nhập thành công (nhận 200)
+  ✅ Counter lưu = 6 (thực tế 6)
+  ✅ KHÔNG ghi COUNTER_ANOMALY
+
+C04: N -> N — counter đứng yên
+  ✅ Đăng nhập VẪN thành công — không từ chối cứng (nhận 200)
+  ✅ Ghi đúng 1 sự kiện COUNTER_ANOMALY
+  ✅ Sự kiện ghi đúng counter cũ = 6, mới = 6
+  ✅ Sự kiện ghi đúng người dùng
+  ✅ Sự kiện đánh dấu ALLOWED — lần xác thực được chấp nhận
+  ✅ Counter lưu giữ nguyên mức cao nhất = 6 (thực tế 6)
+  ✅ Credential KHÔNG bị xoá hay khoá
+
+C05: N -> N-1 — counter lùi
+  ✅ Đăng nhập VẪN thành công (nhận 200)
+  ✅ Ghi đúng 1 sự kiện COUNTER_ANOMALY
+  ✅ Sự kiện ghi đúng counter cũ = 6, mới = 5
+  ✅ Counter lưu KHÔNG bị kéo lùi, vẫn = 6 (thực tế 6)
+
+C06: N+1 sau bất thường — bình thường trở lại
+  ✅ Đăng nhập thành công (nhận 200)
+  ✅ Counter lưu = 7 (thực tế 7)
+  ✅ KHÔNG ghi thêm COUNTER_ANOMALY
+
+C07: N -> 0 — một bên bằng 0 thì không coi là bất thường (theo quy tắc đã chốt)
+  ✅ Đăng nhập thành công (nhận 200)
+  ✅ KHÔNG ghi COUNTER_ANOMALY
+  ✅ Counter lưu giữ mức cao nhất = 7 (thực tế 7)
+
+C08: Bất thường ở lối xác thực lại — vẫn cấp phiếu, vẫn ghi nhận
+  ✅ Xác thực lại VẪN cấp phiếu uỷ quyền (nhận 200)
+  ✅ Ghi đúng 1 sự kiện COUNTER_ANOMALY ở lối xác thực lại
+  ✅ Sự kiện ghi đúng người dùng và đúng tuyến xác thực lại
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

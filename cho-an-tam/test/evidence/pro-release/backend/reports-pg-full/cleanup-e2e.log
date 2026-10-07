@@ -1,0 +1,27 @@
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== E2E DỌN CHALLENGE: http://localhost:3910 ===
+
+D01: Chạy script dọn như một process riêng
+  ✅ Script kết thúc bình thường (mã 0)
+  ✅ Cả hai quy tắc dọn đều chạy ({"deletedExpired":2,"deletedUsed":1,"threshold":"2026-10-07T08:06:33.307Z"})
+
+D02: Đúng loại bị dọn, đúng loại được giữ
+  ✅ A — hết hạn từ lâu: ĐÃ DỌN
+  ✅ B — vừa hết hạn, còn trong ân hạn: GIỮ
+  ✅ C — còn hiệu lực, chưa dùng: GIỮ
+  ✅ D — đã dùng từ lâu: ĐÃ DỌN
+  ✅ E — vừa dùng, còn trong ân hạn: GIỮ
+  ✅ F — vừa phát hành: GIỮ
+  ✅ G — đã dùng từ lâu dù chưa tới expires_at: ĐÃ DỌN (quy tắc "đã dùng và cũ")
+
+D03: Challenge vừa phát hành vẫn hoàn tất được sau khi dọn
+  ✅ Đăng nhập bằng challenge F thành công (nhận 200)
+
+D04: Dọn không tham gia quyết định an toàn
+  ✅ Phát lại challenge đã dùng (đã bị dọn) vẫn bị từ chối (nhận 400 CHALLENGE_NOT_FOUND)
+  ✅ reauth_grants KHÔNG bị đụng tới (căn cứ của bất biến phiếu dùng một lần)
+  ✅ security_events KHÔNG bị xoá
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

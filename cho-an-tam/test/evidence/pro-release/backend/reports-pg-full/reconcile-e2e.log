@@ -1,0 +1,91 @@
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+
+=== E2E ĐỐI SOÁT THANH TOÁN (RECONCILIATION): http://localhost:3910 ===
+
+R01: Webhook thắng trước worker — webhook chen vào lúc worker đang chờ provider
+  ✅ Webhook tới trong lúc worker chờ provider và tất toán trước
+  ✅ Worker tới sau nhận DUPLICATE, không tất toán lần hai (nhận DUPLICATE)
+  ✅ Tất toán bởi WEBHOOK (thực tế WEBHOOK)
+  ✅ version tăng đúng 1 lần (thực tế 1)
+  ✅ Ví cộng đúng MỘT lần
+  ✅ Đúng 1 wallet_entry
+  ✅ Mọi bất biến vẫn đúng sau R01
+
+R02: Worker thắng trước webhook — webhook tới sau trở thành bản lặp
+  ✅ Worker phát hiện kết quả và tất toán (nhận APPLIED)
+  ✅ Webhook tới sau được nhận diện là bản lặp, trả 200
+  ✅ Tất toán bởi RECONCILER (thực tế RECONCILER)
+  ✅ version tăng đúng 1 lần (thực tế 1)
+  ✅ Ví cộng đúng MỘT lần
+  ✅ Đúng 1 wallet_entry
+  ✅ Mọi bất biến vẫn đúng sau R02
+
+R03: Hai worker cùng đối soát một yêu cầu, chạy song song ở hai process
+  ✅ Cả hai process worker kết thúc bình thường
+  ✅ Đúng MỘT worker tất toán (kết quả: DUPLICATE / APPLIED)
+  ✅ Worker còn lại đã thật sự đua (đọc thấy PENDING) và nhận DUPLICATE
+(node:36124) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  ✅ SUCCEEDED, version = 1 (thực tế 1)
+  ✅ Ví cộng đúng MỘT lần dù hai worker cùng chạy
+  ✅ Đúng 1 wallet_entry
+  ✅ Mọi bất biến vẫn đúng sau R03
+
+R04: Worker chạy lại nhiều lần và áp lại cùng một kết quả của provider
+  ✅ Lượt 1 tất toán (nhận APPLIED)
+  ✅ Lượt 2 và 3 không còn gì để đối soát (yêu cầu đã rời PENDING)
+  ✅ Áp lại cùng kết quả hai lần đều nhận DUPLICATE
+  ✅ version = 1, chỉ 1 lần hỏi provider (thực tế v1, 1 lần)
+  ✅ Ví cộng đúng MỘT lần
+  ✅ Đúng 1 wallet_entry
+  ✅ Mọi bất biến vẫn đúng sau R04
+
+R05: Provider báo PENDING nhiều lần rồi mới thành công (delayed success)
+  ✅ Lượt 1: provider còn PENDING, yêu cầu giữ nguyên (nhận STILL_PENDING)
+  ✅ Lượt 2: provider còn PENDING, yêu cầu giữ nguyên (nhận STILL_PENDING)
+  ✅ Lượt 3: provider còn PENDING, yêu cầu giữ nguyên (nhận STILL_PENDING)
+  ✅ Sau 3 lượt: vẫn PENDING, version chưa đổi — không tự coi là thất bại
+  ✅ Ghi nhận đủ 3 lần hỏi provider (thực tế 3)
+  ✅ Chưa có tiền nào được cộng
+  ✅ Provider thành công muộn thì lượt kế tiếp tất toán (nhận APPLIED)
+  ✅ SUCCEEDED, version = 1, tổng 4 lần hỏi
+  ✅ Ví cộng đúng MỘT lần, 1 wallet_entry
+  ✅ Mọi bất biến vẫn đúng sau R05
+
+R06: Provider báo FAILED — không cộng tiền
+  ✅ Worker tất toán kết quả FAILED (nhận APPLIED)
+  ✅ FAILED, tất toán bởi RECONCILER, version = 1
+  ✅ Ví KHÔNG đổi
+  ✅ Không có wallet_entry nào
+  ✅ Mọi bất biến vẫn đúng sau R06
+
+R07: API truy vấn của provider lỗi — giữ trạng thái an toàn, lần sau hỏi lại được
+  ✅ Worker ghi nhận lỗi provider, không sập (nhận PROVIDER_ERROR)
+  ✅ Yêu cầu vẫn PENDING — lỗi provider không bị coi là FAILED
+  ✅ Lỗi được ghi lại ở last_reconcile_error
+  ✅ Chưa có tiền nào được cộng
+  ✅ Provider hoạt động lại thì lượt kế tiếp tất toán (nhận APPLIED)
+  ✅ SUCCEEDED và vết lỗi cũ đã được xoá
+  ✅ Ví cộng đúng MỘT lần
+  ✅ Mọi bất biến vẫn đúng sau R07
+
+R08: Process worker chết ngang giữa giao dịch cộng tiền
+  ✅ Process worker chết giữa chừng (mã thoát 97)
+  ✅ Yêu cầu vẫn PENDING, version chưa đổi — phần ghi dở không được commit
+  ✅ Số dư KHÔNG đổi dù process đã cộng tiền trong giao dịch trước khi chết
+  ✅ Không có wallet_entry mồ côi
+  ✅ Mọi bất biến vẫn đúng sau R08 (ngay sau khi process chết)
+  ✅ Lượt đối soát kế tiếp tất toán bình thường (nhận APPLIED)
+  ✅ SUCCEEDED, version = 1
+  ✅ Ví cộng đúng MỘT lần sau khi phục hồi
+  ✅ Mọi bất biến vẫn đúng sau R08 (sau khi phục hồi)
+
+R09: Worker đã tất toán FAILED, webhook trái chiều tới sau không được ghi đè
+  ✅ Worker tất toán FAILED
+  ✅ Webhook trái chiều bị từ chối (nhận 409 WEBHOOK_CONFLICT)
+  ✅ Vẫn FAILED, version = 1 — không bị lật
+  ✅ Ví KHÔNG đổi
+  ✅ Mọi bất biến vẫn đúng sau R09
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

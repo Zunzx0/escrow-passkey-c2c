@@ -1,0 +1,14 @@
+  ✅ Tên mới tạo được tài khoản chờ Passkey (nhận 201)
+  ✅ Nhiều tên mới hợp lệ từ cùng IP không bị tính là hành vi dò tài khoản
+  ✅ Tên không khả dụng nhận mã chung REGISTRATION_UNAVAILABLE (nhận 409 REGISTRATION_UNAVAILABLE)
+  ✅ Phản hồi từ chối không cấp token hoặc dữ liệu tài khoản
+  ✅ Phản hồi không nói tên đăng nhập đã tồn tại
+  ✅ Thử lặp cùng một username bị giới hạn theo cặp IP–username và có Retry-After
+  ✅ Username khác thứ hai vẫn trong hạn mức
+  ✅ Username đã có thứ ba vẫn nhận phản hồi chung trong hạn mức (nhận 409)
+  ✅ Lần dò trúng username đã có tiếp theo bị chặn (nhận 429 USERNAME_PROBE_LIMITED)
+  ✅ Phản hồi chặn dò username có Retry-After
+  ✅ Hai yêu cầu cùng tên chỉ tạo một tài khoản (nhận 201,409)
+  ✅ Yêu cầu thua cuộc đua cũng nhận mã lỗi chung
+
+KẾT QUẢ: 12/12 phép kiểm đạt

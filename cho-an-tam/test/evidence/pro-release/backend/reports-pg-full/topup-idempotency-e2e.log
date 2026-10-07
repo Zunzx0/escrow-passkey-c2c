@@ -1,0 +1,120 @@
+◇ injected env (0) from .env // tip: ⌘ override existing { override: true }
+  ✅ Ba tài khoản sẵn sàng
+
+I1: Cùng requestId gửi 5 lần ĐỒNG THỜI -> đúng một yêu cầu
+  [I1] 201 200r 200r 200r 200r
+  ✅ Chỉ thêm đúng 1 yêu cầu (thực tế 1)
+  ✅ Đúng 1 phản hồi 201 và 4 phản hồi 200 idempotentReplay
+  ✅ Cả 5 phản hồi trỏ cùng một id yêu cầu
+  ✅ Yêu cầu đã gửi sang provider (SUBMITTED), provider có đúng bản ghi
+
+I2: Gửi lại sau khi thành công, rồi sau khi đã tất toán -> vẫn đúng yêu cầu cũ, cộng tiền một lần
+  ✅ Lần 2: 200, cùng id và providerRef (nhận 200)
+  ✅ Thanh toán ở cổng thành công
+  ✅ Gửi lại sau tất toán: 200, trả trạng thái hiện tại SUCCEEDED (nhận 200 SUCCEEDED)
+  ✅ Ví cộng đúng một lần
+
+I3: Cùng requestId, KHÁC số tiền -> 409 IDEMPOTENCY_KEY_REUSED
+  ✅ Nhận 409 IDEMPOTENCY_KEY_REUSED (nhận 409 IDEMPOTENCY_KEY_REUSED)
+  ✅ Không tạo yêu cầu mới
+  ✅ Yêu cầu cũ giữ nguyên số tiền
+
+I4: requestId thuộc phạm vi từng người dùng
+  ✅ Hai người dùng cùng requestId được hai yêu cầu riêng
+
+I5: requestId sai định dạng -> 400 VALIDATION_ERROR
+  ✅ số: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+  ✅ số: không tạo yêu cầu
+  ✅ quá ngắn: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+  ✅ quá ngắn: không tạo yêu cầu
+  ✅ ký tự lạ: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+  ✅ ký tự lạ: không tạo yêu cầu
+  ✅ quá dài: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+  ✅ quá dài: không tạo yêu cầu
+  ✅ boolean: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+  ✅ boolean: không tạo yêu cầu
+
+I6: Không gửi requestId -> hành vi cũ (mỗi lần một yêu cầu)
+  ✅ Hai lần gửi không khoá -> hai yêu cầu 201
+  ✅ Phản hồi có submissionStatus=SUBMITTED, requestId=null
+
+D1: Năm lần gửi ĐỒNG THỜI, provider chậm 400 ms -> đúng MỘT lần gửi lên provider
+  ✅ Server con với provider chậm khởi động
+  [D1] 201:SUBMITTED 200r:SUBMITTING 200r:SUBMITTING 200r:SUBMITTING 200r:SUBMITTING
+  ✅ Đúng một yêu cầu được tạo
+  ✅ Provider nhận đúng MỘT lệnh tạo thanh toán cho yêu cầu này (thực tế 1 lệnh)
+  ✅ Cả năm phản hồi đều thành công (200/201)
+  ✅ Sau khi xong, yêu cầu ở SUBMITTED
+  ✅ Server con provider chậm đã thoát hẳn
+
+S0: Provider sập khi tạo yêu cầu (server con)
+  ✅ Server con với provider sập khởi động
+  ✅ có requestId: 503 PROVIDER_UNAVAILABLE thay vì 500 chung (nhận 503 PROVIDER_UNAVAILABLE)
+  ✅ không requestId: 503 PROVIDER_UNAVAILABLE thay vì 500 chung (nhận 503 PROVIDER_UNAVAILABLE)
+  ✅ ca hết lượt: 503 PROVIDER_UNAVAILABLE thay vì 500 chung (nhận 503 PROVIDER_UNAVAILABLE)
+  ✅ Ba yêu cầu được ghi lại (không mất dấu yêu cầu của người dùng)
+  ✅ 111000: PENDING + SUBMIT_FAILED, submit_attempts=1 (thực tế PENDING/SUBMIT_FAILED/1)
+  ✅ 111000: provider KHÔNG có bản ghi
+  ✅ 112000: PENDING + SUBMIT_FAILED, submit_attempts=1 (thực tế PENDING/SUBMIT_FAILED/1)
+  ✅ 112000: provider KHÔNG có bản ghi
+  ✅ 113000: PENDING + SUBMIT_FAILED, submit_attempts=1 (thực tế PENDING/SUBMIT_FAILED/1)
+  ✅ 113000: provider KHÔNG có bản ghi
+  ✅ Server con đã thoát hẳn
+
+S1: Gửi lại CÙNG requestId khi provider đã hồi phục -> gửi lại provider, nạp được đúng một lần
+  ✅ 200, cùng yêu cầu, nay SUBMITTED (nhận 200  SUBMITTED)
+  ✅ Trang thanh toán của provider dùng được (nhận 200 )
+  ✅ Ví cộng đúng 111.000đ một lần
+
+S2: Yêu cầu không requestId bị kẹt -> worker đối soát tự gửi lại provider
+  ✅ Sau một lượt đối soát: PENDING + SUBMITTED (thực tế PENDING/SUBMITTED, exit 0)
+  ✅ Provider đã có bản ghi
+  ✅ Thanh toán xong, ví cộng đúng 112.000đ
+
+S3: Provider sập kéo dài -> sau 3 lần gửi, yêu cầu FAILED, không có tiền di chuyển
+  ✅ FAILED bởi RECONCILER sau 3 lần gửi (thực tế FAILED/RECONCILER/3)
+  ✅ Suất PENDING được giải phóng
+  ✅ Ví không đổi, không có bút toán
+  ✅ Provider không có bản ghi nào (không thể bị thanh toán sau đó)
+  ✅ Gửi lại cùng requestId sau đó: 200, trả trạng thái FAILED, không gửi provider nữa (nhận 200 FAILED)
+  ✅ Vẫn không có bản ghi ở provider
+
+S4: Yêu cầu CŨ "SUBMITTED" mà provider không biết (dữ liệu trước bản sửa) -> đối soát gửi lại
+  ✅ Provider nay có bản ghi, yêu cầu PENDING + SUBMITTED (thực tế PENDING/SUBMITTED)
+
+S5: Gửi lại provider là idempotent (provider đã có bản ghi)
+  ✅ Đối soát đưa về SUBMITTED, vẫn PENDING (thực tế SUBMITTED/PENDING)
+  ✅ Provider giữ nguyên đúng một bản ghi
+
+I7: Gửi lại khi tiến trình khác đang giữ quyền gửi còn hạn -> KHÔNG gửi lần nữa
+  ✅ Trả 200 idempotentReplay với trạng thái hiện tại SUBMITTING (nhận 200 SUBMITTING)
+  ✅ Lượt gửi lại này KHÔNG gửi lệnh nào lên provider
+  ✅ Quyền gửi của tiến trình kia không bị giành
+
+S6: Tiến trình chết giữa chừng để lại quyền đã hết hạn -> đối soát giành lại và gửi
+  ✅ Đối soát giành lại quyền hết hạn, gửi xong và nhả quyền (thực tế SUBMITTED, claim=null, exit 0)
+  ✅ Provider có bản ghi sau khi phục hồi
+  ✅ Yêu cầu vẫn PENDING chờ kết quả thanh toán (không bị đóng)
+
+M1: CSDL SQLite cũ (trước khi có các cột này) được nâng cấp đúng, dữ liệu cũ giữ nguyên
+  (bỏ qua trên PostgreSQL: nâng cấp PostgreSQL được kiểm bằng migration v3 trên CSDL thử nghiệm riêng)
+
+B1: Barrier — snapshot cũ không giành lại được quyền khi yêu cầu đã SUBMITTED
+  ✅ Holder hoàn tất: SUBMITTED, quyền đã nhả (thực tế SUBMITTED, claim=null)
+  ✅ Snapshot cũ KHÔNG giành được quyền khi DB đã SUBMITTED (nhận null)
+  ✅ Trạng thái không bị kéo về SUBMITTING, attempts vẫn 1 (thực tế SUBMITTED, attempts 1)
+  ✅ Provider chỉ nhận đúng một lệnh tạo thanh toán (thực tế 1)
+
+B2: Holder cũ có lease đã hết hạn không ghi đè holder mới
+  ✅ B giành được quyền sau khi lease của A đã hết hạn
+  ✅ A không ghi đè quyền của B (busy=true, claim của B=true, state=SUBMITTING)
+  ✅ B hoàn tất: SUBMITTED, quyền đã nhả
+  ✅ Provider có đúng một khoản cho yêu cầu này
+
+B3: Phục hồi UNKNOWN_PAYMENT chỉ giành được khi trạng thái không đổi kể từ lúc đọc
+  ✅ Snapshot phục hồi cũ (attempts đã đổi) không giành được quyền
+  ✅ Snapshot mới nhất giành được quyền phục hồi
+  ✅ Phục hồi: provider nhận khoản, yêu cầu về SUBMITTED
+  ✅ 9 bất biến đều đúng
+
+ALL PASS

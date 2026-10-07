@@ -1,0 +1,70 @@
+
+=== KIỂM THỬ BỘ KIỂM BẤT BIẾN ===
+
+I0: Dữ liệu nền hợp lệ
+  ✅ Checker chạy đúng 9 phép kiểm (thực tế 9)
+  ✅ Đánh số liên tục 1..9
+  ✅ Dữ liệu nền không vi phạm bất biến nào
+
+I1: Số dư không âm — ví người mua có số dư âm
+  ✅ Bất biến số 1 (NON_NEGATIVE_BALANCE) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: NON_NEGATIVE_BALANCE)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I2: Tổng biến động của nghiệp vụ chuyển tiền bằng 0 — một nghiệp vụ chuyển tiền nội bộ chỉ có một chân
+  ✅ Bất biến số 2 (ZERO_SUM) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ZERO_SUM)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I3: Giao dịch chỉ tất toán một lần — tiền rời ký quỹ lần thứ hai cho cùng giao dịch
+  ✅ Bất biến số 3 (SETTLE_ONCE) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: SETTLE_ONCE)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I4: Phiếu uỷ quyền dùng một lần và đúng phạm vi — phiếu giải ngân mang quyết định (sai phạm vi)
+  ✅ Bất biến số 4 (GRANT_SCOPE) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: GRANT_SCOPE)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I4: Phiếu uỷ quyền dùng một lần và đúng phạm vi — một giao dịch tiêu thụ hai phiếu giải ngân
+  ✅ Bất biến số 4 (GRANT_SCOPE) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: GRANT_SCOPE)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I5: Phiếu phân xử đúng hồ sơ tranh chấp và đúng quyết định — phiếu phân xử ký REFUND nhưng hồ sơ được thi hành RELEASE
+  ✅ Bất biến số 5 (ADJUDICATION_GRANT) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ADJUDICATION_GRANT)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I5: Phiếu phân xử đúng hồ sơ tranh chấp và đúng quyết định — hồ sơ đã giải quyết nhưng không có phiếu phân xử nào
+  ✅ Bất biến số 5 (ADJUDICATION_GRANT) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ADJUDICATION_GRANT)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I6: Tin đăng đơn chiếc chỉ một lần khoá tiền thành công — tin đăng đã có giao dịch khoá tiền nhưng status vẫn AVAILABLE
+  ✅ Bất biến số 6 (ONE_LOCK_PER_LISTING) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ONE_LOCK_PER_LISTING)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I6: Tin đăng đơn chiếc chỉ một lần khoá tiền thành công — hai giao dịch cùng khoá tiền trên một tin đăng
+  ✅ Bất biến số 6 (ONE_LOCK_PER_LISTING) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ONE_LOCK_PER_LISTING)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I7: Cân đối số tiền đang giữ — ví ký quỹ khoá lệch với tổng nghĩa vụ đang giữ
+  ✅ Bất biến số 7 (ESCROW_BALANCE) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ESCROW_BALANCE)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I8: Tài khoản ACTIVE luôn có Passkey — tài khoản ACTIVE mất hết Passkey
+  ✅ Bất biến số 8 (ACTIVE_ACCOUNT_HAS_PASSKEY) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ACTIVE_ACCOUNT_HAS_PASSKEY)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+I9: Một giao dịch tối đa một hồ sơ tranh chấp — một giao dịch có hai hồ sơ tranh chấp
+  ✅ Bất biến số 9 (ONE_DISPUTE_PER_TRANSACTION) báo vi phạm
+  ✅ Chỉ đúng bất biến đó báo sai, 8 bất biến còn lại vẫn đúng (báo sai: ONE_DISPUTE_PER_TRANSACTION)
+  ✅ Hoàn tác xong thì checker trở lại sạch
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

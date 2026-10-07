@@ -1,0 +1,65 @@
+[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+Fixture bền — lỗi chia sẻ tệp được tiêm có kiểm soát
+  ✅ fake: rename EBUSY tạm thời giữ cả trạng thái cũ và mới
+  ✅ fake: lỗi đọc phải bị từ chối, không thay bằng EMPTY
+  ✅ fake: lỗi đọc không ghi đè trạng thái bền
+  ✅ rename EIO giữ lỗi gốc khi cleanup unlink EACCES
+  ✅ rename thất bại không thay trạng thái đã commit
+  ✅ owner write failure never publishes ownerless lock
+  ✅ owner preparation failure leaves next acquisition usable
+  ✅ kill false fails promptly instead of waiting forever
+  ✅ cleanup thử cả hai child và giữ lỗi barrier gốc
+  ✅ second stale contender cannot unlink fresh owner or acquire its lock
+  ✅ both contenders complete without cleanup failure 
+  ✅ both serialized contender mutations retained
+  ✅ dead holder lock recovers without losing persisted state
+
+R1 — tiến trình con crash ngay trước commit (sau khi ghi số dư và bút toán)
+  ✅ tiến trình con thoát với mã 97 (crash giả lập trước commit)
+  ✅ PayPal đã thu tiền trước khi crash
+  ✅ sau crash: request vẫn PENDING, không SUCCEEDED dở dang
+  ✅ sau crash: không có bút toán dở dang
+  ✅ sau crash: số dư không đổi
+  ✅ sau crash: bằng chứng còn IN_FLIGHT với dấu đã POST (chưa ai xác nhận)
+  ✅ khởi động lại trong lúc lease còn hạn: capture trả BUSY, không POST lần hai
+  ✅ vẫn đúng một lệnh thu ở PayPal
+  ✅ đối soát sau khởi động: tất toán đúng một lần
+  ✅ đúng một bút toán
+  ✅ ví tăng đúng một lần
+  ✅ đối soát lần nữa: DUPLICATE, không cộng thêm
+  ✅ vẫn đúng một lần sau đối soát lặp
+
+R2 — tiến trình con crash sau khi ghi bút toán, trước commit (điểm thứ nhất)
+  ✅ tiến trình con thoát với mã 97
+  ✅ bút toán đã ghi trước crash bị rollback
+  ✅ số dư không đổi sau crash
+  ✅ đối soát sau crash: tất toán đúng một lần
+  ✅ ví tăng đúng một lần sau phục hồi
+
+R3 — tiến trình con bị giết khi POST đang treo; khởi động lại; lệnh treo hoàn tất muộn
+[observe-child-exit] null SIGKILL
+  ✅ lệnh treo còn trong trạng thái bền sau khi tiến trình chết (fake sống qua restart)
+  ✅ PayPal chưa thu khi lệnh treo còn treo
+  ✅ khởi động lại khi lease cũ còn hạn: BUSY, không POST
+  ✅ chỉ lệnh treo của tiến trình cũ
+  ✅ sau khi lease hết hạn: tiến trình mới thu và tất toán
+  ✅ hai lệnh thu ở phía PayPal (cũ treo, mới)
+  ✅ lệnh cũ hoàn tất muộn không làm đổi trạng thái đã thu
+  ✅ đúng một bút toán dù lệnh cũ hoàn tất muộn
+  ✅ ví tăng đúng một lần
+
+R4 — tiến trình con bị giết khi POST treo; lệnh treo hoàn tất; khởi động lại chỉ đối soát (GET)
+[observe-child-exit] null SIGKILL
+  ✅ PayPal đã thu theo lệnh treo hoàn tất
+  ✅ khởi động lại: đối soát bằng GET tất toán một lần
+  ✅ đối soát không gửi lệnh thu nào
+  ✅ đúng một bút toán
+  ✅ ví tăng đúng một lần
+
+Bất biến sau các sự cố
+  ✅ ba bất biến PayPal đúng sau mọi sự cố
+  ✅ chín bất biến cũ đúng (đã kiểm 9)
+
+[M2 phục hồi] 47 đạt, 0 hỏng, 0 lỗi đã biết (tái hiện)

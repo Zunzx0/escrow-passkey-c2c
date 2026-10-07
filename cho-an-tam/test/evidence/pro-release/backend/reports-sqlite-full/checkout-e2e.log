@@ -1,0 +1,35 @@
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== E2E LUỒNG GIAO DIỆN: NẠP TIỀN QUA CỔNG THANH TOÁN + CHI TIẾT ĐƠN: http://localhost:3910 ===
+
+K01: Thanh toán thành công ở cổng -> webhook qua HTTP thật -> ví được cộng
+  ✅ Trang của cổng thanh toán hiển thị đúng số tiền, trạng thái PENDING
+  ✅ Cổng thanh toán gửi được webhook về máy chủ (HTTP 200)
+  ✅ Yêu cầu tất toán SUCCEEDED qua WEBHOOK
+  ✅ Ví cộng đúng 200.000₫
+
+K02: Thành công nhưng webhook thất lạc -> chỉ đối soát mới phát hiện
+  ✅ Cổng thanh toán ghi nhận thành công nhưng không gửi webhook
+  ✅ Phía sàn vẫn PENDING — trang của cổng thanh toán không tự cộng ví
+  ✅ Ví CHƯA đổi
+  ✅ Worker đối soát phát hiện kết quả và tất toán
+  ✅ Yêu cầu tất toán SUCCEEDED qua RECONCILER
+  ✅ Ví cộng đúng 150.000₫
+
+K03: Thanh toán thất bại -> ví không đổi
+  ✅ Yêu cầu tất toán FAILED
+  ✅ Ví KHÔNG đổi
+
+K04: Không "thanh toán lại" được khoản đã có kết quả ở cổng
+  ✅ Bị từ chối (nhận 409 ALREADY_SETTLED)
+  ✅ Trạng thái và ví giữ nguyên
+
+K05: Chi tiết giao dịch mang kèm hồ sơ tranh chấp cho cả hai bên
+  ✅ Người BÁN không tự chuyển đơn sang "đã nhận hàng" được (nhận 403) — khớp nút giao diện đã sửa
+  ✅ Người MUA xác nhận đã nhận hàng
+  ✅ Người mua thấy hồ sơ tranh chấp đang mở
+  ✅ Người bán thấy đúng lý do tranh chấp
+  ✅ Chín bất biến vẫn đúng
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

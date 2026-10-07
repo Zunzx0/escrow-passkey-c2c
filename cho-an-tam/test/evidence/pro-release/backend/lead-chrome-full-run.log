@@ -1,0 +1,580 @@
+﻿Browser 154.0.8037.98, playwright-core 1.63.0
+
+[B1B2] B1: mở PayPal Sandbox thật trong Chrome
+
+▶ B1.1 Bấm "Mở PayPal Sandbox": GET checkout rồi điều hướng thật tới đúng approval URL của fixture
+  ✅ [điều kiện dựng] Không có hook ENCLAVE_NAVIGATE: điều hướng là của trình duyệt thật
+  ✅ [điều kiện dựng] Chưa gọi checkout, chưa điều hướng trước khi bấm
+  ✅ Đúng một GET .../checkout
+  ✅ Điều hướng thật đúng URL fixture trả (https://www.sandbox.paypal.com/checkoutnow?token=ORDER1)
+  ✅ Tab thực sự rời trang ví sang host Sandbox
+  ✅ Mọi request ngoài chỉ là điều hướng chính tới host Sandbox (bị thay bằng trang giả)
+  ✅ Mở PayPal không tự capture
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (http không TLS): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (hậu tố (…paypal.com.evil.example)): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (tiền tố (evil-www.sandbox…)): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (thiếu www): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (subdomain khác): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (PayPal LIVE): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (userinfo user:pass): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (userinfo giả host (…paypal.com@evil.example)): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (cổng lạ :8443): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (javascript:): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (data:): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (chứa khoảng trắng): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (dấu gạch chéo ngược): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (chuỗi rỗng): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (null): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+▶ B1.2 URL phê duyệt giả (số): không rời trang, giao diện báo lỗi
+  ✅ [điều kiện dựng] Request checkout thật đã phát và được fixture trả lời (URL giả đã tới trang)
+  ✅ Không có điều hướng chính sang PayPal (s.navs rỗng)
+  ✅ URL trang không đổi
+  ✅ Không có request/điều hướng ngoài nào (s.external rỗng)
+  ✅ Giao diện vẫn ở trang ví, nút mở lại còn đó
+  ✅ Không request ngoài lọt ra
+
+[B1B2] B2: return / cancel / capture
+
+▶ B2.1 Return: dọn token/PayerID khỏi thanh địa chỉ, chỉ GET xác minh, KHÔNG tự capture; reload không xử lý lại
+  ✅ [điều kiện dựng] GET /payments/:id (xác minh) đã được fixture trả lời
+  ✅ [điều kiện dựng] Trang ở trạng thái return khớp ý định: có nút xác nhận
+  ✅ Query dọn sạch, giữ #/wallet (/#/wallet)
+  ✅ token/PayerID không còn trong location.href
+  ✅ Return KHÔNG tự capture
+  ✅ Return KHÔNG tự báo thành công
+  ✅ Return không tạo yêu cầu mới
+  ✅ Sau reload KHÔNG xử lý lại return (không có GET /payments/:id mới)
+  ✅ Sau reload không còn nút capture, không POST capture
+  ✅ Sau reload thanh địa chỉ vẫn sạch query
+  ✅ Không request ngoài lọt ra
+
+▶ B2.2 Query return KHÔNG phải chứng cứ: không có ý định trên thiết bị thì không cho capture
+  ✅ [điều kiện dựng] Trang ví đã dựng và có vùng thông báo
+  ✅ Không có nút capture dù URL mang token/PayerID
+  ✅ Không POST capture, không toast thành công
+  ✅ Query vẫn được dọn
+  ✅ Không request ngoài lọt ra, không điều hướng
+
+▶ B2.3 Cancel: chỉ GET trạng thái, không capture, không toast thành công, giữ ý định và mở lại được PayPal
+  ✅ [điều kiện dựng] GET /payments/:id (xác minh) đã được trả lời
+  ✅ [điều kiện dựng] Trang đang ở trạng thái cancel
+  ✅ Query cancel (kèm token) được dọn khỏi thanh địa chỉ
+  ✅ Cancel: không POST capture, không có nút capture
+  ✅ Cancel: không có toast thành công
+  ✅ Cancel không bị diễn giải là FAILED/đóng
+  ✅ Ý định vẫn còn trong localStorage (order giữ để mở lại)
+  ✅ Không tạo yêu cầu mới
+  ✅ Nút mở lại có nhãn "Mở lại PayPal Sandbox"
+  ✅ Mở lại điều hướng đúng approval URL
+  ✅ Vẫn không capture, không request ngoài lọt ra
+
+▶ B2.4 Cancel rồi reload: không xử lý lại, ý định còn nguyên
+  ✅ [điều kiện dựng] Cancel đã xử lý và query đã dọn
+  ✅ Reload không xử lý lại cancel
+  ✅ Ý định còn, không capture, không toast thành công
+  ✅ Không request ngoài lọt ra
+
+▶ B2.5 Bấm xác nhận kể cả bấm đúp: đúng MỘT POST capture
+  ✅ [điều kiện dựng] Trước khi bấm chưa có POST capture
+  ✅ [điều kiện dựng] POST capture đang treo (chưa trả lời) khi quan sát lần bấm lặp
+  ✅ Nút capture còn trong DOM lúc treo và đang disabled (found=true, disabled=true); đã gỡ disabled rồi click lại nên guard busy được kiểm riêng
+  ✅ Gỡ disabled + click lại lúc POST treo: vẫn đúng 1 POST capture (guard busy)
+  ✅ Đúng MỘT POST capture ở fixture sau bấm đúp + bấm lặp lúc đang treo
+  ✅ Không còn nút capture sau khi xác nhận
+  ✅ CAPTURING chưa báo thành công
+  ✅ Không request ngoài lọt ra
+
+▶ B2.6 POST capture 200 nhưng GET nói RECONCILING: KHÔNG báo thành công
+  ✅ [điều kiện dựng] POST capture đã phát/được trả lời và GET sau capture đã trả về PENDING
+  ✅ Không toast/chữ "Nạp tiền thành công"
+  ✅ Ý định được giữ (chưa có chứng cứ thu tiền)
+  ✅ Không gửi lại POST capture
+  ✅ Không request ngoài lọt ra
+
+▶ B2.6 POST capture 200 nhưng GET nói PENDING / AWAITING_APPROVAL: KHÔNG báo thành công
+  ✅ [điều kiện dựng] POST capture đã phát/được trả lời và GET sau capture đã trả về PENDING
+  ✅ Không toast/chữ "Nạp tiền thành công"
+  ✅ Ý định được giữ (chưa có chứng cứ thu tiền)
+  ✅ Không gửi lại POST capture
+  ✅ Không request ngoài lọt ra
+
+▶ B2.7 POST capture 200 và GET SUCCEEDED khớp ý định: đúng một thông báo thành công, dọn ý định, đọc lại ví
+  ✅ [điều kiện dựng] Trước capture: chưa có toast thành công, ý định còn
+  ✅ Đúng MỘT toast "Nạp tiền thành công"
+  ✅ Đúng MỘT POST capture
+  ✅ Ví được đọc lại từ máy chủ
+  ✅ Không request ngoài lọt ra
+
+[B3B4] B3 — phản hồi capture muộn của phiên cũ
+
+▶ B3.1 capture treo, logout rồi login lại CÙNG tài khoản
+  ✅ [điều kiện dựng] POST capture đã tới fixture đúng 1 lần (fx=1, server=1)
+  ✅ [điều kiện dựng] Phản hồi capture còn treo (deferred chưa giải quyết, fixture chưa trả lời) trước khi đăng xuất
+  ✅ [điều kiện dựng] Phiên mới hiệu lực (1 logout, 1 login, nút đăng xuất xuất hiện) TRƯỚC khi giải phóng phản hồi cũ
+  ✅ [điều kiện dựng] Phản hồi capture cũ vẫn chưa được giao và không có capture thứ hai
+  ✅ [điều kiện dựng] Phản hồi capture cũ đã thực sự được giao (assert bên dưới không đạt giả)
+  ✅ Cùng tài khoản: phản hồi cũ KHÔNG hiện toast "Nạp tiền thành công"
+  ✅ Cùng tài khoản: màn hình không hiện kết quả nạp thành công của phiên cũ
+  ✅ Cùng tài khoản: không GET /api/payments/<ID> thay cho phiên mới (trước=1, sau đăng nhập=1, cuối=1)
+  ✅ Cùng tài khoản: vẫn đúng 1 POST capture
+  ✅ Cùng tài khoản: ý định lưu của phiên mới (cùng tài khoản) không bị xoá
+  ✅ Cùng tài khoản: phiên mới vẫn đăng nhập
+  ✅ Không request ngoài lọt ra
+
+▶ B3.2 capture treo, logout rồi login tài khoản KHÁC
+  ✅ [điều kiện dựng] POST capture đã tới fixture đúng 1 lần (fx=1, server=1)
+  ✅ [điều kiện dựng] Phản hồi capture còn treo (deferred chưa giải quyết, fixture chưa trả lời) trước khi đăng xuất
+  ✅ [điều kiện dựng] Phiên mới hiệu lực (1 logout, 1 login, nút đăng xuất xuất hiện) TRƯỚC khi giải phóng phản hồi cũ
+  ✅ [điều kiện dựng] Phản hồi capture cũ vẫn chưa được giao và không có capture thứ hai
+  ✅ [điều kiện dựng] Phản hồi capture cũ đã thực sự được giao (assert bên dưới không đạt giả)
+  ✅ Tài khoản khác: phản hồi cũ KHÔNG hiện toast "Nạp tiền thành công"
+  ✅ Tài khoản khác: màn hình không hiện kết quả nạp thành công của phiên cũ
+  ✅ Tài khoản khác: không GET /api/payments/<ID> thay cho phiên mới (trước=1, sau đăng nhập=1, cuối=1)
+  ✅ Tài khoản khác: vẫn đúng 1 POST capture
+  ✅ Tài khoản khác: tài khoản mới không có ý định; ý định tài khoản cũ được giữ
+  ✅ Tài khoản khác: phiên mới vẫn đăng nhập
+  ✅ Không request ngoài lọt ra
+
+[B3B4] B4 — access token bị từ chối trong luồng return
+
+▶ B4.1 GET trạng thái khi return bị 401 -> refresh -> retry GET đúng phiên, capture sau đó đúng 1 lần
+  ✅ [điều kiện dựng] GET đầu bị từ chối bằng token cũ, đúng 1 refresh (GET=2, refresh=1)
+  ✅ GET retry dùng token mới; token cũ chỉ bị dùng 1 lần
+  ✅ Chưa capture khi người dùng chưa bấm xác nhận
+  ✅ Đúng 1 POST capture, bằng token mới
+  ✅ Chỉ 1 lần refresh
+  ✅ Có GET trạng thái SAU capture bằng token mới (số=1), không tin POST 200 thay GET
+  ✅ Thành công hiện đúng 1 toast sau GET SUCCEEDED
+  ✅ Vẫn đăng nhập
+  ✅ Không request ngoài lọt ra
+
+▶ B4.2 capture bị 401 -> refresh -> retry capture đúng 1 lần hợp lệ, kết quả đúng sau GET SUCCEEDED
+  ✅ [điều kiện dựng] Dựng đúng: chưa capture, chưa refresh trước khi bấm
+  ✅ Capture: lần 1 bị từ chối (token cũ), lần 2 retry bằng token mới, không hơn (số=2)
+  ✅ Máy chủ chỉ thực thi 1 capture (lần bị 401 không được tính)
+  ✅ Đúng 1 refresh
+  ✅ Có GET trạng thái MỚI nằm SAU POST capture thành công, bằng token mới (số=1; GET trước khi bấm=1)
+  ✅ Thành công hiện đúng 1 toast, sau GET SUCCEEDED
+  ✅ Vẫn đăng nhập
+  ✅ Không request ngoài lọt ra
+
+▶ B4.3 capture bị 401, refresh trả 401 -> không retry, không thành công giả, yêu cầu đăng nhập lại
+  ✅ [điều kiện dựng] Dựng đúng: capture đầu bị 401 đúng 1 lần
+  ✅ Không retry capture, máy chủ không thực thi capture nào (capture=1)
+  ✅ Không lặp refresh
+  ✅ Không báo thành công giả
+  ✅ Nút đăng nhập (open-auth) hiện
+  ✅ Toast yêu cầu đăng nhập lại có thật (app.js api(): UNAUTHENTICATED sau refresh thất bại). Toast hiện: Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại
+  ✅ Giao diện về trạng thái khách
+  ✅ Không request ngoài lọt ra
+
+▶ B4.4 capture bị 401, refresh trả 500 -> không retry, không thành công giả, yêu cầu đăng nhập lại
+  ✅ [điều kiện dựng] Dựng đúng: capture đầu bị 401 đúng 1 lần
+  ✅ Không retry capture, máy chủ không thực thi capture nào (capture=1)
+  ✅ Không lặp refresh
+  ✅ Không báo thành công giả
+  ✅ Nút đăng nhập (open-auth) hiện
+  ✅ Toast yêu cầu đăng nhập lại có thật (app.js api(): UNAUTHENTICATED sau refresh thất bại). Toast hiện: Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại
+  ✅ Giao diện về trạng thái khách
+  ✅ Không request ngoài lọt ra
+
+▶ B4.5 GET khi return bị 401, refresh 401 -> không có nút capture, không capture
+  ✅ [điều kiện dựng] Dựng đúng: GET bị 401, refresh được gọi đúng 1 lần
+  ✅ Không có nút xác nhận và không có capture nào
+  ✅ Không báo thành công giả
+  ✅ Không request ngoài lọt ra
+
+[B5] Cấu hình lỗi hoặc sai dạng: đóng cả hai cổng
+
+▶ B5 config 404: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 500: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 JSON rỗng {}: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 mảng: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 null: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 chuỗi JSON: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 không phải JSON (HTML): đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config 200 JSON hỏng cú pháp: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config thiếu mockPayments: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config thiếu paypalSandbox: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config paypalSandbox.enabled là chuỗi "true": đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config mockPayments.enabled là số 1: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config mockPayments là chuỗi: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config paypalSandbox là mảng: đóng cả hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ GET config đã được trả lời trước khi assert
+  ✅ Có nút "Tải lại cấu hình" (trạng thái lỗi, không đoán)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config treo (timeout): đóng cả hai cổng, request GET đã gửi nhưng chưa được trả lời
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ Fixture không hề trả lời GET config (treo thật)
+  ✅ Có nút "Tải lại cấu hình"
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 config lỗi rồi bấm "Tải lại cấu hình" với config hợp lệ: mở đúng cổng, vẫn không POST khi lỗi
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Trạng thái đầu: cổng đóng sau 500
+  ✅ Trước khi tải lại không phát POST /api/payments/paypal/topup
+  ✅ Trước khi tải lại không phát POST /api/payments/topup
+  ✅ Sau tải lại hợp lệ: mở PayPal Sandbox
+  ✅ Mở cổng không tự phát POST /api/payments/paypal/topup
+  ✅ Mở cổng không tự phát POST /api/payments/topup
+  ✅ Không request ngoài lọt ra
+
+[B5] Cấu hình hợp lệ: chỉ mở đúng provider server xác nhận
+
+▶ B5 paypal=true, mock=false, mode=sandbox: PayPal Sandbox
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config hợp lệ đã được fixture trả lời
+  ✅ Có ô nhập số tiền
+  ✅ Có nhãn PayPal Sandbox
+  ✅ Nút ghi rõ "Tạo yêu cầu nạp PayPal"
+  ✅ Không thẻ cổng mô phỏng
+  ✅ Chưa phát POST /api/payments/paypal/topup khi chưa bấm
+  ✅ Chưa phát POST /api/payments/topup khi chưa bấm
+  ✅ Không request ngoài lọt ra
+
+▶ B5 paypal=false, mock=true: cổng mô phỏng, không nhãn PayPal
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config hợp lệ đã được fixture trả lời
+  ✅ Có ô nhập số tiền
+  ✅ Có nhãn cổng thanh toán mô phỏng
+  ✅ Không gắn nhãn/nút PayPal Sandbox lên mock
+  ✅ Không có nút phê duyệt PayPal
+  ✅ Chưa phát POST /api/payments/paypal/topup khi chưa bấm
+  ✅ Chưa phát POST /api/payments/topup khi chưa bấm
+  ✅ Không request ngoài lọt ra
+
+▶ B5 paypal=false, mock=false: chưa sẵn sàng, không có nút tải lại (config hợp lệ)
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config hợp lệ đã được fixture trả lời
+  ✅ Thông điệp "chưa có cổng nào được bật" (config ok, không phải lỗi tải)
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 paypal=true mode=live: không mở PayPal
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config mode=live đã được fixture trả lời
+  ✅ Không có ô nhập số tiền (cả hai cổng đóng)
+  ✅ Không có nút tạo/preset nạp tiền
+  ✅ Hiện "Nạp tiền chưa sẵn sàng"
+  ✅ Không fallback: không thẻ mô phỏng, không nhãn PayPal Sandbox
+  ✅ Không phát POST /api/payments/paypal/topup
+  ✅ Không phát POST /api/payments/topup
+  ✅ Không gọi /mock-provider/
+  ✅ Không điều hướng sang PayPal
+  ✅ Không request ngoài lọt ra
+
+▶ B5 paypal=true mode=live + mock=true: chỉ mô phỏng nếu server bật mock, không PayPal
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config đã được fixture trả lời
+  ✅ Mở cổng mô phỏng theo mock=true
+  ✅ Không PayPal khi mode=live
+  ✅ Không request ngoài lọt ra
+
+▶ B5 paypal=true và mock=true cùng bật: PayPal được ưu tiên, không hiện hai cổng
+  ✅ [điều kiện dựng] GET /api/payments/paypal/config đã được gọi thật
+  ✅ [điều kiện dựng] Config hợp lệ đã được fixture trả lời
+  ✅ Hiện PayPal Sandbox
+  ✅ Không đồng thời hiện cổng mô phỏng
+  ✅ Không request ngoài lọt ra
+Kết quả trình duyệt (fixture, 142.0s): PASS 458 · FAIL 0 · SKIP 0 · CASES 54

@@ -1,0 +1,103 @@
+[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+T1 — đồng thời: hai capture, hai webhook trùng, hai đối soát, cùng một khoản
+  ✅ mọi nhánh đều kết thúc có kết quả hoặc mã lỗi rõ ràng
+  ✅ đúng một nhánh tất toán (APPLIED)
+  ✅ đúng một bút toán TOPUP_CREDIT
+  ✅ ví tăng đúng một lần số VND đã báo giá
+  ✅ PayPal chỉ nhận đúng một lệnh thu
+  ✅ request SUCCEEDED đúng một lần
+
+T2 — dữ liệu sai không ghi tiền
+  ✅ settle với orderId khác: bị từ chối
+  ✅ settle với số tiền khác: bị từ chối
+  ✅ settle với providerRef khác: bị từ chối
+  ✅ settle với trạng thái không phải SUCCEEDED: bị từ chối
+  ✅ settle với nguồn không hợp lệ: bị từ chối
+  ✅ settle với captureId rỗng: bị từ chối
+  ✅ không bút toán nào sau các lần sai
+  ✅ request vẫn PENDING
+  ✅ y thu thật, có capture ID riêng
+  ✅ capture ID của đơn khác bị từ chối (CONFLICT)
+  ✅ đơn x không được cộng tiền bằng capture của y
+  ✅ x vẫn PENDING
+  ✅ số tiền PayPal khác: chặn trước khi gửi lệnh thu
+  ✅ số tiền PayPal khác: không POST capture
+  ✅ số tiền PayPal khác: không có bút toán
+  ✅ tiền tệ khác: chặn trước khi gửi lệnh thu
+  ✅ tiền tệ khác: không POST capture
+  ✅ tiền tệ khác: không có bút toán
+  ✅ reference_id khác: chặn trước khi gửi lệnh thu
+  ✅ reference_id khác: không POST capture
+  ✅ reference_id khác: không có bút toán
+  ✅ merchant khác: chặn trước khi gửi lệnh thu
+  ✅ merchant khác: không POST capture
+  ✅ merchant khác: không có bút toán
+
+T3 — lỗi chèn giữa tất toán: rollback đủ, retry đúng một lần
+  ✅ after-wallet-update: lỗi chèn được ném ra
+  ✅ after-wallet-update: request PENDING, bằng chứng chưa VERIFIED (state=UNKNOWN)
+  ✅ after-wallet-update: không có bút toán
+  ✅ after-wallet-update: số dư không đổi
+  ✅ after-wallet-update: đối soát (GET) tất toán đúng một lần
+  ✅ after-wallet-update: đúng một bút toán sau khi phục hồi
+  ✅ after-wallet-update: ví tăng đúng một lần
+  ✅ before-status-change: lỗi chèn được ném ra
+  ✅ before-status-change: request PENDING, bằng chứng chưa VERIFIED (state=UNKNOWN)
+  ✅ before-status-change: không có bút toán
+  ✅ before-status-change: số dư không đổi
+  ✅ before-status-change: đối soát (GET) tất toán đúng một lần
+  ✅ before-status-change: đúng một bút toán sau khi phục hồi
+  ✅ before-status-change: ví tăng đúng một lần
+
+T4 — cô lập provider: request MOCK không vào nhánh PayPal và ngược lại
+  ✅ settle PayPal trên request MOCK: bị từ chối
+  ✅ request MOCK không đổi trạng thái
+  ✅ kết quả có chữ ký MOCK không tất toán request PayPal
+  ✅ request PayPal không có bút toán từ đường MOCK
+
+T5 — kết quả không rõ ràng: mất phản hồi, timeout sau khi thu, lỗi trước khi POST
+  ✅ mất phản hồi create: báo lỗi rõ, không tạo request giả
+  ✅ retry cùng requestId: không tạo order mới (idempotency key)
+  ✅ retry gắn đúng order đã tạo
+  ✅ create bị rớt trước khi tới PayPal: lỗi mạng
+  ✅ quá cửa sổ 5 phút khi chưa gắn order: không tạo order mới
+  ✅ không có lệnh create nào sau cửa sổ
+  ✅ mất phản hồi capture: báo lỗi
+  ✅ PayPal đã thu tiền (phía nhà cung cấp)
+  ✅ phía ta chưa cộng tiền khi chưa xác minh
+  ✅ hiển thị RECONCILING, không thành công giả
+  ✅ GET xác minh rồi tất toán
+  ✅ đúng một bút toán sau khi xác minh
+  ✅ POST treo quá thời gian chờ: PAYPAL_TIMEOUT
+  ✅ lệnh thu vẫn đang treo phía nhà cung cấp
+  ✅ lệnh muộn hoàn tất: PayPal đã thu
+  ✅ đối soát sau timeout: tất toán một lần
+  ✅ một bút toán dù có timeout
+
+T6 — barrier: holder cũ đang treo, hết lease, holder mới, đóng/webhook/GET, rồi POST cũ hoàn tất muộn
+  ✅ đóng hết hạn khi holder A đang giữ quyền: không thắng (CAPTURE_IN_FLIGHT)
+  ✅ webhook báo đã thu khi GET chưa thấy capture: từ chối 409, không tất toán (PayPal gửi lại)
+  ✅ chưa có bút toán khi holder A còn treo
+  ✅ holder mới sau khi hết lease: thu và tất toán
+  ✅ hai lệnh thu ở phía nhà cung cấp (A treo, B thu)
+  ✅ holder A đến muộn (422 ORDER_ALREADY_CAPTURED, GET xác minh): đầu ra DUPLICATE, không ghi đè
+  ✅ đúng một bút toán dù holder cũ hoàn tất muộn
+  ✅ request SUCCEEDED đúng một lần
+  ✅ thu tiền muộn trên request đã FAILED: RECOVERY_REQUIRED
+  ✅ bằng chứng thu muộn được giữ bền (capture ID đúng), không thành thành công giả
+  ✅ không cộng tiền vào request đã đóng
+  ✅ request FAILED không được mở lại
+  ✅ đối soát trên request đã đóng: vẫn RECOVERY_REQUIRED, không tự credit
+  ✅ vẫn không có bút toán sau đối soát
+
+Bất biến PayPal: dữ liệu sai bị phát hiện trong giao dịch có rollback
+  ✅ fixture "SUCCEEDED không có bút toán" bị bất biến PAYPAL_SUCCEEDED_HAS_ONE_CREDIT_AND_CAPTURE phát hiện
+  ✅ fixture "bút toán TOPUP_CREDIT cho request PENDING" bị bất biến PAYPAL_CREDIT_REQUIRES_SUCCEEDED phát hiện
+  ✅ sau rollback, ba bất biến PayPal đều đúng
+  ✅ chín bất biến cũ đều đúng (đã kiểm 9)
+  ✅ fixture không để lại bút toán
+  ✅ fixture không để lại trạng thái SUCCEEDED
+
+[M2 tất toán] 85 đạt, 0 hỏng, 0 lỗi đã biết (tái hiện)

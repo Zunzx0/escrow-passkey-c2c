@@ -1,0 +1,71 @@
+
+=== KIỂM THỬ MÔ HÌNH XÁC THỰC LAI: http://localhost:3910 ===
+  ✅ Email đăng ký được chuẩn hoá để đăng nhập không phân biệt chữ hoa
+  ✅ Đăng nhập được bằng email dù nhập chữ hoa
+  ✅ Email trùng khác kiểu chữ không tạo thêm tài khoản
+  ✅ Email sai định dạng bị từ chối
+  ✅ Hồ sơ công khai không lộ email đăng nhập của người bán
+  ✅ Tin đăng công khai không lộ email đăng nhập của người bán
+
+H01: Đăng ký hai bước — Passkey là bước bắt buộc để hoàn tất tài khoản
+  ✅ Tạo tài khoản bằng mật khẩu thành công (nhận 201)
+  ✅ Tài khoản mới ở trạng thái chờ đăng ký Passkey
+  ✅ Trường role gửi kèm bị bỏ qua, tài khoản vẫn chỉ có năng lực mua
+  ✅ Phiên cấp ra chỉ có phạm vi hoàn tất thiết lập
+  ✅ Phiên chưa hoàn tất không gọi được chức năng nghiệp vụ (nhận 403)
+  ✅ Phiên chưa hoàn tất không đặt mua được (nhận 403)
+  ✅ Tài khoản chưa hoàn tất thì chưa có ví
+  ✅ Đăng ký Passkey không có cờ xác minh người dùng bị từ chối (nhận 400)
+  ✅ Tài khoản KHÔNG được kích hoạt khi bước đăng ký Passkey thất bại
+  ✅ Đăng ký Passkey có xác minh người dùng thành công (nhận 201)
+  ✅ Tài khoản chuyển sang hoạt động
+  ✅ Ví chỉ được mở khi tài khoản hoạt động
+  ✅ Chín bất biến còn đúng sau H01
+
+H02: Hai lối đăng nhập cùng cấp một loại phiên
+  ✅ Đăng nhập bằng mật khẩu thành công
+  ✅ Đăng nhập bằng Passkey thành công
+  ✅ Hai lối cấp cùng một loại phiên, không lối nào được ưu ái hơn
+  ✅ Sai mật khẩu và sai tên đăng nhập đều bị từ chối
+  ✅ Hai trường hợp sai trả về CÙNG một thông báo, không lộ tài khoản nào có thật
+
+H03: Phiên tạo từ mật khẩu vẫn khoá được tiền, nhưng không đưa tiền ra khỏi ký quỹ
+  ✅ Phiên từ mật khẩu tạo được đơn mua (nhận 201)
+  ✅ Phiên từ mật khẩu KHOÁ ĐƯỢC tiền vào ký quỹ (nhận 200) — đúng như Chương 2 đã nêu
+  ✅ Giải ngân bằng phiên hợp lệ mà không có phiếu bị từ chối (nhận 401)
+  ✅ Xác thực lại bằng Passkey thì được cấp phiếu giải ngân
+  ✅ Có phiếu thì giải ngân được
+  ✅ Chín bất biến còn đúng sau H03
+
+H04: Đổi mật khẩu đòi xác thực lại và thu hồi mọi phiên khác
+  ✅ Đổi mật khẩu khi chỉ có mã phiên bị từ chối (nhận 401)
+  ✅ Phiếu quản lý thiết bị không đổi được mật khẩu (nhận 401)
+  ✅ Cấp được phiếu đổi mật khẩu
+  ✅ Có phiếu thì đổi được mật khẩu
+  ✅ Phiên cũ (kể cả phiên kẻ tấn công đang cầm) bị thu hồi sau khi đổi mật khẩu (nhận 401)
+  ✅ Mật khẩu cũ không dùng được nữa
+  ✅ Mật khẩu mới dùng được
+  ✅ Chín bất biến còn đúng sau H04
+
+H05: Phiếu uỷ quyền không dùng chéo giữa các hành động
+  ✅ Phiếu đổi mật khẩu không thêm được thiết bị (nhận 401)
+
+H06: Khởi tạo quản trị viên đi đúng thứ tự ba chặng
+  ✅ Đăng nhập bằng mật khẩu tạm cho phiên hạn chế
+  ✅ Bước kế tiếp là đổi mật khẩu tạm
+  ✅ Chưa hoàn tất thì không gọi được chức năng quản trị (nhận 403)
+  ✅ Không nhảy cóc sang đăng ký Passkey khi chưa đổi mật khẩu tạm (nhận 409)
+  ✅ Đổi được mật khẩu tạm
+  ✅ Sau khi đổi mật khẩu vẫn chưa hoạt động
+  ✅ Đổi mật khẩu xong vẫn chưa gọi được chức năng quản trị (nhận 403)
+  ✅ Đăng ký Passkey xong mới hoạt động
+  ✅ Hoàn tất ba chặng thì dùng được chức năng quản trị (nhận 200)
+  ✅ Quản trị viên không có ví, vì không phải một bên của giao dịch
+  ✅ Chín bất biến còn đúng sau H06
+
+H07: Bất biến số 8 — tài khoản hoạt động luôn có ít nhất một Passkey
+  ✅ Điểm cuối kiểm bất biến trả về đủ chín phép kiểm
+  ✅ Bất biến số 8 (tài khoản ACTIVE có Passkey) đúng
+  ✅ Không có bất biến nào bị vi phạm: []
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ (53 pass) ===

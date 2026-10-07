@@ -1,0 +1,88 @@
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+  ✅ Chuẩn bị: một đơn đang tranh chấp và một yêu cầu bán hàng đang chờ
+
+G0: Không có API nào biến người mua/bán thành ADMIN
+  ✅ Đăng ký kèm role/isAdmin/accountStatus vẫn đi hết luồng bình thường
+  ✅ Các trường quyền trong body đăng ký bị bỏ qua: role = BUYER
+  ✅ Không có dấu nguồn gốc admin cho tài khoản đăng ký
+  ✅ Tài khoản đó gọi API quản trị bị 403 (nhận 403)
+  ✅ Duyệt bán hàng đưa BUYER -> SELLER, không cao hơn
+
+G1: Admin bootstrap hợp lệ vẫn hoạt động, có dấu nguồn gốc
+  ✅ Admin bootstrap gọi /api/admin/invariants được (nhận 200)
+  ✅ Có dấu nguồn gốc BOOTSTRAP_CLI (thực tế BOOTSTRAP_CLI)
+  ✅ Admin bootstrap đọc được danh sách người dùng
+  ✅ Admin bootstrap vẫn xem được mọi đơn (hành vi cũ giữ nguyên)
+
+G2: Ràng buộc ở CSDL chặn nâng quyền và giả dấu nguồn gốc
+  ✅ UPDATE users SET role = ADMIN bị CSDL từ chối
+(node:32068) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+  ✅ role vẫn là BUYER
+  ✅ Không gắn được dấu nguồn gốc cho tài khoản mua đang ACTIVE
+  ✅ Không chèn được dấu LEGACY_BACKFILL ngoài lần migration
+  ✅ Dấu nguồn gốc không sửa được
+
+G3: Tài khoản ACTIVE bị sửa role=ADMIN, KHÔNG có ví
+  ✅ Dựng được trạng thái: role=ADMIN, ACTIVE, có Passkey, không có ví
+  ✅ Admin giả không ví: GET /api/admin/disputes bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/disputes/:id bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/disputes/:id/reauth/options bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/disputes/:id/reauth/verify bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/disputes/:id/refund bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/disputes/:id/release bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/seller-requests bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/seller-requests/:id/approve bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: POST /api/admin/seller-requests/:id/reject bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/users bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/transactions/:id/logs bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/transactions/:id/logs/verify bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/invariants bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: GET /api/admin/security-events bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả không ví: yêu cầu bán hàng vẫn PENDING (không bị duyệt/từ chối hộ)
+  ✅ Admin giả không ví: hồ sơ tranh chấp vẫn OPEN
+  ✅ Admin giả không ví: GET /api/transactions không trả đơn của người khác (nhận 0 đơn)
+  ✅ Admin giả không ví: GET /api/transactions/:id của người khác bị 403 (nhận 403)
+  ✅ Admin giả không ví: GET /api/transactions/:id/logs của người khác bị 403 (nhận 403)
+  ✅ Admin giả không ví: việc cần làm không có mục phân xử / duyệt bán hàng
+
+G4: Tài khoản ACTIVE CÓ ví bị sửa role=ADMIN
+  ✅ Admin giả có ví: GET /api/admin/disputes bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/disputes/:id bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/disputes/:id/reauth/options bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/disputes/:id/reauth/verify bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/disputes/:id/refund bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/disputes/:id/release bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/seller-requests bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/seller-requests/:id/approve bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: POST /api/admin/seller-requests/:id/reject bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/users bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/transactions/:id/logs bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/transactions/:id/logs/verify bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/invariants bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: GET /api/admin/security-events bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Admin giả có ví: yêu cầu bán hàng vẫn PENDING (không bị duyệt/từ chối hộ)
+  ✅ Admin giả có ví: hồ sơ tranh chấp vẫn OPEN
+  ✅ Admin giả có ví: GET /api/transactions không trả đơn của người khác (nhận 0 đơn)
+  ✅ Admin giả có ví: GET /api/transactions/:id của người khác bị 403 (nhận 403)
+  ✅ Admin giả có ví: GET /api/transactions/:id/logs của người khác bị 403 (nhận 403)
+  ✅ Admin giả có ví: việc cần làm không có mục phân xử / duyệt bán hàng
+
+G5: Tài khoản PENDING_PASSKEY bị sửa role=ADMIN không kích hoạt được
+  ✅ Hoàn tất Passkey bị 403 ADMIN_IDENTITY_INVALID (nhận 403 ADMIN_IDENTITY_INVALID)
+  ✅ Tài khoản vẫn PENDING_PASSKEY, không có credential nào
+
+G6: CSDL riêng — bootstrap qua biến môi trường và backfill một lần
+  ✅ Server con khởi động trên CSDL riêng (lần 1, có biến bootstrap)
+  ✅ Admin bootstrap từ biến môi trường có dấu BOOTSTRAP_ENV (thực tế [{"username":"envadmmuxvxnd2","role":"ADMIN","source":"BOOTSTRAP_ENV"}])
+  ✅ Server con khởi động lần 2 — migration tạo lại bảng nguồn gốc và backfill
+  ✅ ADMIN cũ không có ví được backfill LEGACY_BACKFILL
+  ✅ Admin bootstrap trước đó (không ví) cũng được backfill
+  ✅ ADMIN có ví USER (dấu hiệu bị nâng quyền) KHÔNG được backfill
+  ✅ CSDL từ chối chèn thẳng một tài khoản ADMIN đang ACTIVE
+  ✅ Server con khởi động lần 3
+  ✅ ADMIN chèn SAU migration không được backfill (backfill chỉ chạy một lần)
+  ✅ Dấu nguồn gốc đã có giữ nguyên qua các lần khởi động
+  ✅ 9 bất biến đều đúng
+
+ALL PASS

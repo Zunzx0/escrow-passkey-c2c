@@ -1,0 +1,20 @@
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+[migrate] PostgreSQL: đã áp migration 1 (initial-schema).
+[migrate] PostgreSQL: đã áp migration 2 (admin-provenance).
+[migrate] PostgreSQL: đã áp migration 3 (topup-request-idempotency).
+[migrate] PostgreSQL: đã áp migration 4 (payment-provider-isolation).
+[migrate] PostgreSQL: đã áp migration 5 (paypal-durable-bindings).
+[migrate] PostgreSQL: đã áp migration 6 (paypal-terminal-evidence).
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+Enclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:3910
+   WEBAUTHN_RP_ID=localhost  WEBAUTHN_ORIGIN=http://localhost:3910
+   Mở trình duyệt tại đúng địa chỉ trên (không dùng 127.0.0.1) để Passkeys hoạt động.
+   Môi trường: test · Cơ sở dữ liệu: PostgreSQL 127.0.0.1:55432/enclave_pro_release_test
+   CORS: tắt (chỉ cùng origin) · Giao diện tĩnh: bật
+   Đối soát thanh toán: mỗi 60s, bỏ qua yêu cầu mới hơn 30s
+   Dọn challenge: mỗi 600s, ân hạn 3600s
+
+(node:9832) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[notifications] không ghi được thông báo: relation "notifications" does not exist

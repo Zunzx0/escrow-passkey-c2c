@@ -1,0 +1,18 @@
+  ✅ SQL claim rejects PayPal even with forged MOCK snapshot
+  ✅ mock submit refuses actual PayPal row before provider call
+  ✅ no mock provider payment was created
+  ✅ mock expiry refuses PayPal
+  ✅ expiry did not close PayPal request
+  ✅ mock worker never scans or queries PayPal
+  ✅ mock settlement rejects matching PayPal ID/ref/amount
+  ✅ cross-provider webhook leaves request pending
+  ✅ cross-provider result never changes wallet
+  ✅ cross-provider result has no ledger credit
+  ✅ PayPal settlement stays disabled until capture integration is approved
+  ✅ mock checkout rejects same-owner PayPal request
+  ✅ mock topup replay rejects PayPal request key
+  ✅ provider is checked before terminal duplicate acceptance
+  ✅ DB trigger rejects changing provider
+  ✅ provider remains unchanged after rejected update
+
+Provider isolation: 16 checks passed

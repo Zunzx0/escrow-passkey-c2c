@@ -1,0 +1,97 @@
+[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+A1 — cấu hình công khai không lộ bí mật
+  ✅ GET /config: 200 không cần phiên
+  ✅ PayPal bật, mock tắt
+  ✅ cấu hình công khai không chứa client secret, merchant, webhook hay client ID
+
+A2 — phiên và quyền: không đăng nhập, quản trị viên chưa chứng minh, người ngoài
+  ✅ topup không có token: 401
+  ✅ fixture: BUYER bị sửa role ADMIN vẫn giữ ví 50.000đ
+  ✅ quản trị viên chưa chứng minh (có ví) bị 403 ở topup
+  ✅ quản trị viên chưa chứng minh (có ví) bị 403 ở checkout
+  ✅ quản trị viên chưa chứng minh (có ví) bị 403 ở capture
+  ✅ người mua tạo được yêu cầu nạp PayPal
+  ✅ người bán (SELLER) cũng được dùng tuyến nạp như người mua
+  ✅ người khác không mở được checkout của người mua
+  ✅ người khác không capture được yêu cầu của người mua
+  ✅ các lần từ chối không đổi số dư
+
+A3 — nạp: khoá chống lặp, kiểu dữ liệu, phản hồi
+  ✅ tạo mới: 200 (không dựa mã này để kết luận đã nạp)
+  ✅ phản hồi có provider, stage AWAITING_APPROVAL và orderId
+  ✅ báo giá do server tính: 20.000đ ở 25.000đ/USD = 0.80 USD
+  ✅ gửi lại cùng key: cùng request và cùng order
+  ✅ cùng key khác số tiền: IDEMPOTENCY_KEY_REUSED
+  ✅ thiếu requestId: VALIDATION_ERROR
+  ✅ số tiền dạng chuỗi: INVALID_AMOUNT
+  ✅ chưa có tiền nào được cộng khi chỉ tạo yêu cầu
+
+A4 — URL phê duyệt: chỉ chấp nhận origin sandbox của PayPal
+  ✅ checkout trả URL phê duyệt đúng origin sandbox
+  ✅ URL phê duyệt không an toàn: từ chối tạo yêu cầu
+  ✅ yêu cầu có URL không an toàn không được gắn order
+
+A5 — return/cancel không tự cộng tiền
+  ✅ trang quay về với query của PayPal: vẫn 200
+  ✅ query token/PayerID không cộng tiền
+  ✅ không có bút toán từ query
+
+A6 — PayPal từ chối trước khi người mua phê duyệt
+  ✅ 422 upstream: phản hồi HTTP có kiểm soát, không báo thu thành công
+  ✅ 422 upstream: yêu cầu người mua phê duyệt
+  ✅ fixture422 đã thực sự gửi một POST capture
+  ✅ không có bút toán khi PayPal chưa thu
+  ✅ GET checkout xác minh cần phê duyệt
+  ✅ 422 không được trở lại READY
+  ✅ giữ bằng chứng đã POST sau422
+  ✅ yêu cầu vẫn PENDING sau422
+  ✅ worker sau422 chỉ GET không POST capture
+  ✅ worker sau422 không cộng ví
+  ✅ sau khi phê duyệt: capture thành công một lần
+  ✅ ví tăng đúng 20.000đ (VND theo báo giá)
+
+A7 — PayPal trả 429 khi thu: đúng một lệnh POST, không lặp lại trong cùng lượt
+  ✅ PayPal 429: lỗi có kiểm soát, không thành công giả
+  ✅ chỉ một POST trong lượt này
+  ✅ sau 429: UNKNOWN, yêu cầu vẫn PENDING
+  ✅ không cộng tiền khi chưa xác minh
+
+A8 — giới hạn tần suất của chính ứng dụng
+  ✅ lần thứ 11 trong một phút: 429
+  ✅ 429 có Retry-After
+  ✅ các lần bị chặn không tới PayPal (không lệnh nào)
+
+A9 — webhook: chữ ký không hợp lệ không tất toán; quota webhook
+  ✅ webhook chữ ký sai: 401
+  ✅ PayPal xác minh chữ ký một lần và từ chối
+  ✅ đúng một bút toán từ lần thu thật (không do webhook sai)
+  ✅ webhook quá 60 lần/phút: 429
+  ✅ 429 local limiter trả Retry-After hợp lệ 1–60 giây (không phải upstream PayPal)
+
+A10 — cấu hình tắt: không có lệnh gọi mạng nào
+  ✅ tắt: POST /topup trả 503 PAYPAL_DISABLED
+  ✅ tắt: GET /df05ab63-46df-4d9f-a34a-a357cb00491b/checkout trả 503 PAYPAL_DISABLED
+  ✅ tắt: POST /df05ab63-46df-4d9f-a34a-a357cb00491b/capture trả 503 PAYPAL_DISABLED
+  ✅ tắt: POST /webhook trả 503 PAYPAL_DISABLED
+  ✅ cấu hình tắt: không lệnh nào tới PayPal
+
+A11 — lỗi báo cáo SAU commit không báo tiền bị rollback và không cộng lần nữa
+  ✅ tất toán đã commit: vẫn APPLIED dù báo cáo hỏng
+  ✅ ví tăng đúng một lần
+  ✅ lỗi báo cáo được ghi log, không làm rollback tiền
+  ✅ đúng một bút toán
+
+A12 — worker đối soát: chỉ GET, không lệnh thu, không bị đói
+  ✅ PayPal đã thu, phía ta mất phản hồi
+  ✅ đối soát không gửi lệnh thu nào (chỉ GET)
+  ✅ đối soát tất toán đúng một bút toán, dù có yêu cầu cũ không order
+  ✅ lượt đối soát báo đã tất toán ít nhất một yêu cầu PayPal
+
+A13 — quyền ở mức tuyến: quản trị viên chưa chứng minh không dùng được tuyến ví
+  ✅ cấu hình công khai vẫn đọc được (không cần quyền ví)
+  ✅ ba bất biến PayPal đúng sau toàn bộ luồng HTTP
+  ✅ chín bất biến cũ đúng (đã kiểm 9)
+
+[M2 HTTP] 67 đạt, 0 hỏng, 0 lỗi đã biết (tái hiện)

@@ -1,0 +1,13 @@
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+Enclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:3910
+   WEBAUTHN_RP_ID=localhost  WEBAUTHN_ORIGIN=http://localhost:3910
+   Mở trình duyệt tại đúng địa chỉ trên (không dùng 127.0.0.1) để Passkeys hoạt động.
+   Môi trường: test · Cơ sở dữ liệu: SQLite C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\data\test\pro-release-sqlite.db
+   CORS: tắt (chỉ cùng origin) · Giao diện tĩnh: bật
+   Đối soát thanh toán: mỗi 60s, bỏ qua yêu cầu mới hơn 30s
+   Dọn challenge: mỗi 600s, ân hạn 3600s
+
+[notifications] không ghi được thông báo: no such table: notifications

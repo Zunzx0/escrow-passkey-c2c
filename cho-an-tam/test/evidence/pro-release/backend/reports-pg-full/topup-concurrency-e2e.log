@@ -1,0 +1,66 @@
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+
+Chuẩn bị: quản trị viên, hai người mua
+  ✅ Ba tài khoản sẵn sàng
+
+C1: Hai /pay SUCCEEDED ĐỒNG THỜI trên cùng một trang thanh toán
+  [C1] /pay #1 -> 200    /pay #2 -> 409 ALREADY_SETTLED
+  ✅ Đúng một lần thanh toán được chấp nhận (thực tế 1)
+  ✅ Lần còn lại 409 ALREADY_SETTLED (nhận 409 ALREADY_SETTLED)
+  ✅ Yêu cầu SUCCEEDED, version đúng 1 (status=SUCCEEDED, version=1)
+  ✅ Ví cộng ĐÚNG MỘT LẦN 110000
+  ✅ Đúng 1 bút toán TOPUP_CREDIT
+  ✅ Sau C1: 9 bất biến đều đúng
+
+C2: Cùng một webhook đã ký gửi 6 lần ĐỒNG THỜI
+  [C2] 200 200d 200d 200d 200d 200d
+  ✅ Đúng 1 webhook được áp dụng (thực tế 1)
+  ✅ 5 webhook còn lại trả 200 duplicate:true (thực tế 5)
+  ✅ Ví cộng ĐÚNG MỘT LẦN 120000
+  ✅ Đúng 1 bút toán TOPUP_CREDIT
+  ✅ Sau C2: 9 bất biến đều đúng
+
+C3: Webhook SUCCEEDED và FAILED cho cùng yêu cầu gửi ĐỒNG THỜI
+  [C3] SUCCEEDED -> 200    FAILED -> 409 WEBHOOK_CONFLICT
+  ✅ Yêu cầu có đúng một kết quả cuối (SUCCEEDED)
+  ✅ Webhook mang kết quả thắng được áp dụng (200)
+  ✅ Webhook trái kết quả bị 409 WEBHOOK_CONFLICT, không ghi đè (nhận 409 WEBHOOK_CONFLICT)
+  ✅ Ví khớp kết quả cuối (Δ=130000, status=SUCCEEDED)
+  ✅ Số bút toán TOPUP_CREDIT khớp kết quả cuối
+  ✅ Sau C3: 9 bất biến đều đúng
+
+C4: Webhook thất lạc; webhook gửi lại x3 và 2 tiến trình đối soát chạy CÙNG LÚC
+  ✅ Provider đã SUCCEEDED, phía sàn vẫn PENDING
+  [C4] webhook áp dụng=1, worker áp dụng=0, mã thoát worker=0/0
+  ✅ Cả ba webhook đều nhận 200 (áp dụng hoặc duplicate)
+  ✅ Hai tiến trình đối soát kết thúc bình thường
+  ✅ Tổng cộng ĐÚNG MỘT lần áp dụng giữa webhook và worker (thực tế 1)
+  ✅ Yêu cầu SUCCEEDED, version đúng 1 (version=1)
+  ✅ Ví cộng ĐÚNG MỘT LẦN 140000
+  ✅ Đúng 1 bút toán TOPUP_CREDIT
+  ✅ Sau C4: 9 bất biến đều đúng
+
+A1: Quản trị viên không tạo được yêu cầu nạp tiền (không có ví)
+  ✅ Bị từ chối 400 WALLET_NOT_FOUND (nhận 400 WALLET_NOT_FOUND)
+  ✅ Không có bản ghi payment_requests nào của quản trị viên
+  ✅ Quản trị viên vẫn không có ví
+
+A2: Quản trị viên không xem / không "thanh toán hộ" trang checkout của người khác
+  ✅ Quản trị viên xem trang checkout của người khác bị 404 (nhận 404 UNKNOWN_PAYMENT)
+  ✅ Hai lần quản trị viên bấm thanh toán hộ (đồng thời) đều 404 (nhận 404/404)
+  ✅ Người dùng khác cũng bị 404 (nhận 404)
+  ✅ Yêu cầu vẫn PENDING, ví chủ yêu cầu không đổi
+
+A3: Quyền quản trị được kiểm đúng; không có điểm cuối cộng tiền cho quản trị viên
+  ✅ Người dùng thường gọi /api/admin/users bị 403 (nhận 403)
+  ✅ Người dùng thường gọi /api/admin/invariants bị 403 (nhận 403)
+  ✅ Người dùng thường gọi /api/admin/disputes bị 403 (nhận 403)
+  ✅ Không đăng nhập gọi /api/admin/invariants bị 401 (nhận 401)
+  ✅ Quản trị viên POST /api/admin/topup -> 404, không có đường cộng tiền thủ công (nhận 404)
+  ✅ Quản trị viên POST /api/admin/users/5db88eff-8710-4dcb-be86-cce1dbbf9212/topup -> 404, không có đường cộng tiền thủ công (nhận 404)
+  ✅ Quản trị viên POST /api/admin/wallets/5db88eff-8710-4dcb-be86-cce1dbbf9212/credit -> 404, không có đường cộng tiền thủ công (nhận 404)
+  ✅ Ví người dùng không đổi
+  ✅ Sau A1–A3: 9 bất biến đều đúng
+  ✅ Cuối bộ: /api/admin/invariants báo 9 bất biến đều đúng
+
+ALL PASS

@@ -1,0 +1,107 @@
+◇ injected env (0) from .env // tip: ⌘ suppress logs { quiet: true }
+
+=== E2E MUA BÁN C2C: http://localhost:3910 ===
+
+M00: Một form đăng ký duy nhất, luôn ra Người mua
+  ✅ Đăng ký thường tạo ra Người mua
+  ✅ Nhồi thêm role và mã bịa vào payload đều bị bỏ qua, tài khoản vẫn là Người mua
+
+M01: Nâng quyền quản trị, duyệt người bán và tạo hai người mua
+  ✅ Thủ tục vận hành nâng được Người mua lên Quản trị viên
+  ✅ Tạo tài khoản bằng Passkey thành công
+  ✅ Duyệt yêu cầu nâng Người mua lên Người bán
+  ✅ Người mua có số dư demo 5.000.000₫
+
+M02: Người bán đăng sản phẩm lên sàn
+  ✅ Đăng bán thành công (nhận 201)
+  ✅ Giá bán lưu đúng, là toàn bộ số tiền của giao dịch
+  ✅ Tin đăng mới chưa có đơn mua
+
+M03: Người mua không được đăng bán
+  ✅ Tài khoản Người mua bị chặn đăng bán (nhận 403)
+
+M04: Kiểm tra ràng buộc giá bán
+  ✅ Giá dưới mức tối thiểu bị từ chối (nhận 400)
+  ✅ Thiếu giá bán bị từ chối (nhận 400)
+
+M05: Đặt mua — server tự lấy giá từ tin đăng
+  ✅ Tạo đơn mua thành công (nhận 201)
+  ✅ Số tiền do server tính, đúng bằng giá tin đăng 850000
+  ✅ Đơn mới ở CREATED + NONE
+  ✅ Lời nhắn của người mua được lưu
+  ✅ Người bán không tự mua hàng của mình (nhận 403)
+
+M06: Đơn chưa thanh toán không giữ chỗ sản phẩm
+  ✅ Tạo đơn nhưng chưa khoá tiền thì tin đăng vẫn mở bán
+
+M07: Thanh toán — khoá toàn bộ số tiền vào Escrow
+  ✅ Đơn chuyển sang SECURED + LOCKED
+  ✅ Ví người mua giảm đúng 850.000₫
+  ✅ Khoá tiền xong thì tin đăng chuyển sang đã có đơn
+
+M08: Chống mua trùng — ai trả tiền trước giữ sản phẩm
+  ✅ Người đến sau không tạo được đơn (nhận 409 LISTING_SOLD)
+
+M09: Không đổi được giá khi sản phẩm đã có đơn mua
+  ✅ Đổi giá bị chặn (nhận 409 LISTING_SOLD)
+  ✅ Vẫn sửa được mô tả — chỉ giá mới bị khoá
+
+M10: Người bán giao hàng, báo đã giao đến
+  ✅ Đơn chuyển sang SHIPPING
+  ✅ Đơn chuyển sang WAIT_CONFIRM
+  ✅ Người mua không tự báo giao hàng được (nhận 403)
+
+M11: Giải ngân bắt buộc xác thực lại bằng Passkey
+  ✅ Giải ngân không kèm phiếu uỷ quyền bị từ chối (nhận 400)
+  ✅ Phiếu uỷ quyền giả bị từ chối (nhận 401)
+
+M12: Toàn bộ số tiền chuyển cho người bán, không tách khoản
+  ✅ Đơn chuyển sang COMPLETED + RELEASED
+  ✅ Người bán nhận đúng 850.000₫
+  ✅ Người mua không nhận lại đồng nào — toàn bộ tiền đã chuyển cho người bán
+
+M13: Gửi lại cùng mã yêu cầu không chuyển tiền hai lần
+  ✅ Gửi lại đúng mã yêu cầu trả về kết quả cũ
+  ✅ Số dư người bán không tăng thêm lần thứ hai
+
+M14: Bán xong, sản phẩm không quay lại sàn
+  ✅ Tin đăng vẫn ở trạng thái đã bán sau khi hoàn tất
+  ✅ Không đặt mua lại được sản phẩm đã bán (nhận 409)
+
+M15: Chuỗi nhật ký của giao dịch
+  ✅ Giao dịch có 5 bản ghi nhật ký
+  ✅ Chuỗi băm hợp lệ
+  ✅ Người ngoài giao dịch không đọc được nhật ký (nhận 403)
+
+M16: Người bán mở tranh chấp khi người mua phủ nhận đã nhận hàng
+  ✅ Người bán mở được tranh chấp (nhận 201)
+  ✅ Hồ sơ ghi đúng bên mở là người bán
+  ✅ Tiền chuyển sang trạng thái đóng băng
+  ✅ Đóng băng rồi thì lối giải ngân thông thường bị chặn (nhận 409)
+
+M17: Quản trị viên phân xử tranh chấp
+  ✅ Quản trị viên thấy hồ sơ tranh chấp đang mở
+  ✅ Cấp phiếu phân xử RELEASE thành công
+  ✅ Ngữ cảnh được ký mang đúng quyết định
+  ✅ Phân xử giải ngân thành công (nhận 200)
+  ✅ Trạng thái RELEASED phân biệt với COMPLETED, giữ lại căn cứ giải ngân
+  ✅ Người bán nhận toàn bộ số tiền theo phán quyết
+
+M18: LOCK concurrent — N buyer đặt và khoá tiền cùng lúc trên MỘT tin đăng
+  ✅ Buyer đua tạo đơn CREATED thành công (nhận 201)
+  ✅ Buyer đua tạo đơn CREATED thành công (nhận 201)
+  ✅ Buyer đua tạo đơn CREATED thành công (nhận 201)
+  ✅ Buyer đua tạo đơn CREATED thành công (nhận 201)
+  ✅ Buyer đua tạo đơn CREATED thành công (nhận 201)
+  ✅ Đúng 1/5 request LOCK đồng thời thành công (thực tế: 1)
+  ✅ 4 request còn lại đều nhận 409 (thực tế: 409,409,409,409)
+  ✅ Request thua đều nhận đúng mã lỗi LISTING_SOLD
+  ✅ listings.status chuyển đúng sang LOCKED
+  ✅ listings.version tăng đúng 1 lần (thực tế: 1)
+  ✅ Chỉ đúng 1 transaction ở SECURED trong số 5 đơn cạnh tranh (thực tế: 1)
+  ✅ Nếu một buyer đua bị trừ tiền thì trừ đúng 500.000₫
+  ✅ Chỉ đúng 1 buyer bị trừ tiền trong số 5 người đua (thực tế: 1)
+  ✅ Escrow chỉ được cộng tiền đúng 1 lần trong số 5 người đua (thực tế: 1)
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

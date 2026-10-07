@@ -1,0 +1,19 @@
+
+Bộ đếm kết quả kiểm tra
+  ✅ chỉ phép kiểm đạt: đếm đúng số dòng
+  ✅ có phép kiểm thất bại: đếm riêng đạt và hỏng
+  ✅ dòng tổng kết "TẤT CẢ PASS ✅" không bị tính là một phép kiểm đạt
+  ✅ tổng kết có kèm "(N pass)" cũng không bị tính
+  ✅ tổng kết "N TEST FAIL ❌" không làm đếm lỗi hai lần
+  ✅ một lỗi duy nhất vẫn là một lỗi, không thành hai
+  ✅ log rỗng
+  ✅ log không có phép kiểm
+  ✅ log chỉ có dòng tổng kết: 0 phép kiểm
+  ✅ đầu vào không phải chuỗi không làm hỏng bộ đếm
+  ✅ chấp nhận thụt lề bất kỳ (không thụt, bốn dấu cách, tab)
+  ✅ xuống dòng kiểu Windows (CRLF)
+  ✅ emoji nằm giữa nhãn của một phép kiểm không bị đếm thêm
+  ✅ log mô phỏng một bộ thật: 3 phép kiểm, không tính dòng tổng kết
+
+ALL PASS
+

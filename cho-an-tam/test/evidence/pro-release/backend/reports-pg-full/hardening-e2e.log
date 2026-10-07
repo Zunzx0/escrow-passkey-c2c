@@ -1,0 +1,35 @@
+
+=== KIỂM THỬ LỚP BẢO VỆ ỨNG DỤNG WEB: http://localhost:3910 ===
+
+P1-1: Tiêu đề bảo vệ
+  ✅ X-Content-Type-Options: nosniff
+  ✅ X-Frame-Options: DENY
+  ✅ CSP có frame-ancestors 'none' (chống clickjacking)
+  ✅ CSP cấm script nội tuyến (script-src 'self', không có unsafe-inline)
+  ✅ CSP cấm style nội tuyến (style-src 'self', không có unsafe-inline)
+  ✅ CSP có object-src 'none'
+  ✅ Có Referrer-Policy
+  ✅ Không lộ X-Powered-By
+  ✅ CSP của Vercel cũng cấm style nội tuyến
+  ✅ /health không thuộc /api nên không bị ép no-store
+  ✅ Phản hồi API mang Cache-Control: no-store
+  ✅ robots.txt tồn tại và có chỉ dẫn cho crawler
+  ✅ security.txt tồn tại và có kênh báo cáo lỗ hổng
+  ✅ security.txt khai báo đúng địa chỉ chuẩn trên enclave.id.vn
+  ✅ security.txt có thời hạn còn hiệu lực
+
+P1-2: Giới hạn tần suất trên điểm đăng nhập
+  (bỏ qua: RATE_LIMIT_AUTH_PER_MINUTE=1000 quá cao để kiểm nhanh)
+
+P1-3: Nhật ký sự kiện an toàn
+  ✅ Giải ngân bằng phiếu bịa bị từ chối (nhận 409)
+  ✅ Đọc được nhật ký sự kiện an toàn
+  ✅ Lần bị từ chối vừa rồi đã được ghi lại (các loại thấy được: INVALID_STATE, ACCOUNT_ACTIVATED, ADMIN_BOOTSTRAP_PASSWORD_CHANGED, REAUTH_REQUIRED, LOGIN_PASSWORD_FAILED, PASSWORD_CHANGED)
+  ✅ Việc kích hoạt tài khoản được ghi là sự kiện ALLOWED
+  ✅ Việc đổi mật khẩu tạm của quản trị viên được ghi lại
+  ✅ Ghi cả hai chiều: 43 ALLOWED, 29 DENIED
+  ✅ Không có mật khẩu, phiếu uỷ quyền hay mã phiên nào lọt vào nhật ký
+  ✅ Không có trường token/password/reauthGrant/challenge trong nhật ký
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ (23 pass) ===
+

@@ -1,0 +1,58 @@
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+
+Chuẩn bị: quản trị viên, người bán, người mua
+  ✅ Ba tài khoản sẵn sàng
+
+A1: Sai KIỂU -> 400 INVALID_AMOUNT, không tạo bản ghi
+  ✅ số lẻ 1000.5: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ số lẻ 1000.5: không có giao dịch nào được tạo
+  ✅ số lẻ 150000.01: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ số lẻ 150000.01: không có giao dịch nào được tạo
+  ✅ chuỗi số "100000": 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ chuỗi số "100000": không có giao dịch nào được tạo
+  ✅ chuỗi "1e5": 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ chuỗi "1e5": không có giao dịch nào được tạo
+  ✅ chuỗi rỗng "": 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ chuỗi rỗng "": không có giao dịch nào được tạo
+  ✅ boolean true: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ boolean true: không có giao dịch nào được tạo
+  ✅ boolean false: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ boolean false: không có giao dịch nào được tạo
+  ✅ mảng [100000]: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ mảng [100000]: không có giao dịch nào được tạo
+  ✅ object {"v":100000}: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ object {"v":100000}: không có giao dịch nào được tạo
+  ✅ vượt 2^53: 9007199254740993: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ vượt 2^53: 9007199254740993: không có giao dịch nào được tạo
+  ✅ 1e20: 400 INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ 1e20: không có giao dịch nào được tạo
+
+A2: Đúng kiểu nhưng NGOÀI PHẠM VI -> 400 AMOUNT_OUT_OF_RANGE, không tạo bản ghi
+  ✅ 0: 400 AMOUNT_OUT_OF_RANGE (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ 0: không có giao dịch nào được tạo
+  ✅ âm -1000: 400 AMOUNT_OUT_OF_RANGE (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ âm -1000: không có giao dịch nào được tạo
+  ✅ dưới mức tối thiểu 999: 400 AMOUNT_OUT_OF_RANGE (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ dưới mức tối thiểu 999: không có giao dịch nào được tạo
+  ✅ trên mức tối đa 100000001: 400 AMOUNT_OUT_OF_RANGE (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ trên mức tối đa 100000001: không có giao dịch nào được tạo
+  ✅ 9007199254740991 (MAX_SAFE_INTEGER): 400 AMOUNT_OUT_OF_RANGE (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ 9007199254740991 (MAX_SAFE_INTEGER): không có giao dịch nào được tạo
+
+A3: Thiếu amount vẫn là lỗi thiếu trường
+  ✅ Thiếu amount: 400 VALIDATION_ERROR (nhận 400 VALIDATION_ERROR)
+
+A4: Giá trị hợp lệ được lưu ĐÚNG nguyên giá trị, kiểu số nguyên
+  ✅ 1000: 201 CREATED, amount trả về 1000 (nhận 201 )
+  ✅ 1000: CSDL lưu đúng 1000 (đọc lại 1000)
+  ✅ 2000000: 201 CREATED, amount trả về 2000000 (nhận 201 )
+  ✅ 2000000: CSDL lưu đúng 2000000 (đọc lại 2000000)
+  ✅ 100000000: 201 CREATED, amount trả về 100000000 (nhận 201 )
+  ✅ 100000000: CSDL lưu đúng 100000000 (đọc lại 100000000)
+
+A5: Giao dịch hợp lệ vẫn đi tiếp được; không bản ghi nào mang amount sai kiểu
+  ✅ Khoá tiền giao dịch thủ công hợp lệ được (nhận 200 )
+  ✅ Không giao dịch nào của người mua này mang amount không phải số nguyên
+  ✅ 9 bất biến đều đúng
+
+ALL PASS

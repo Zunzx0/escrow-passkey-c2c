@@ -1,0 +1,64 @@
+◇ injected env (0) from .env // tip: ⌘ enable debugging { debug: true }
+
+=== E2E THÔNG BÁO + VIỆC CẦN XỬ LÝ: http://localhost:3910 ===
+
+N01: Mỗi bước vòng đời đơn hàng sinh đúng thông báo cho đúng người
+  ✅ Đơn vừa tạo: người mua có việc "Thanh toán đơn hàng"
+  ✅ Khoá tiền xong: người bán nhận ORDER_PAID
+  ✅ Người mua KHÔNG nhận ORDER_PAID
+  ✅ Người bán có việc "Xác nhận đơn hàng mới"
+  ✅ Việc "Thanh toán" của người mua đã biến mất
+  ✅ Người mua KHÔNG xác nhận đơn thay người bán được (nhận 403)
+  ✅ Người bán xác nhận đơn: ghi mốc sellerAckAt, trạng thái vẫn SECURED (không phải chuyển trạng thái)
+  ✅ Không xác nhận lần hai được (nhận 409)
+  ✅ Người mua nhận ORDER_ACKNOWLEDGED
+  ✅ Việc của người bán chuyển từ "Xác nhận đơn" sang "Giao hàng"
+  ✅ Xác nhận đơn được ghi đúng một bản ghi vào chuỗi nhật ký
+
+N02: "Việc cần xử lý" bám trạng thái thật, không bám bảng thông báo
+  ✅ Đã xoá hết thông báo của người bán
+  ✅ Việc "Giao hàng" VẪN còn — mất thông báo không làm mất việc cần làm
+  ✅ Gửi hàng xong: người mua nhận ORDER_SHIPPED
+  ✅ Người mua có việc "Xác nhận đã nhận hàng"
+  ✅ Việc "Giao hàng" của người bán đã biến mất
+  ✅ Nhận hàng xong: người mua nhận nhắc xác nhận giải ngân
+  ✅ Người bán cũng được báo người mua đã nhận hàng
+  ✅ Người mua có việc "Xác nhận giải ngân hoặc mở tranh chấp"
+
+N03: Tranh chấp và phân xử
+  ✅ Người mua mở tranh chấp
+  ✅ Người bán (bên kia) nhận DISPUTE_OPENED
+  ✅ Người mở tranh chấp KHÔNG tự nhận thông báo
+  ✅ Quản trị viên nhận DISPUTE_OPENED
+  ✅ Quản trị viên có việc "Phân xử tranh chấp"
+  ✅ Việc "Xác nhận giải ngân" của người mua đã biến mất
+  ✅ Quản trị viên phân xử hoàn tiền
+  ✅ Người mua nhận DISPUTE_RESOLVED
+  ✅ Người bán nhận DISPUTE_RESOLVED
+  ✅ Việc "Phân xử" của quản trị viên đã biến mất
+
+N04: Giải ngân thông thường báo cho người bán
+  ✅ Người mua giải ngân
+  ✅ Người bán nhận ORDER_COMPLETED
+
+N05: Nạp tiền — thành công/thất bại đều báo, webhook lặp không sinh thông báo thừa
+  ✅ Đúng MỘT thông báo TOPUP_SUCCEEDED dù webhook gửi hai lần
+  ✅ Nạp tiền thất bại: người dùng nhận TOPUP_FAILED
+  ✅ Còn yêu cầu nạp tiền PENDING thì có việc "Nạp tiền đang chờ xác nhận"
+
+N06: Đọc/đánh dấu chỉ trên thông báo của chính mình
+  ✅ Người mua có 9 thông báo chưa đọc
+  ✅ Người khác KHÔNG đánh dấu được thông báo của người mua (nhận 404)
+  ✅ Người khác không thấy thông báo của người mua
+  ✅ Chủ thông báo đánh dấu đã đọc
+  ✅ Số chưa đọc giảm đúng 1 (9 -> 8)
+  ✅ Đánh dấu tất cả đã đọc
+
+N07: Bảng thông báo hỏng thì nghiệp vụ vẫn thành công
+  ✅ Gửi hàng VẪN thành công khi không ghi được thông báo (nhận 200)
+  ✅ Thông báo cho bước đó không có (ghi hỏng đã bị nuốt)
+  ✅ Nhưng việc "Xác nhận đã nhận hàng" vẫn hiện — suy từ trạng thái thật
+  ✅ Chín bất biến vẫn đúng sau toàn bộ kịch bản
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

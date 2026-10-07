@@ -1,0 +1,53 @@
+  ✅ created request has persistent PayPal quote, stage and provider
+  ✅ server quote uses exact stored VND/USD and demo label
+  ✅ approval URL comes from canonical Sandbox order
+  ✅ order creation never credits SQL wallet/ledger
+  ✅ create replay keeps request/order/quote without another create POST
+  ✅ same key different amount is rejected
+  ✅ authenticated capture settles actual request
+  ✅ wallet credited exactly VND quote
+  ✅ exactly one stable SQL TOPUP_CREDIT
+  ✅ capture evidence committed with wallet
+  ✅ capture/webhook/reconciler replay never recharges
+  ✅ three channels keep one real credit
+  ✅ other user cannot capture request
+  ✅ unverified webhook cannot settle
+  ✅ signed mock result cannot touch PayPal request
+  ✅ fault rolls back request/evidence and leaves capture unresolved
+  ✅ fault rolls back SQL balance and ledger
+  ✅ GET reconciler recovers captured money after SQL rollback
+  ✅ recovery writes evidence/credit exactly once
+  ✅ network uncertainty never produces fake success or FAILED
+  ✅ same bound order can recover after ambiguous POST
+  ✅ stale-holder rollback then evidence transaction recovers exactly one credit
+  ✅ late capture on closed request preserves recovery evidence
+  ✅ manual recovery never auto-credits or reopens failed request
+  ✅ VERIFIED/PENDING legacy state requires real settlement instead of false replay
+  ✅ three channels race on genuinely pending captured request: exactly one winner
+  ✅ concurrent first settlement keeps exactly one real wallet/ledger credit
+  ✅ changed merchant blocks before capture or credit
+  ✅ expired ambiguous create cannot mint a fresh order
+  ✅ worker skips stale unbound head and recovers later captured payment under limit
+  ✅ FAILED posted head records reconciliation time even when PayPal remains pending
+  ✅ FAILED head rotates so later captured request settles under small limit
+  ✅ public config exposes enabled Sandbox mode without secrets
+  ✅ capture route requires real session token
+  ✅ HTTP owner check rejects other account
+  ✅ authenticated HTTP replay returns durable status
+  ✅ unproven ADMIN cannot use PayPal wallet route /a295c487-5e16-440e-8ef5-e004e60348c9/capture
+  ✅ unproven ADMIN cannot use PayPal wallet route /a295c487-5e16-440e-8ef5-e004e60348c9/checkout
+  ✅ unproven ADMIN cannot use PayPal wallet route /topup
+  ✅ PayPal HTTP creation requires requestId
+  ✅ disabled configuration fails closed
+  ✅ disabled runtime makes no remote payment call
+  ✅ webhook quota returns 429 and Retry-After
+  ✅ webhook limiter prevents additional provider verification calls
+  ✅ authenticated capture quota cannot be bypassed by repeats
+  ✅ disabled HTTP /topup makes no payment call
+  ✅ disabled HTTP /a295c487-5e16-440e-8ef5-e004e60348c9/checkout makes no payment call
+  ✅ disabled HTTP /a295c487-5e16-440e-8ef5-e004e60348c9/capture makes no payment call
+  ✅ disabled HTTP /webhook makes no payment call
+  ✅ PayPal invariant PAYPAL_SUCCEEDED_HAS_ONE_CREDIT_AND_CAPTURE
+  ✅ PayPal invariant PAYPAL_CAPTURE_BOUND_ONCE
+  ✅ PayPal invariant PAYPAL_CREDIT_REQUIRES_SUCCEEDED
+PayPal integration: 52 checks passed

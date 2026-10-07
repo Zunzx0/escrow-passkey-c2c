@@ -1,0 +1,37 @@
+﻿
+=== VÒNG KIỂM THỬ ĐẦY ĐỦ — môi trường test (http://localhost:3910) ===
+  Cơ sở dữ liệu: C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\data\test\pro-release-sqlite.db
+  Báo cáo:       C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\reports\suite-2026-10-07T08-50-01-136Z
+
+  Đã xoá cơ sở dữ liệu test — mọi bộ chạy từ trạng thái trống.
+
+  ▶ count-marks-unit     PASS   14 ✓   0 ✗  0s
+  ▶ invariants-unit      PASS   39 ✓   0 ✗  1s
+  ▶ e2e                  FAIL    0 ✓   0 ✗  1s
+  ▶ market-e2e           FAIL    0 ✓   0 ✗  1s
+  ▶ security-e2e         FAIL    0 ✓   0 ✗  1s
+  ▶ hybrid-e2e           FAIL    0 ✓   0 ✗  2s
+  ▶ hardening-e2e        FAIL    0 ✓   0 ✗  1s
+  ▶ payment-e2e          FAIL    0 ✓   0 ✗  1s
+  ▶ reconcile-e2e        FAIL    0 ✓   0 ✗  1s
+  ▶ counter-e2e          FAIL    0 ✓   0 ✗  1s
+  ▶ cleanup-e2e          FAIL    0 ✓   0 ✗  1s
+  ▶ notification-e2e     FAIL    0 ✓   0 ✗  1s
+  ▶ checkout-e2e         FAIL    0 ✓   0 ✗  1s
+  ▶ dispute-race-e2e     FAIL    0 ✓   0 ✗  1s
+  ▶ security-report-regression-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ username-enumeration-e2e PASS   12 ✓   0 ✗  9s
+  ▶ listing-lifecycle-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ passkey-registration-race-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ topup-concurrency-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ manual-transaction-amount-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ topup-idempotency-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ payment-provider-isolation-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ paypal-integration-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ admin-provenance-e2e FAIL    0 ✓   0 ✗  1s
+  ▶ rollback-e2e         FAIL    0 ✓   0 ✗  1s  (FAULT_INJECT=release:after-wallet-update)
+  ▶ check-invariants     PASS  chín bất biến đúng trên DB test sau toàn bộ vòng chạy
+
+=== CÓ BỘ HỎNG ❌ — 74 phép kiểm đạt, 0 hỏng ===
+  Báo cáo: reports\suite-2026-10-07T08-50-01-136Z\summary.md
+

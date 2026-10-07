@@ -1,0 +1,9 @@
+  ✅ real application migration/startup succeeds
+  ✅ amount/status/ref/version/claim/timestamps preserved
+  ✅ wallet rows preserved
+  ✅ ledger rows preserved
+  ✅ legacy provider defaults MOCK
+  ✅ new binding table starts empty
+  ✅ real application migration/startup succeeds
+  ✅ second startup is idempotent
+Migration checks passed: 8

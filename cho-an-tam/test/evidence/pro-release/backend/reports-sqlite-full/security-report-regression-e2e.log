@@ -1,0 +1,81 @@
+◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+
+=== HỒI QUY BÁO CÁO KIỂM THỬ BẢO MẬT: http://localhost:3910 ===
+  ✅ Bốn tài khoản sẵn sàng
+
+SR01: Mock Payment Provider từ chối request không có access token
+  ✅ Tạo được yêu cầu nạp tiền để có providerRef thật dùng cho phần sau
+  ✅ Xem trang thanh toán không kèm token bị từ chối (nhận 401)
+  ✅ Chốt thanh toán không kèm token bị từ chối (nhận 401)
+
+SR02: Không xem/chốt được payment của người khác chỉ bằng providerRef
+  ✅ Người ngoài xem payment của người khác nhận 404 UNKNOWN_PAYMENT, không phải 403 (nhận 404 UNKNOWN_PAYMENT)
+  ✅ Người ngoài chốt payment của người khác nhận 404 UNKNOWN_PAYMENT (nhận 404 UNKNOWN_PAYMENT)
+  ✅ Ví người ngoài không đổi — không "chốt hộ" được dù request bị chặn
+  ✅ Chính chủ vẫn xem được bình thường — 404 ở trên là CHẶN đúng người, không phải lỗi chung
+
+SR03: Một payment chỉ chốt được MỘT LẦN, kể cả khi hai request đua nhau
+  ✅ Đúng một trong hai lệnh chốt thành công (thực tế: 1)
+  ✅ Lệnh thua nhận đúng 409 ALREADY_SETTLED (nhận 409 ALREADY_SETTLED)
+  ✅ Ví chỉ đổi đúng 0 hoặc đúng 70000, không nhân đôi (thực tế Δ=70000)
+
+SR04: amount sai kiểu hoặc ngoài khoảng đều bị từ chối, không ép kiểu ngầm
+  ✅ amount kiểu chuỗi số bị từ chối với INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ amount kiểu mảng bị từ chối với INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ amount kiểu boolean bị từ chối với INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ amount kiểu null bị từ chối với INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ amount kiểu số thực bị từ chối với INVALID_AMOUNT (nhận 400 INVALID_AMOUNT)
+  ✅ Số tiền dưới ngưỡng tối thiểu bị từ chối (nhận 400 AMOUNT_OUT_OF_RANGE)
+  ✅ Số tiền vượt ngưỡng một request bị từ chối (nhận 400 AMOUNT_OUT_OF_RANGE)
+
+SR05: Giới hạn số yêu cầu nạp PENDING, kể cả khi nhiều request đua nhau
+  ✅ Đúng 5 request thành công dù 9 request đua nhau (thực tế: 5)
+  ✅ 4 request còn lại bị TOPUP_LIMIT_EXCEEDED (thực tế: 4)
+  ✅ Số dòng PENDING thật trong DB đúng bằng giới hạn, không lệch do race (thực tế: 5)
+
+SR06: Giới hạn tổng nạp 24 giờ, và giới hạn số dư ví dự kiến
+  ✅ Nạp 50000000 khi chưa chạm trần ngày (đã nạp 0) thành công
+  ✅ Nạp 50000000 khi chưa chạm trần ngày (đã nạp 50000000) thành công
+  ✅ Vượt hạn mức ngày bị từ chối (nhận 409 TOPUP_LIMIT_EXCEEDED)
+  ✅ Nạp tiền làm vượt trần số dư ví bị từ chối (nhận 409 TOPUP_LIMIT_EXCEEDED)
+  ✅ Nạp tiền còn trong hạn mức ví vẫn được chấp nhận (nhận 201)
+
+SR07: Một phiếu CHANGE_PASSWORD không thực hiện thành công hai lần, kể cả với token mới
+  ✅ Cấp được phiếu CHANGE_PASSWORD (nhận 200)
+  ✅ Đổi mật khẩu lần đầu bằng phiếu thành công (nhận 200 )
+  ✅ Access token mới sau khi đổi mật khẩu còn hiệu lực (nhận 200)
+  ✅ Dùng lại ĐÚNG phiếu đó với token mới, mật khẩu hợp lệ khác bị 401 REAUTH_REQUIRED (nhận 401 REAUTH_REQUIRED)
+  ✅ Phiếu trong DB đã có used_at (nhận 2026-10-07T08:58:04.589Z)
+  ✅ Mật khẩu vẫn là mật khẩu của lần đổi ĐẦU — lần hai không có tác dụng (đăng nhập nhận 200)
+
+SR08: Đăng xuất thu hồi phiên tại máy chủ — access token cũ dùng lại bị 401
+  ✅ Token còn hiệu lực trước khi đăng xuất
+  ✅ Đăng xuất thành công (nhận 200)
+  ✅ Dùng lại ĐÚNG access token cũ sau khi đăng xuất bị 401 (nhận 401)
+
+SR09: /health ở production chỉ trả {status:"OK"}, không lộ cấu hình nội bộ
+  ✅ Server con (APP_ENV=production) khởi động và trả lời /health (log: ◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+Enclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://lo)
+  ✅ /health production CHỈ có field "status" (thực tế: {"status":"OK"})
+  ✅ Server con khởi động với đối soát và dọn challenge ĐỀU TẮT
+  ✅ Server con không chạy đối soát, dọn challenge hay khởi tạo quản trị viên
+  ✅ Server con đã thoát hẳn trước khi chạy bước tiếp theo
+
+SR10: Body JSON hỏng trả lỗi chung, không lộ thông báo của parser
+  ✅ Body JSON hỏng trả 400 INVALID_JSON (nhận 400 INVALID_JSON)
+  ✅ Thông báo không lộ chi tiết của parser (nhận: "Nội dung gửi lên không phải JSON hợp lệ")
+
+SR11: Tuyến API không tồn tại trả JSON thống nhất, không phải trang lỗi Express
+  ✅ Tuyến /api không tồn tại trả 404 NOT_FOUND dạng JSON (nhận 404 {"error":"NOT_FOUND","message":"Không tìm thấy tài nguyên"})
+  ✅ Content-Type là JSON, không phải text/html (nhận application/json; charset=utf-8)
+  ✅ Không phải trang lỗi mặc định của Express (không có "Cannot GET/POST")
+  ✅ Tuyến /mock-provider không tồn tại cũng trả JSON thống nhất (nhận 404)
+
+SR12: Chín bất biến tài chính vẫn đúng sau toàn bộ các bước trên
+  ✅ 9 bất biến đúng (violations=[])
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

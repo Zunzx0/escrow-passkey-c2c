@@ -1,0 +1,77 @@
+◇ injected env (0) from .env // tip: ⌁ auth for agents [www.vestauth.com]
+
+=== E2E TEST: http://localhost:3910 ===
+
+TC01: Đăng ký Buyer
+  ✅ Đăng ký Buyer trả 201
+  ✅ Buyer có sẵn 5.000.000 VND
+  ✅ Có wallet entry DEMO_TOPUP
+
+TC02: Không cho tự đăng ký ADMIN
+  ✅ Đăng ký luôn ra BUYER, không thể tự nhận role ADMIN
+  ✅ Client gửi kèm role=ADMIN bị bỏ qua, server vẫn cấp BUYER
+  ✅ Thủ tục vận hành nâng được BUYER lên ADMIN
+  ✅ Duyệt yêu cầu nâng BUYER lên SELLER
+  ✅ Seller chưa có khoản nào bị khóa
+
+TC05: Đăng nhập lại bằng Passkey
+  ✅ Đăng nhập lại thành công, có JWT
+
+TC06: Buyer tạo giao dịch
+  ✅ Transaction CREATED
+
+TC10: Seller không sở hữu bị chặn
+  ✅ Seller khác bị 403 khi thao tác giao dịch không sở hữu
+
+TC11: Không cho nhảy cóc trạng thái
+  ✅ Release khi còn CREATED bị 409 INVALID_STATE
+
+TC07: Buyer không đủ số dư bị rollback
+  ✅ Tạo được giao dịch ở mức tối đa cho phép
+  ✅ Khóa tiền vượt số dư bị từ chối (400)
+  ✅ Số dư Buyer KHÔNG đổi sau lock thất bại (rollback đúng)
+
+TC08+TC09: Lock Escrow + gửi lại cùng requestId
+  ✅ Lock Escrow -> SECURED+LOCKED
+  ✅ Buyer giảm đúng 2.000.000
+  ✅ Buyer không có locked (locked nằm ở ví Escrow)
+  ✅ Gửi lại cùng requestId trả 200 (idempotent)
+  ✅ Số dư KHÔNG bị trừ thêm lần 2 (idempotency đúng)
+
+UC06: Seller cập nhật giao hàng
+  ✅ SECURED -> SHIPPING
+  ✅ SHIPPING -> WAIT_CONFIRM
+
+TC12+TC13: Re-auth grant chỉ dùng đúng transaction
+  ✅ Tạo reauth challenge OK
+  ✅ Tạo grant thành công
+  ✅ Grant của giao dịch A KHÔNG dùng được cho giao dịch B
+
+TC14+TC15: Release hợp lệ + release lần hai bị chặn
+  ✅ Release -> COMPLETED+RELEASED
+  ✅ Seller nhận đúng 2.000.000 so với số dư trước khi giải ngân
+  ✅ Release lần hai (grant đã dùng) bị từ chối
+
+TC22: Ledger đủ 2 entries mỗi thao tác tài chính
+  ✅ Buyer có đúng 1 entry ESCROW_LOCK_DEBIT (không trùng lặp)
+
+TC17: Transaction version cũ bị 409
+
+TC16: Hai giải ngân đồng thời trên cùng transaction — chỉ 1 thành công
+  ✅ Chỉ đúng 1/2 request release đồng thời thành công (thực tế: 1)
+
+TC19-21: Dispute + Admin refund/release
+  ✅ Dispute -> DISPUTED+FROZEN
+  ✅ Phân xử KHÔNG kèm phiếu bị từ chối (nhận 401)
+  ✅ Cấp phiếu phân xử REFUND thành công
+  ✅ Phiếu REFUND dùng cho RELEASE bị từ chối (nhận 401)
+  ✅ Admin refund -> REFUNDED+REFUNDED
+  ✅ Dùng lại phiếu phân xử đã tiêu thụ bị từ chối (nhận 409)
+  ✅ Gửi kèm role và mã bịa đều bị bỏ qua, tài khoản vẫn là BUYER
+
+TC23-26: Hash Chain verify
+  ✅ Transaction 9efd15d9-2ae6-45d3-945a-4c6a3be75273 có 5 audit logs
+  ✅ Hash Chain hợp lệ trước khi sửa
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

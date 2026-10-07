@@ -1,0 +1,13 @@
+  ✅ Old v5 permits declined evidence (bug reproduced)
+  ✅ Upgrade refuses invalid historical evidence
+  ✅ Rejected upgrade preserves evidence; never relabels it
+  ✅ Clean old v5 upgrades through actual db.js
+  ✅ Upgraded old table rejects declined evidence at DB layer
+  ✅ Valid evidence survives idempotent restart
+  ✅ Old v5 permits declined evidence (bug reproduced)
+  ✅ Upgrade refuses invalid historical evidence
+  ✅ Rejected upgrade preserves evidence; never relabels it
+  ✅ Clean old v5 upgrades through actual db.js
+  ✅ Upgraded old table rejects declined evidence at DB layer
+  ✅ Valid evidence survives idempotent restart
+12 upgrade checks passed

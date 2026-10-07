@@ -111,3 +111,7 @@ Khoá hàng đợi và khoá Chrome không còn; không còn server ở cổng t
 ## 10. Tệp bàn giao
 
 `PRO-PAYPAL-RELEASE-REVIEW.md` (tệp này), `PRO-RELEASE-BACKEND-QA.md`, `PRO-RELEASE-RUNNER-REVIEW.md`, `PRO-RELEASE-SAFETY-REVIEW.md`, `CHECKLIST-NGHIEM-THU-PAYPAL-SANDBOX-PRO.md`, và log đã lọc bí mật trong `cho-an-tam/test/evidence/pro-release/backend/` (kèm `lead-chrome-full-run.log` và thư mục `f2-pro-independent/`). Quét bí mật (postgres URL có mật khẩu, JWT, Bearer, client_secret, JWT_SECRET, PAYMENT_WEBHOOK_SECRET, PGPASSWORD) trên thư mục evidence: 0 khớp; chỉ có đường dẫn cục bộ chứa tên người dùng Windows.
+
+## 11. Đính chính danh sách tệp (cập nhật sau phản hồi của Codex)
+
+Commit `7a8d5a4` (bàn giao đầu tiên) chứa 79 tệp: 5 báo cáo `.md` ở gốc và 74 tệp trong `cho-an-tam/test/evidence/pro-release/` (6 `.md`, 55 `.err`, 9 `.txt`, 4 `.json`). Nó KHÔNG chứa 123 tệp `.log` (stdout của các lượt chạy) vì `cho-an-tam/.gitignore` có quy tắc `*.log`; mô tả "log đã lọc bí mật" ở mục 10 và các báo cáo con vì vậy đã sai về danh sách tệp thực tế trong commit đó. Các tệp này được bổ sung bằng một commit riêng kế tiếp trên nhánh này, dùng `git add -f` (không sửa `.gitignore`), sau khi quét lại bí mật (postgres URL có mật khẩu, JWT, Bearer, client_secret, JWT_SECRET, PAYMENT_WEBHOOK_SECRET, PGPASSWORD, khoá riêng): 0 khớp trên 123 tệp, 449 KB. Không chạy lại bất kỳ lượt kiểm chứng nào để bổ sung; nội dung log giữ nguyên như lúc chạy. Việc gộp nhánh báo cáo này vẫn là quyết định riêng, chưa thực hiện.

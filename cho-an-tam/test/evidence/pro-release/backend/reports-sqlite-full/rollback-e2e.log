@@ -1,0 +1,20 @@
+
+=== KIỂM THỬ ROLLBACK BẰNG LỖI CHỦ ĐỘNG: http://localhost:3910 ===
+
+  Máy chủ đang bật chèn lỗi tại điểm: release:after-wallet-update
+
+  ✅ Lấy được phiếu uỷ quyền giải ngân
+  Trước khi giải ngân: WAIT_CONFIRM+LOCKED, ví người bán 5.000.000₫, 4 bản ghi nhật ký
+  ✅ Lệnh giải ngân thất bại như dự kiến (nhận 500)
+  ✅ Đúng là lỗi được chèn chủ động (INJECTED_FAULT)
+  ✅ Cặp trạng thái giao dịch không đổi (WAIT_CONFIRM+LOCKED)
+  ✅ Số phiên bản của giao dịch không tăng (3)
+  ✅ Số dư người bán KHÔNG bị cộng (vẫn 5.000.000₫)
+  ✅ Không có bản ghi nhật ký nào bị nối thêm (vẫn 4)
+  ✅ Chín bất biến vẫn đúng sau khi nghiệp vụ hỏng giữa chừng
+  ✅ Phiếu uỷ quyền CHƯA bị tiêu thụ — vẫn qua được vòng kiểm và hỏng lại đúng ở điểm chèn (nhận INJECTED_FAULT)
+  ✅ Bất biến vẫn đúng sau lần thử thứ hai
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ (10 pass) ===
+  Nhắc: TẮT FAULT_INJECT trước khi chạy các bộ test khác và trước khi thu kết quả.
+

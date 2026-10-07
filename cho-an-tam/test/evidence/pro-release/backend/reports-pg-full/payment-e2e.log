@@ -1,0 +1,62 @@
+◇ injected env (0) from .env // tip: ⌘ multiple files { path: ['.env.local', '.env'] }
+
+=== E2E MOCK PAYMENT PROVIDER + NẠP TIỀN: http://localhost:3910 ===
+
+T01: TOPUP SUCCESS — webhook hợp lệ báo SUCCEEDED thì cộng ví đúng một lần
+  ✅ Tạo yêu cầu nạp tiền PENDING (nhận 201)
+  ✅ Webhook SUCCEEDED được chấp nhận (nhận 200)
+  ✅ payment_requests.status = SUCCEEDED
+  ✅ payment_requests.version tăng đúng 1 lần (thực tế 1)
+  ✅ Ví cộng đúng 300.000₫
+  ✅ Đúng 1 wallet_entry loại TOPUP_CREDIT
+  ✅ wallet_entry ghi đúng available_delta
+  ✅ Chín bất biến vẫn đúng sau TOPUP SUCCESS
+
+T02: TOPUP FAILED — webhook báo thất bại thì ví KHÔNG đổi
+  ✅ Webhook FAILED được chấp nhận (nhận 200)
+  ✅ payment_requests.status = FAILED
+  ✅ Ví không đổi khi nạp tiền thất bại
+  ✅ Không có wallet_entry nào được ghi khi FAILED
+  ✅ Chín bất biến vẫn đúng sau TOPUP FAILED
+
+T03: PENDING/TIMEOUT — chưa có callback thì không tự coi là thất bại, và vẫn tất toán được về sau
+  ✅ Yêu cầu vẫn PENDING khi chưa có callback
+  ✅ Ví không đổi khi còn PENDING
+  ✅ PENDING chờ lâu vẫn tất toán được khi callback cuối cùng cũng tới (không bị coi là hết hạn cứng)
+  ✅ Ví cộng đúng số tiền khi tất toán muộn
+
+T04: DELAYED_SUCCESS — callback tới muộn vẫn xử lý đúng như bình thường
+  ✅ Callback tới muộn vẫn được xử lý thành công
+  ✅ Ví vẫn cộng đúng số tiền dù callback tới muộn
+
+T05: DUPLICATE_CALLBACK — gửi lặp cùng kết quả không cộng tiền hai lần
+  ✅ Lần gọi đầu tiên xử lý thật, không phải bản lặp
+  ✅ Lần gọi lặp thứ hai được nhận diện là duplicate
+  ✅ Ví chỉ được cộng đúng MỘT lần dù webhook gửi lặp
+  ✅ Vẫn chỉ có đúng 1 wallet_entry sau khi webhook gửi lặp
+  ✅ Chín bất biến vẫn đúng sau webhook lặp
+
+T06: FAKE_WEBHOOK — chữ ký sai bị từ chối, không chạm vào bất kỳ dữ liệu nào
+  ✅ Chữ ký giả bị từ chối (nhận 401 INVALID_SIGNATURE)
+  ✅ Yêu cầu vẫn PENDING sau khi nhận webhook giả
+  ✅ Ví không đổi sau webhook giả
+  ✅ Không có wallet_entry nào được ghi từ webhook giả
+  ✅ Giá trị chữ ký giả không bị ghi nguyên văn vào nhật ký sự kiện an toàn
+  ✅ Sau webhook giả, callback thật ký đúng vẫn xử lý được bình thường
+
+T07: OUT_OF_ORDER_CALLBACK — callback tới sau trái ngược không ghi đè kết quả đã tất toán
+  ✅ Callback FAILED tất toán trước, đúng như dự kiến
+  ✅ Callback trái ngược tới sau bị từ chối (nhận 409 WEBHOOK_CONFLICT)
+  ✅ payment_requests.status VẪN LÀ FAILED, không bị lật sang SUCCEEDED
+  ✅ Ví không bị cộng tiền dù callback SUCCEEDED tới sau
+  ✅ Không có wallet_entry nào được ghi từ callback trái ngược
+  ✅ Chín bất biến vẫn đúng sau callback out-of-order
+
+T08: Webhook để lại đúng vết trong nhật ký sự kiện an toàn
+  ✅ Có ghi nhận TOPUP_SUCCEEDED (đếm được 5)
+  ✅ Có ghi nhận TOPUP_FAILED (đếm được 2)
+  ✅ Có ghi nhận WEBHOOK_INVALID_SIGNATURE (đếm được 1)
+  ✅ Có ghi nhận WEBHOOK_CONFLICT (đếm được 1)
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+

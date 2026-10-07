@@ -1,0 +1,37 @@
+◇ injected env (0) from .env // tip: ⌘ custom filepath { path: '/custom/path/.env' }
+
+Enclave — sàn mua bán C2C (Escrow + Passkeys) đang chạy tại: http://localhost:3910
+   WEBAUTHN_RP_ID=localhost  WEBAUTHN_ORIGIN=http://localhost:3910
+   Mở trình duyệt tại đúng địa chỉ trên (không dùng 127.0.0.1) để Passkeys hoạt động.
+   Môi trường: test · Cơ sở dữ liệu: PostgreSQL 127.0.0.1:55432/enclave_pro_release_test
+   CORS: tắt (chỉ cùng origin) · Giao diện tĩnh: bật
+   Đối soát thanh toán: mỗi 60s, bỏ qua yêu cầu mới hơn 30s
+   Dọn challenge: mỗi 600s, ân hạn 3600s
+
+   ⚠  CHÈN LỖI CHỦ ĐỘNG ĐANG BẬT: FAULT_INJECT=release:after-wallet-update
+      Chỉ dùng cho kiểm thử rollback. KHÔNG bật khi thu kết quả chính thức.
+
+(node:49480) DeprecationWarning: Calling client.query() when the client is already executing a query is deprecated and will be removed in pg@9.0. Use async/await or an external async flow control mechanism instead.
+(Use `node --trace-deprecation ...` to show where the warning was created)
+[error 236df934-bc31-47a7-9192-6384f4d75a64] POST /api/transactions/79d26552-f7ff-40d6-bed1-9da0ea1731e7/release InjectedFault [Error]: Lỗi được chèn chủ động tại điểm "release:after-wallet-update" để kiểm thử rollback.
+    at maybeFail (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\faultInjection.js:62:9)
+    at applyOrderedWalletUpdates (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\walletOps.js:36:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:731:23
+    at async wrapped (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\asyncDb.js:285:26)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:730:5 {
+  status: 500,
+  code: 'INJECTED_FAULT',
+  point: 'release:after-wallet-update'
+}
+[error 7846eb42-078c-42f3-81df-221f0fc6dd74] POST /api/transactions/79d26552-f7ff-40d6-bed1-9da0ea1731e7/release InjectedFault [Error]: Lỗi được chèn chủ động tại điểm "release:after-wallet-update" để kiểm thử rollback.
+    at maybeFail (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\faultInjection.js:62:9)
+    at applyOrderedWalletUpdates (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\walletOps.js:36:3)
+    at process.processTicksAndRejections (node:internal/process/task_queues:104:5)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:731:23
+    at async wrapped (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\lib\asyncDb.js:285:26)
+    at async C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\src\routes\transactions.js:730:5 {
+  status: 500,
+  code: 'INJECTED_FAULT',
+  point: 'release:after-wallet-update'
+}

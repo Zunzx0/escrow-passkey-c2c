@@ -1,0 +1,90 @@
+◇ injected env (0) from .env // tip: ◈ encrypted .env [www.dotenvx.com]
+
+Chuẩn bị: quản trị viên, người bán, bốn người mua
+  ✅ Sáu tài khoản sẵn sàng
+
+L1: Hoàn tiền -> tin đăng AVAILABLE -> người khác mua lại trọn vòng -> SOLD
+  ✅ Đơn đã khoá tiền: tin đăng LOCKED
+  ✅ Hoàn tiền thành công (nhận 200 )
+  ✅ Sau hoàn tiền: tin đăng trở về AVAILABLE
+  ✅ Người mua khác đặt lại được đơn mới (nhận 201 )
+  ✅ Đơn mua lại thanh toán được (nhận 200 )
+  ✅ Đơn mua lại khoá tiền: tin đăng LOCKED lần nữa
+  ✅ Đơn mua lại giải ngân xong (nhận 200 )
+  ✅ Đơn mua lại hoàn tất: tin đăng SOLD
+  ✅ Sau L1: 9 bất biến đều đúng
+
+L2: Người mua giải ngân -> SOLD; không mua lại được bằng đơn mới lẫn đơn CREATED cũ
+  ✅ Đơn CREATED của người thứ hai được tạo trước
+  ✅ Giải ngân thành công (nhận 200 )
+  ✅ Sau giải ngân: tin đăng SOLD (thực tế SOLD)
+  ✅ Đặt đơn mới vào tin đã bán bị 409 LISTING_SOLD (nhận 409 LISTING_SOLD)
+  ✅ Thanh toán đơn CREATED cũ vào tin đã bán bị 409 LISTING_SOLD (nhận 409 LISTING_SOLD)
+  ✅ Đơn CREATED cũ không bị khoá tiền
+  ✅ Sau L2: 9 bất biến đều đúng
+
+L3: Quản trị viên phân xử giải ngân -> SOLD
+  ✅ Phân xử giải ngân thành công (nhận 200 )
+  ✅ Sau phân xử giải ngân: tin đăng SOLD
+  ✅ Không đặt mua được tin đã bán (nhận 409 LISTING_SOLD)
+  ✅ Sau L3: 9 bất biến đều đúng
+
+L4: Sau hoàn tiền, hai người mua cùng thanh toán ĐỒNG THỜI tin đăng vừa mở bán lại
+  ✅ Tin đăng mở bán lại (AVAILABLE)
+  [L4] C -> 200 SECURED   D -> 409 LISTING_SOLD
+  ✅ Đúng một người thanh toán được (thực tế 1)
+  ✅ Người còn lại nhận 409 LISTING_SOLD (nhận 409 LISTING_SOLD)
+  ✅ Tin đăng LOCKED cho đúng người thắng
+  ✅ Ký quỹ chỉ tăng đúng một lần giá sản phẩm
+  ✅ Sau L4: 9 bất biến đều đúng
+
+L5: Chèn lỗi giữa nghiệp vụ tất toán -> tin đăng rollback cùng với tiền
+  ✅ Có đủ ba phiếu uỷ quyền (REFUND, RELEASE phân xử, giải ngân của người mua)
+  ✅ Server con chạy với FAULT_INJECT=before-audit-log (health={"status":"OK","time":"2026-10-07T08:58:44.888Z","environment":"test","faultInject":"before-audit-log","backgroundJobs":{"reconcileIntervalSeconds":0,"reconcileMinAgeSeconds":30,"challengeCleanupIntervalSeconds":0,"challengeCleanupGraceSeconds":3600}})
+  ✅ admin-refund: lỗi chèn chủ động bắn đúng (nhận 500 INJECTED_FAULT)
+  ✅ admin-release: lỗi chèn chủ động bắn đúng (nhận 500 INJECTED_FAULT)
+  ✅ release: lỗi chèn chủ động bắn đúng (nhận 500 INJECTED_FAULT)
+  ✅ Server con chèn lỗi đã thoát hẳn
+  ✅ Ba tin đăng giữ nguyên LOCKED và version (trước LOCKED/1, LOCKED/1, LOCKED/1 | sau LOCKED/1, LOCKED/1, LOCKED/1)
+  ✅ Ba giao dịch giữ nguyên trạng thái và version
+  ✅ Ký quỹ, ví người mua, ví người bán không đổi một đồng
+  ✅ Hai hồ sơ tranh chấp vẫn OPEN
+  ✅ Ba phiếu uỷ quyền chưa bị tiêu thụ
+  ✅ Sau L5 (đã chèn lỗi): 9 bất biến đều đúng
+  ✅ Thử lại sau lỗi: cả ba tất toán thành công (200/200/200)
+  ✅ Hoàn tiền thử lại: tin đăng AVAILABLE
+  ✅ Phân xử giải ngân thử lại: tin đăng SOLD
+  ✅ Người mua giải ngân thử lại: tin đăng SOLD
+  ✅ Sau L5 (thử lại): 9 bất biến đều đúng
+
+N1: Chuẩn hoá dữ liệu cũ lúc khởi động, chạy lại không đổi gì
+  ✅ Đã dựng lại dữ liệu cũ: REFUNDED+LOCKED và COMPLETED+LOCKED
+  ✅ Server con khởi động (lần 1) — bước khởi tạo chạy phép chuẩn hoá
+  ✅ Server con lần 1 đã thoát hẳn
+  ✅ Log khởi động báo đã chuẩn hoá tin đăng
+  ✅ REFUNDED+LOCKED -> AVAILABLE (thực tế AVAILABLE)
+  ✅ COMPLETED+LOCKED -> SOLD (thực tế SOLD)
+  ✅ Tin đăng có đơn SECURED giữ nguyên LOCKED
+  ✅ Tin đăng có đơn cũ hoàn tiền nhưng đã bị khoá lại giữ nguyên LOCKED
+  ✅ Sau N1 (lần 1): 9 bất biến đều đúng
+  ✅ Server con khởi động (lần 2)
+  ✅ Server con lần 2 đã thoát hẳn
+  ✅ Chạy lại lần 2 không đổi status lẫn version của tin đăng nào (idempotent)
+  ✅ Tin đăng vừa được chuẩn hoá về AVAILABLE đặt mua lại được (nhận 201)
+
+P1: Người mua được duyệt quyền bán trong lúc còn đơn SHIPPING vẫn tất toán được đơn cũ
+  ✅ Người mua đã được nâng lên SELLER (role=SELLER)
+  ✅ Người ngoài (BUYER) gọi /wait-confirm bị 403 FORBIDDEN (nhận 403 FORBIDDEN)
+  ✅ Người bán của đơn gọi /wait-confirm bị 403 FORBIDDEN (nhận 403 FORBIDDEN)
+  ✅ Quản trị viên gọi /wait-confirm bị 403 FORBIDDEN (nhận 403 FORBIDDEN)
+  ✅ Đơn vẫn SHIPPING sau các lần gọi bị chặn
+  ✅ Người mua (nay mang role SELLER) xác nhận nhận hàng được (nhận 200 WAIT_CONFIRM)
+  ✅ Người ngoài không xin được phiếu giải ngân đơn này (nhận 403)
+  ✅ Người mua (role SELLER) giải ngân được đơn cũ (nhận 200 )
+  ✅ Người bán của đơn nhận đúng số tiền
+  ✅ Tin đăng của đơn chuyển SOLD
+  ✅ Đơn cũ vẫn hiện trong góc nhìn người mua của tài khoản đã nâng quyền
+  ✅ Sau P1: 9 bất biến đều đúng
+  ✅ Cuối bộ: /api/admin/invariants báo 9 bất biến đều đúng
+
+ALL PASS

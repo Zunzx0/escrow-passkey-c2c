@@ -1,0 +1,583 @@
+
+=========== STORE PAYPAL — SQLITE / lược đồ migration ===========
+
+P1: Tạo liên kết — báo giá bất biến, cô lập provider, tạo nguyên tử
+  ✅ Dữ liệu tin cậy đúng hình dạng service yêu cầu
+  ✅ Báo giá đọc lại đúng nguyên vẹn (4.94 USD cho 123.456đ ở 25.000đ/USD)
+  ✅ Snapshot merchant, capture READY
+  ✅ Không lộ token claim ra ngoài store
+  ✅ Request MOCK: loadByRequestId trả null (cô lập provider)
+  ✅ Không gắn được báo giá PayPal vào request MOCK (trigger)
+  ✅ Báo giá lệch số tiền của request bị từ chối (trigger)
+  ✅ Báo giá tự mâu thuẫn (cent sai) bị từ chối trước khi chạm CSDL
+  ✅ Không đổi được provider của request đã tạo (trigger)
+  ✅ Tạo request + báo giá là nguyên tử: lỗi giữa chừng không để lại gì
+
+P2: claimCreateAttempt — timestamp lần đầu bền vững, không làm mới
+  ✅ Hai tiến trình đồng thời cùng nhận đúng MỘT timestamp (t1)
+  ✅ Retry sau đó không làm mới timestamp
+  ✅ Ghi đè trực tiếp timestamp đã có bị CSDL chặn
+  ✅ claimCreateAttempt trả đúng request/chủ sở hữu/báo giá ban đầu
+
+P3: bindOrder — order duy nhất, replay idempotent, không tráo order
+  ✅ Hai order khác nhau đồng thời: đúng một thắng, CSDL giữ order của bên thắng (ORDER-X1)
+  ✅ Gắn lại CÙNG order: true (replay)
+  ✅ Gắn order khác sau khi đã gắn: false
+  ✅ Order đã thuộc request khác: false, request kia vẫn chưa gắn (UNIQUE)
+  ✅ loadByOrderId tìm đúng request
+  ✅ Order lạ: null
+  ✅ Không gắn order PayPal vào request MOCK
+  ✅ Đổi order đã gắn bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Sửa báo giá bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Vi phạm UNIQUE trong bindOrder không làm hỏng transaction bao ngoài (savepoint)
+  ✅ claimCreateAttempt vẫn đọc được sau các lần gắn
+
+P4: claimCapture — chủ sở hữu, trạng thái, một người giữ quyền
+  ✅ Chưa gắn order: NOT_READY
+  ✅ Người khác: FORBIDDEN
+  ✅ Request MOCK: NOT_FOUND
+  [P4] CLAIMED BUSY BUSY BUSY BUSY BUSY
+  ✅ Sáu lượt đồng thời trên hai tiến trình: đúng 1 CLAIMED, 5 BUSY
+  ✅ IN_FLIGHT, capture_attempts = 1
+  ✅ Người giữ quyền nhả với READY (người mua chưa phê duyệt)
+  ✅ Sau READY: giành lại được, không cần GET trước
+  ✅ Request SUCCEEDED: REPLAY
+  ✅ Request FAILED: CLOSED
+
+P5: Người giữ quyền cũ (lease hết hạn) không ghi đè người mới; timeout -> UNKNOWN
+  ✅ A giành quyền
+  ✅ B giành quyền đã hết hạn, được yêu cầu GET trước (không biết A đã thu tiền chưa)
+  ✅ A trả kết quả muộn: STALE_CLAIM, không ghi đè quyền/kết quả của B
+  ✅ B timeout: ghi UNKNOWN
+  ✅ UNKNOWN: nhả quyền, request vẫn PENDING (không đoán thất bại)
+  ✅ Sau UNKNOWN: lượt tiếp phải GET trước
+  ✅ C xác minh: VERIFIED
+  ✅ B ghi lần nữa sau đó: STALE_CLAIM
+  ✅ Kết quả cuối VERIFIED với capture của C, ba lượt giành quyền (thực tế 3)
+  ✅ VERIFIED không quay về READY bằng UPDATE trực tiếp
+
+P6: Webhook xác minh trong lúc có người đang capture; capture ID duy nhất
+  ✅ Có người đang giữ quyền capture
+  ✅ Webhook (đã xác minh) ghi VERIFIED, xoá quyền đang giữ
+  ✅ Người giữ quyền ghi sau đó: STALE_CLAIM
+  ✅ Trạng thái vẫn VERIFIED
+  ✅ Webhook lặp cùng capture ID: idempotent
+  ✅ Capture ID khác: CAPTURE_ID_CONFLICT
+  ✅ Sau VERIFIED mà request vẫn PENDING: claim trả SETTLEMENT_REQUIRED (ví chưa cộng)
+  ✅ Một capture ID không gắn được cho hai request (UNIQUE)
+  ✅ Request chưa gắn order: NOT_READY
+
+P7: Đóng hết hạn và capture không thể cùng thắng
+  ✅ Capture trước, đóng sau: từ chối đóng, request vẫn PENDING
+  ✅ Đóng trước (chưa ai capture): đóng được
+  ✅ Capture sau khi đóng: CLOSED
+  ✅ Capture UNKNOWN (timeout): không được đóng FAILED — cần đối soát
+  [P7] bên thắng: capture, capture, capture, capture, capture, capture
+  ✅ Sáu cuộc đua đồng thời: mỗi request đúng một bên thắng, không có FAILED kèm capture dở
+
+P8: VERIFIED ghi cùng transaction với bước ghi ví (mô phỏng)
+  ✅ Lỗi trước commit: ví/request VÀ capture cùng rollback, người giữ quyền vẫn giữ để thử lại
+  ✅ Commit: SUCCEEDED và VERIFIED cùng có hiệu lực
+  ✅ Người giữ quyền cũ: finish báo mất quyền, credit rollback theo
+
+K1: POST của A treo, lease hết, B GET thấy PENDING -> không được đóng; POST A thành công muộn vẫn được ghi nhận
+  ✅ A giành quyền
+  ✅ A ghi dấu đã gửi POST capture
+  ✅ B tiếp quản và được yêu cầu GET trước
+  ✅ B không được đưa về READY chỉ vì GET thấy PENDING (nhận {"ok":false,"reason":"CAPTURE_OUTCOME_UNRESOLVED"})
+  ✅ Đóng hết hạn không thắng (nhận {"closed":false,"reason":"CAPTURE_UNKNOWN"})
+  ✅ Token A đã hết hiệu lực: finish của A không ghi đè, credit đi kèm rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit (nhận {"ok":true})
+  ✅ Kết quả: VERIFIED với capture của A và request SUCCEEDED — không có VERIFIED đứng riêng trên PENDING
+
+K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối
+  ✅ B đang giữ quyền
+  ✅ finish của A không ghi đè token của B; credit đi kèm đã rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit
+  ✅ B ghi UNKNOWN sau đó: bị từ chối, VERIFIED và SUCCEEDED giữ nguyên
+
+K6: VERIFIED đứng riêng trên PENDING không được coi là đã cộng ví
+  ✅ Bằng chứng được ghi (chưa có settlement)
+  ✅ claimCapture báo SETTLEMENT_REQUIRED, không phải REPLAY (nhận SETTLEMENT_REQUIRED)
+  ✅ Request vẫn PENDING: store không giả định ví đã cộng
+  ✅ Phục hồi: transaction settlement với cùng bằng chứng (idempotent) cộng đúng một lần
+  ✅ Sau settlement: REPLAY
+  ✅ Settle lần hai không cộng thêm (claim PENDING đã mất)
+
+K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại
+  ✅ Request đóng FAILED (chưa từng capture)
+  ✅ Không báo thành công giả: RECOVERY_REQUIRED (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPF-9bd4fc4f-c4c1-45d8-8ad2-f92101cbae19"})
+  ✅ Capture ID được lưu bền làm bằng chứng
+  ✅ Request vẫn FAILED: store không tự mở lại hay ghi ví
+  ✅ Replay cùng capture: vẫn RECOVERY_REQUIRED (idempotent)
+  ✅ Capture khác: CAPTURE_ID_CONFLICT, bằng chứng đầu giữ nguyên
+  ✅ Capture xung đột cũng được ghi lại để đối soát
+  ✅ claimCapture trên request cần phục hồi: RECOVERY_REQUIRED (nhận RECOVERY_REQUIRED)
+  ✅ Request PENDING bình thường: VERIFIED như cũ
+  ✅ finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPQ-ab60442a-46be-4d6f-b151-14de4adf6934"})
+
+K7: Legacy FAILED + VERIFIED requires manual recovery, never settlement
+  ✅ Legacy closed verified request is not SETTLEMENT_REQUIRED
+  ✅ Replay evidence on legacy FAILED does not return success
+  ✅ Immutable evidence preserved and recovery marker durable; request remains closed
+
+K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ
+  ✅ APPROVED không phải bằng chứng kết thúc: bị từ chối
+  ✅ CAPTURE_DECLINED không phải bằng chứng kết thúc toàn order: bị store từ chối
+  ✅ Migration thật: CSDL từ chối CAPTURE_DECLINED
+  ✅ Order VOIDED: NOT_CAPTURED
+  ✅ Sau NOT_CAPTURED: đóng được
+  ✅ Người trước chưa từng POST: không bắt buộc GET trước
+  ✅ Chưa từng POST: nhả về READY hợp lệ
+  ✅ Chưa từng POST: đóng được
+  ✅ Dấu đã gửi POST không xoá được bằng UPDATE trực tiếp
+
+K5: HAI process Node thật cùng giành quyền capture (barrier bằng file)
+  ✅ Hai process con chạy xong (exit 0/0)
+  [K5] pid 43616: CLAIMED CLAIMED CLAIMED CLAIMED CLAIMED | pid 33144: BUSY BUSY BUSY BUSY BUSY
+  ✅ Mỗi request: đúng một process CLAIMED, process kia BUSY
+  ✅ capture_attempts = 1 cho mọi request (thực tế 1,1,1,1,1)
+
+P9: Khởi động lại — báo giá, order, timestamp, trạng thái capture giữ nguyên
+  ✅ Đọc lại sau khởi động: giống hệt trước khi tắt
+  ✅ Retry create sau khởi động không làm mới timestamp
+
+  [sqlite/migration] 106 đạt, 0 hỏng
+
+=========== STORE PAYPAL — SQLITE / lược đồ proposed ===========
+
+P1: Tạo liên kết — báo giá bất biến, cô lập provider, tạo nguyên tử
+  ✅ Dữ liệu tin cậy đúng hình dạng service yêu cầu
+  ✅ Báo giá đọc lại đúng nguyên vẹn (4.94 USD cho 123.456đ ở 25.000đ/USD)
+  ✅ Snapshot merchant, capture READY
+  ✅ Không lộ token claim ra ngoài store
+  ✅ Request MOCK: loadByRequestId trả null (cô lập provider)
+  ✅ Không gắn được báo giá PayPal vào request MOCK (trigger)
+  ✅ Báo giá lệch số tiền của request bị từ chối (trigger)
+  ✅ Báo giá tự mâu thuẫn (cent sai) bị từ chối trước khi chạm CSDL
+  ✅ Không đổi được provider của request đã tạo (trigger)
+  ✅ Tạo request + báo giá là nguyên tử: lỗi giữa chừng không để lại gì
+
+P2: claimCreateAttempt — timestamp lần đầu bền vững, không làm mới
+  ✅ Hai tiến trình đồng thời cùng nhận đúng MỘT timestamp (t1)
+  ✅ Retry sau đó không làm mới timestamp
+  ✅ Ghi đè trực tiếp timestamp đã có bị CSDL chặn
+  ✅ claimCreateAttempt trả đúng request/chủ sở hữu/báo giá ban đầu
+
+P3: bindOrder — order duy nhất, replay idempotent, không tráo order
+  ✅ Hai order khác nhau đồng thời: đúng một thắng, CSDL giữ order của bên thắng (ORDER-X1)
+  ✅ Gắn lại CÙNG order: true (replay)
+  ✅ Gắn order khác sau khi đã gắn: false
+  ✅ Order đã thuộc request khác: false, request kia vẫn chưa gắn (UNIQUE)
+  ✅ loadByOrderId tìm đúng request
+  ✅ Order lạ: null
+  ✅ Không gắn order PayPal vào request MOCK
+  ✅ Đổi order đã gắn bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Sửa báo giá bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Vi phạm UNIQUE trong bindOrder không làm hỏng transaction bao ngoài (savepoint)
+  ✅ claimCreateAttempt vẫn đọc được sau các lần gắn
+
+P4: claimCapture — chủ sở hữu, trạng thái, một người giữ quyền
+  ✅ Chưa gắn order: NOT_READY
+  ✅ Người khác: FORBIDDEN
+  ✅ Request MOCK: NOT_FOUND
+  [P4] CLAIMED BUSY BUSY BUSY BUSY BUSY
+  ✅ Sáu lượt đồng thời trên hai tiến trình: đúng 1 CLAIMED, 5 BUSY
+  ✅ IN_FLIGHT, capture_attempts = 1
+  ✅ Người giữ quyền nhả với READY (người mua chưa phê duyệt)
+  ✅ Sau READY: giành lại được, không cần GET trước
+  ✅ Request SUCCEEDED: REPLAY
+  ✅ Request FAILED: CLOSED
+
+P5: Người giữ quyền cũ (lease hết hạn) không ghi đè người mới; timeout -> UNKNOWN
+  ✅ A giành quyền
+  ✅ B giành quyền đã hết hạn, được yêu cầu GET trước (không biết A đã thu tiền chưa)
+  ✅ A trả kết quả muộn: STALE_CLAIM, không ghi đè quyền/kết quả của B
+  ✅ B timeout: ghi UNKNOWN
+  ✅ UNKNOWN: nhả quyền, request vẫn PENDING (không đoán thất bại)
+  ✅ Sau UNKNOWN: lượt tiếp phải GET trước
+  ✅ C xác minh: VERIFIED
+  ✅ B ghi lần nữa sau đó: STALE_CLAIM
+  ✅ Kết quả cuối VERIFIED với capture của C, ba lượt giành quyền (thực tế 3)
+  ✅ VERIFIED không quay về READY bằng UPDATE trực tiếp
+
+P6: Webhook xác minh trong lúc có người đang capture; capture ID duy nhất
+  ✅ Có người đang giữ quyền capture
+  ✅ Webhook (đã xác minh) ghi VERIFIED, xoá quyền đang giữ
+  ✅ Người giữ quyền ghi sau đó: STALE_CLAIM
+  ✅ Trạng thái vẫn VERIFIED
+  ✅ Webhook lặp cùng capture ID: idempotent
+  ✅ Capture ID khác: CAPTURE_ID_CONFLICT
+  ✅ Sau VERIFIED mà request vẫn PENDING: claim trả SETTLEMENT_REQUIRED (ví chưa cộng)
+  ✅ Một capture ID không gắn được cho hai request (UNIQUE)
+  ✅ Request chưa gắn order: NOT_READY
+
+P7: Đóng hết hạn và capture không thể cùng thắng
+  ✅ Capture trước, đóng sau: từ chối đóng, request vẫn PENDING
+  ✅ Đóng trước (chưa ai capture): đóng được
+  ✅ Capture sau khi đóng: CLOSED
+  ✅ Capture UNKNOWN (timeout): không được đóng FAILED — cần đối soát
+  [P7] bên thắng: capture, capture, capture, capture, capture, capture
+  ✅ Sáu cuộc đua đồng thời: mỗi request đúng một bên thắng, không có FAILED kèm capture dở
+
+P8: VERIFIED ghi cùng transaction với bước ghi ví (mô phỏng)
+  ✅ Lỗi trước commit: ví/request VÀ capture cùng rollback, người giữ quyền vẫn giữ để thử lại
+  ✅ Commit: SUCCEEDED và VERIFIED cùng có hiệu lực
+  ✅ Người giữ quyền cũ: finish báo mất quyền, credit rollback theo
+
+K1: POST của A treo, lease hết, B GET thấy PENDING -> không được đóng; POST A thành công muộn vẫn được ghi nhận
+  ✅ A giành quyền
+  ✅ A ghi dấu đã gửi POST capture
+  ✅ B tiếp quản và được yêu cầu GET trước
+  ✅ B không được đưa về READY chỉ vì GET thấy PENDING (nhận {"ok":false,"reason":"CAPTURE_OUTCOME_UNRESOLVED"})
+  ✅ Đóng hết hạn không thắng (nhận {"closed":false,"reason":"CAPTURE_UNKNOWN"})
+  ✅ Token A đã hết hiệu lực: finish của A không ghi đè, credit đi kèm rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit (nhận {"ok":true})
+  ✅ Kết quả: VERIFIED với capture của A và request SUCCEEDED — không có VERIFIED đứng riêng trên PENDING
+
+K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối
+  ✅ B đang giữ quyền
+  ✅ finish của A không ghi đè token của B; credit đi kèm đã rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit
+  ✅ B ghi UNKNOWN sau đó: bị từ chối, VERIFIED và SUCCEEDED giữ nguyên
+
+K6: VERIFIED đứng riêng trên PENDING không được coi là đã cộng ví
+  ✅ Bằng chứng được ghi (chưa có settlement)
+  ✅ claimCapture báo SETTLEMENT_REQUIRED, không phải REPLAY (nhận SETTLEMENT_REQUIRED)
+  ✅ Request vẫn PENDING: store không giả định ví đã cộng
+  ✅ Phục hồi: transaction settlement với cùng bằng chứng (idempotent) cộng đúng một lần
+  ✅ Sau settlement: REPLAY
+  ✅ Settle lần hai không cộng thêm (claim PENDING đã mất)
+
+K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại
+  ✅ Request đóng FAILED (chưa từng capture)
+  ✅ Không báo thành công giả: RECOVERY_REQUIRED (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPF-c37f7c7c-c008-4112-a658-c34d44722b2d"})
+  ✅ Capture ID được lưu bền làm bằng chứng
+  ✅ Request vẫn FAILED: store không tự mở lại hay ghi ví
+  ✅ Replay cùng capture: vẫn RECOVERY_REQUIRED (idempotent)
+  ✅ Capture khác: CAPTURE_ID_CONFLICT, bằng chứng đầu giữ nguyên
+  ✅ Capture xung đột cũng được ghi lại để đối soát
+  ✅ claimCapture trên request cần phục hồi: RECOVERY_REQUIRED (nhận RECOVERY_REQUIRED)
+  ✅ Request PENDING bình thường: VERIFIED như cũ
+  ✅ finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPQ-dc53a5f9-0aa4-46ef-a21c-21f326b2d5c8"})
+
+K7: Legacy FAILED + VERIFIED requires manual recovery, never settlement
+  ✅ Legacy closed verified request is not SETTLEMENT_REQUIRED
+  ✅ Replay evidence on legacy FAILED does not return success
+  ✅ Immutable evidence preserved and recovery marker durable; request remains closed
+
+K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ
+  ✅ APPROVED không phải bằng chứng kết thúc: bị từ chối
+  ✅ CAPTURE_DECLINED không phải bằng chứng kết thúc toàn order: bị store từ chối
+  ✅ Lược đồ đề xuất: CHECK của CSDL từ chối CAPTURE_DECLINED
+  ✅ Order VOIDED: NOT_CAPTURED
+  ✅ Sau NOT_CAPTURED: đóng được
+  ✅ Người trước chưa từng POST: không bắt buộc GET trước
+  ✅ Chưa từng POST: nhả về READY hợp lệ
+  ✅ Chưa từng POST: đóng được
+  ✅ Dấu đã gửi POST không xoá được bằng UPDATE trực tiếp
+
+K5: HAI process Node thật cùng giành quyền capture (barrier bằng file)
+  ✅ Hai process con chạy xong (exit 0/0)
+  [K5] pid 37308: CLAIMED CLAIMED CLAIMED CLAIMED CLAIMED | pid 9832: BUSY BUSY BUSY BUSY BUSY
+  ✅ Mỗi request: đúng một process CLAIMED, process kia BUSY
+  ✅ capture_attempts = 1 cho mọi request (thực tế 1,1,1,1,1)
+
+P9: Khởi động lại — báo giá, order, timestamp, trạng thái capture giữ nguyên
+  ✅ Đọc lại sau khởi động: giống hệt trước khi tắt
+  ✅ Retry create sau khởi động không làm mới timestamp
+
+  [sqlite/proposed] 106 đạt, 0 hỏng
+  (migration thật: v1, v2, v3, v4, v5, v6)
+
+=========== STORE PAYPAL — PG / lược đồ migration ===========
+
+P1: Tạo liên kết — báo giá bất biến, cô lập provider, tạo nguyên tử
+  ✅ Dữ liệu tin cậy đúng hình dạng service yêu cầu
+  ✅ Báo giá đọc lại đúng nguyên vẹn (4.94 USD cho 123.456đ ở 25.000đ/USD)
+  ✅ Snapshot merchant, capture READY
+  ✅ Không lộ token claim ra ngoài store
+  ✅ Request MOCK: loadByRequestId trả null (cô lập provider)
+  ✅ Không gắn được báo giá PayPal vào request MOCK (trigger)
+  ✅ Báo giá lệch số tiền của request bị từ chối (trigger)
+  ✅ Báo giá tự mâu thuẫn (cent sai) bị từ chối trước khi chạm CSDL
+  ✅ Không đổi được provider của request đã tạo (trigger)
+  ✅ Tạo request + báo giá là nguyên tử: lỗi giữa chừng không để lại gì
+
+P2: claimCreateAttempt — timestamp lần đầu bền vững, không làm mới
+  ✅ Hai tiến trình đồng thời cùng nhận đúng MỘT timestamp (t1)
+  ✅ Retry sau đó không làm mới timestamp
+  ✅ Ghi đè trực tiếp timestamp đã có bị CSDL chặn
+  ✅ claimCreateAttempt trả đúng request/chủ sở hữu/báo giá ban đầu
+
+P3: bindOrder — order duy nhất, replay idempotent, không tráo order
+  ✅ Hai order khác nhau đồng thời: đúng một thắng, CSDL giữ order của bên thắng (ORDER-X1)
+  ✅ Gắn lại CÙNG order: true (replay)
+  ✅ Gắn order khác sau khi đã gắn: false
+  ✅ Order đã thuộc request khác: false, request kia vẫn chưa gắn (UNIQUE)
+  ✅ loadByOrderId tìm đúng request
+  ✅ Order lạ: null
+  ✅ Không gắn order PayPal vào request MOCK
+  ✅ Đổi order đã gắn bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Sửa báo giá bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Vi phạm UNIQUE trong bindOrder không làm hỏng transaction bao ngoài (savepoint)
+  ✅ claimCreateAttempt vẫn đọc được sau các lần gắn
+
+P4: claimCapture — chủ sở hữu, trạng thái, một người giữ quyền
+  ✅ Chưa gắn order: NOT_READY
+  ✅ Người khác: FORBIDDEN
+  ✅ Request MOCK: NOT_FOUND
+  [P4] CLAIMED BUSY BUSY BUSY BUSY BUSY
+  ✅ Sáu lượt đồng thời trên hai tiến trình: đúng 1 CLAIMED, 5 BUSY
+  ✅ IN_FLIGHT, capture_attempts = 1
+  ✅ Người giữ quyền nhả với READY (người mua chưa phê duyệt)
+  ✅ Sau READY: giành lại được, không cần GET trước
+  ✅ Request SUCCEEDED: REPLAY
+  ✅ Request FAILED: CLOSED
+
+P5: Người giữ quyền cũ (lease hết hạn) không ghi đè người mới; timeout -> UNKNOWN
+  ✅ A giành quyền
+  ✅ B giành quyền đã hết hạn, được yêu cầu GET trước (không biết A đã thu tiền chưa)
+  ✅ A trả kết quả muộn: STALE_CLAIM, không ghi đè quyền/kết quả của B
+  ✅ B timeout: ghi UNKNOWN
+  ✅ UNKNOWN: nhả quyền, request vẫn PENDING (không đoán thất bại)
+  ✅ Sau UNKNOWN: lượt tiếp phải GET trước
+  ✅ C xác minh: VERIFIED
+  ✅ B ghi lần nữa sau đó: STALE_CLAIM
+  ✅ Kết quả cuối VERIFIED với capture của C, ba lượt giành quyền (thực tế 3)
+  ✅ VERIFIED không quay về READY bằng UPDATE trực tiếp
+
+P6: Webhook xác minh trong lúc có người đang capture; capture ID duy nhất
+  ✅ Có người đang giữ quyền capture
+  ✅ Webhook (đã xác minh) ghi VERIFIED, xoá quyền đang giữ
+  ✅ Người giữ quyền ghi sau đó: STALE_CLAIM
+  ✅ Trạng thái vẫn VERIFIED
+  ✅ Webhook lặp cùng capture ID: idempotent
+  ✅ Capture ID khác: CAPTURE_ID_CONFLICT
+  ✅ Sau VERIFIED mà request vẫn PENDING: claim trả SETTLEMENT_REQUIRED (ví chưa cộng)
+  ✅ Một capture ID không gắn được cho hai request (UNIQUE)
+  ✅ Request chưa gắn order: NOT_READY
+
+P7: Đóng hết hạn và capture không thể cùng thắng
+  ✅ Capture trước, đóng sau: từ chối đóng, request vẫn PENDING
+  ✅ Đóng trước (chưa ai capture): đóng được
+  ✅ Capture sau khi đóng: CLOSED
+  ✅ Capture UNKNOWN (timeout): không được đóng FAILED — cần đối soát
+  [P7] bên thắng: đóng, capture, capture, capture, đóng, capture
+  ✅ Sáu cuộc đua đồng thời: mỗi request đúng một bên thắng, không có FAILED kèm capture dở
+
+P8: VERIFIED ghi cùng transaction với bước ghi ví (mô phỏng)
+  ✅ Lỗi trước commit: ví/request VÀ capture cùng rollback, người giữ quyền vẫn giữ để thử lại
+  ✅ Commit: SUCCEEDED và VERIFIED cùng có hiệu lực
+  ✅ Người giữ quyền cũ: finish báo mất quyền, credit rollback theo
+
+K1: POST của A treo, lease hết, B GET thấy PENDING -> không được đóng; POST A thành công muộn vẫn được ghi nhận
+  ✅ A giành quyền
+  ✅ A ghi dấu đã gửi POST capture
+  ✅ B tiếp quản và được yêu cầu GET trước
+  ✅ B không được đưa về READY chỉ vì GET thấy PENDING (nhận {"ok":false,"reason":"CAPTURE_OUTCOME_UNRESOLVED"})
+  ✅ Đóng hết hạn không thắng (nhận {"closed":false,"reason":"CAPTURE_UNKNOWN"})
+  ✅ Token A đã hết hiệu lực: finish của A không ghi đè, credit đi kèm rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit (nhận {"ok":true})
+  ✅ Kết quả: VERIFIED với capture của A và request SUCCEEDED — không có VERIFIED đứng riêng trên PENDING
+
+K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối
+  ✅ B đang giữ quyền
+  ✅ finish của A không ghi đè token của B; credit đi kèm đã rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit
+  ✅ B ghi UNKNOWN sau đó: bị từ chối, VERIFIED và SUCCEEDED giữ nguyên
+
+K6: VERIFIED đứng riêng trên PENDING không được coi là đã cộng ví
+  ✅ Bằng chứng được ghi (chưa có settlement)
+  ✅ claimCapture báo SETTLEMENT_REQUIRED, không phải REPLAY (nhận SETTLEMENT_REQUIRED)
+  ✅ Request vẫn PENDING: store không giả định ví đã cộng
+  ✅ Phục hồi: transaction settlement với cùng bằng chứng (idempotent) cộng đúng một lần
+  ✅ Sau settlement: REPLAY
+  ✅ Settle lần hai không cộng thêm (claim PENDING đã mất)
+
+K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại
+  ✅ Request đóng FAILED (chưa từng capture)
+  ✅ Không báo thành công giả: RECOVERY_REQUIRED (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPF-95e2ec7d-efb7-46c3-9495-62ae438937db"})
+  ✅ Capture ID được lưu bền làm bằng chứng
+  ✅ Request vẫn FAILED: store không tự mở lại hay ghi ví
+  ✅ Replay cùng capture: vẫn RECOVERY_REQUIRED (idempotent)
+  ✅ Capture khác: CAPTURE_ID_CONFLICT, bằng chứng đầu giữ nguyên
+  ✅ Capture xung đột cũng được ghi lại để đối soát
+  ✅ claimCapture trên request cần phục hồi: RECOVERY_REQUIRED (nhận RECOVERY_REQUIRED)
+  ✅ Request PENDING bình thường: VERIFIED như cũ
+  ✅ finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPQ-22de753d-8b3c-4b00-a91d-accd8b817a53"})
+
+K7: Legacy FAILED + VERIFIED requires manual recovery, never settlement
+  ✅ Legacy closed verified request is not SETTLEMENT_REQUIRED
+  ✅ Replay evidence on legacy FAILED does not return success
+  ✅ Immutable evidence preserved and recovery marker durable; request remains closed
+
+K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ
+  ✅ APPROVED không phải bằng chứng kết thúc: bị từ chối
+  ✅ CAPTURE_DECLINED không phải bằng chứng kết thúc toàn order: bị store từ chối
+  ✅ Migration thật: CSDL từ chối CAPTURE_DECLINED
+  ✅ Order VOIDED: NOT_CAPTURED
+  ✅ Sau NOT_CAPTURED: đóng được
+  ✅ Người trước chưa từng POST: không bắt buộc GET trước
+  ✅ Chưa từng POST: nhả về READY hợp lệ
+  ✅ Chưa từng POST: đóng được
+  ✅ Dấu đã gửi POST không xoá được bằng UPDATE trực tiếp
+
+K5: HAI process Node thật cùng giành quyền capture (barrier bằng file)
+  ✅ Hai process con chạy xong (exit 0/0)
+  [K5] pid 45012: CLAIMED BUSY CLAIMED CLAIMED BUSY | pid 29216: BUSY CLAIMED BUSY BUSY CLAIMED
+  ✅ Mỗi request: đúng một process CLAIMED, process kia BUSY
+  ✅ capture_attempts = 1 cho mọi request (thực tế 1,1,1,1,1)
+
+P9: Khởi động lại — báo giá, order, timestamp, trạng thái capture giữ nguyên
+  ✅ Đọc lại sau khởi động: giống hệt trước khi tắt
+  ✅ Retry create sau khởi động không làm mới timestamp
+
+  [pg/migration] 106 đạt, 0 hỏng
+
+=========== STORE PAYPAL — PG / lược đồ proposed ===========
+
+P1: Tạo liên kết — báo giá bất biến, cô lập provider, tạo nguyên tử
+  ✅ Dữ liệu tin cậy đúng hình dạng service yêu cầu
+  ✅ Báo giá đọc lại đúng nguyên vẹn (4.94 USD cho 123.456đ ở 25.000đ/USD)
+  ✅ Snapshot merchant, capture READY
+  ✅ Không lộ token claim ra ngoài store
+  ✅ Request MOCK: loadByRequestId trả null (cô lập provider)
+  ✅ Không gắn được báo giá PayPal vào request MOCK (trigger)
+  ✅ Báo giá lệch số tiền của request bị từ chối (trigger)
+  ✅ Báo giá tự mâu thuẫn (cent sai) bị từ chối trước khi chạm CSDL
+  ✅ Không đổi được provider của request đã tạo (trigger)
+  ✅ Tạo request + báo giá là nguyên tử: lỗi giữa chừng không để lại gì
+
+P2: claimCreateAttempt — timestamp lần đầu bền vững, không làm mới
+  ✅ Hai tiến trình đồng thời cùng nhận đúng MỘT timestamp (t1)
+  ✅ Retry sau đó không làm mới timestamp
+  ✅ Ghi đè trực tiếp timestamp đã có bị CSDL chặn
+  ✅ claimCreateAttempt trả đúng request/chủ sở hữu/báo giá ban đầu
+
+P3: bindOrder — order duy nhất, replay idempotent, không tráo order
+  ✅ Hai order khác nhau đồng thời: đúng một thắng, CSDL giữ order của bên thắng (ORDER-X1)
+  ✅ Gắn lại CÙNG order: true (replay)
+  ✅ Gắn order khác sau khi đã gắn: false
+  ✅ Order đã thuộc request khác: false, request kia vẫn chưa gắn (UNIQUE)
+  ✅ loadByOrderId tìm đúng request
+  ✅ Order lạ: null
+  ✅ Không gắn order PayPal vào request MOCK
+  ✅ Đổi order đã gắn bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Sửa báo giá bằng UPDATE trực tiếp bị CSDL chặn
+  ✅ Vi phạm UNIQUE trong bindOrder không làm hỏng transaction bao ngoài (savepoint)
+  ✅ claimCreateAttempt vẫn đọc được sau các lần gắn
+
+P4: claimCapture — chủ sở hữu, trạng thái, một người giữ quyền
+  ✅ Chưa gắn order: NOT_READY
+  ✅ Người khác: FORBIDDEN
+  ✅ Request MOCK: NOT_FOUND
+  [P4] CLAIMED BUSY BUSY BUSY BUSY BUSY
+  ✅ Sáu lượt đồng thời trên hai tiến trình: đúng 1 CLAIMED, 5 BUSY
+  ✅ IN_FLIGHT, capture_attempts = 1
+  ✅ Người giữ quyền nhả với READY (người mua chưa phê duyệt)
+  ✅ Sau READY: giành lại được, không cần GET trước
+  ✅ Request SUCCEEDED: REPLAY
+  ✅ Request FAILED: CLOSED
+
+P5: Người giữ quyền cũ (lease hết hạn) không ghi đè người mới; timeout -> UNKNOWN
+  ✅ A giành quyền
+  ✅ B giành quyền đã hết hạn, được yêu cầu GET trước (không biết A đã thu tiền chưa)
+  ✅ A trả kết quả muộn: STALE_CLAIM, không ghi đè quyền/kết quả của B
+  ✅ B timeout: ghi UNKNOWN
+  ✅ UNKNOWN: nhả quyền, request vẫn PENDING (không đoán thất bại)
+  ✅ Sau UNKNOWN: lượt tiếp phải GET trước
+  ✅ C xác minh: VERIFIED
+  ✅ B ghi lần nữa sau đó: STALE_CLAIM
+  ✅ Kết quả cuối VERIFIED với capture của C, ba lượt giành quyền (thực tế 3)
+  ✅ VERIFIED không quay về READY bằng UPDATE trực tiếp
+
+P6: Webhook xác minh trong lúc có người đang capture; capture ID duy nhất
+  ✅ Có người đang giữ quyền capture
+  ✅ Webhook (đã xác minh) ghi VERIFIED, xoá quyền đang giữ
+  ✅ Người giữ quyền ghi sau đó: STALE_CLAIM
+  ✅ Trạng thái vẫn VERIFIED
+  ✅ Webhook lặp cùng capture ID: idempotent
+  ✅ Capture ID khác: CAPTURE_ID_CONFLICT
+  ✅ Sau VERIFIED mà request vẫn PENDING: claim trả SETTLEMENT_REQUIRED (ví chưa cộng)
+  ✅ Một capture ID không gắn được cho hai request (UNIQUE)
+  ✅ Request chưa gắn order: NOT_READY
+
+P7: Đóng hết hạn và capture không thể cùng thắng
+  ✅ Capture trước, đóng sau: từ chối đóng, request vẫn PENDING
+  ✅ Đóng trước (chưa ai capture): đóng được
+  ✅ Capture sau khi đóng: CLOSED
+  ✅ Capture UNKNOWN (timeout): không được đóng FAILED — cần đối soát
+  [P7] bên thắng: đóng, capture, capture, capture, đóng, đóng
+  ✅ Sáu cuộc đua đồng thời: mỗi request đúng một bên thắng, không có FAILED kèm capture dở
+
+P8: VERIFIED ghi cùng transaction với bước ghi ví (mô phỏng)
+  ✅ Lỗi trước commit: ví/request VÀ capture cùng rollback, người giữ quyền vẫn giữ để thử lại
+  ✅ Commit: SUCCEEDED và VERIFIED cùng có hiệu lực
+  ✅ Người giữ quyền cũ: finish báo mất quyền, credit rollback theo
+
+K1: POST của A treo, lease hết, B GET thấy PENDING -> không được đóng; POST A thành công muộn vẫn được ghi nhận
+  ✅ A giành quyền
+  ✅ A ghi dấu đã gửi POST capture
+  ✅ B tiếp quản và được yêu cầu GET trước
+  ✅ B không được đưa về READY chỉ vì GET thấy PENDING (nhận {"ok":false,"reason":"CAPTURE_OUTCOME_UNRESOLVED"})
+  ✅ Đóng hết hạn không thắng (nhận {"closed":false,"reason":"CAPTURE_UNKNOWN"})
+  ✅ Token A đã hết hiệu lực: finish của A không ghi đè, credit đi kèm rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit (nhận {"ok":true})
+  ✅ Kết quả: VERIFIED với capture của A và request SUCCEEDED — không có VERIFIED đứng riêng trên PENDING
+
+K2: Bằng chứng muộn đến khi B vẫn đang giữ quyền -> ghi nhận, B ghi sau bị từ chối
+  ✅ B đang giữ quyền
+  ✅ finish của A không ghi đè token của B; credit đi kèm đã rollback
+  ✅ Transaction mới: bằng chứng của A + settle cùng commit
+  ✅ B ghi UNKNOWN sau đó: bị từ chối, VERIFIED và SUCCEEDED giữ nguyên
+
+K6: VERIFIED đứng riêng trên PENDING không được coi là đã cộng ví
+  ✅ Bằng chứng được ghi (chưa có settlement)
+  ✅ claimCapture báo SETTLEMENT_REQUIRED, không phải REPLAY (nhận SETTLEMENT_REQUIRED)
+  ✅ Request vẫn PENDING: store không giả định ví đã cộng
+  ✅ Phục hồi: transaction settlement với cùng bằng chứng (idempotent) cộng đúng một lần
+  ✅ Sau settlement: REPLAY
+  ✅ Settle lần hai không cộng thêm (claim PENDING đã mất)
+
+K3: Thu tiền muộn trên request đã FAILED -> RECOVERY_REQUIRED, giữ bằng chứng, không mở lại
+  ✅ Request đóng FAILED (chưa từng capture)
+  ✅ Không báo thành công giả: RECOVERY_REQUIRED (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPF-01794c91-b3e7-489c-842b-892608823521"})
+  ✅ Capture ID được lưu bền làm bằng chứng
+  ✅ Request vẫn FAILED: store không tự mở lại hay ghi ví
+  ✅ Replay cùng capture: vẫn RECOVERY_REQUIRED (idempotent)
+  ✅ Capture khác: CAPTURE_ID_CONFLICT, bằng chứng đầu giữ nguyên
+  ✅ Capture xung đột cũng được ghi lại để đối soát
+  ✅ claimCapture trên request cần phục hồi: RECOVERY_REQUIRED (nhận RECOVERY_REQUIRED)
+  ✅ Request PENDING bình thường: VERIFIED như cũ
+  ✅ finish VERIFIED trên request đã FAILED: RECOVERY_REQUIRED, giữ bằng chứng (nhận {"ok":false,"outcome":"RECOVERY_REQUIRED","reason":"RECOVERY_REQUIRED","captureId":"CAPQ-e4a31664-1dc7-4bcd-93d4-da203d28b2ff"})
+
+K7: Legacy FAILED + VERIFIED requires manual recovery, never settlement
+  ✅ Legacy closed verified request is not SETTLEMENT_REQUIRED
+  ✅ Replay evidence on legacy FAILED does not return success
+  ✅ Immutable evidence preserved and recovery marker durable; request remains closed
+
+K4: Kết thúc không thu tiền chỉ với bằng chứng mạnh; chưa từng POST thì READY hợp lệ
+  ✅ APPROVED không phải bằng chứng kết thúc: bị từ chối
+  ✅ CAPTURE_DECLINED không phải bằng chứng kết thúc toàn order: bị store từ chối
+  ✅ Lược đồ đề xuất: CHECK của CSDL từ chối CAPTURE_DECLINED
+  ✅ Order VOIDED: NOT_CAPTURED
+  ✅ Sau NOT_CAPTURED: đóng được
+  ✅ Người trước chưa từng POST: không bắt buộc GET trước
+  ✅ Chưa từng POST: nhả về READY hợp lệ
+  ✅ Chưa từng POST: đóng được
+  ✅ Dấu đã gửi POST không xoá được bằng UPDATE trực tiếp
+
+K5: HAI process Node thật cùng giành quyền capture (barrier bằng file)
+  ✅ Hai process con chạy xong (exit 0/0)
+  [K5] pid 43976: CLAIMED BUSY BUSY CLAIMED BUSY | pid 31172: BUSY CLAIMED CLAIMED BUSY CLAIMED
+  ✅ Mỗi request: đúng một process CLAIMED, process kia BUSY
+  ✅ capture_attempts = 1 cho mọi request (thực tế 1,1,1,1,1)
+
+P9: Khởi động lại — báo giá, order, timestamp, trạng thái capture giữ nguyên
+  ✅ Đọc lại sau khởi động: giống hệt trước khi tắt
+  ✅ Retry create sau khởi động không làm mới timestamp
+
+  [pg/proposed] 106 đạt, 0 hỏng
+
+ALL PASS

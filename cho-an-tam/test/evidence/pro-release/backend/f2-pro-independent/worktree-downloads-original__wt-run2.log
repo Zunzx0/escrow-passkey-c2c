@@ -1,0 +1,14 @@
+﻿[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+Fixture bền — lỗi chia sẻ tệp được tiêm có kiểm soát
+  ✅ fake: rename EBUSY tạm thời giữ cả trạng thái cũ và mới
+  ✅ fake: lỗi đọc phải bị từ chối, không thay bằng EMPTY
+  ✅ fake: lỗi đọc không ghi đè trạng thái bền
+  ✅ rename EIO giữ lỗi gốc khi cleanup unlink EACCES
+  ✅ rename thất bại không thay trạng thái đã commit
+  ✅ owner write failure never publishes ownerless lock
+  ✅ owner preparation failure leaves next acquisition usable
+  ✅ kill false fails promptly instead of waiting forever
+  ✅ cleanup thử cả hai child và giữ lỗi barrier gốc
+  ✅ second stale contender cannot unlink fresh owner or acquire its lock

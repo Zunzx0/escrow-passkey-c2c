@@ -1,0 +1,70 @@
+◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+
+=== E2E BẢO MẬT: http://localhost:3910 ===
+
+SEC01: Challenge ngẫu nhiên, ngữ cảnh uỷ quyền lưu ở máy chủ
+  ✅ Server trả kèm ngữ cảnh để giao diện hiển thị thứ sắp uỷ quyền
+  ✅ Ngữ cảnh ghi đúng số tiền 850000
+  ✅ Ngữ cảnh ghi đúng người bán nhận tiền
+  ✅ Challenge KHÔNG phải giá trị băm của ngữ cảnh — đúng vai trò bảo đảm tính mới
+  ✅ Challenge dài 32 byte, đạt tối thiểu 16 byte
+  ✅ Hai lần phát cho ra hai challenge khác nhau
+  ✅ Thao tác giải ngân đòi mức xác minh người dùng, không chấp nhận mức hiện diện
+
+SEC02: Sửa số tiền SAU KHI ký → giải ngân bị chặn
+  ✅ Ký hợp lệ → nhận được phiếu uỷ quyền
+  ✅ Giải ngân bị CHẶN sau khi số tiền bị sửa (nhận 409 CONTEXT_MISMATCH)
+  ✅ Tiền vẫn nằm nguyên trong Escrow, không bị rút ra
+
+SEC03: Trả lại đúng nội dung ban đầu → cùng phiếu đó giải ngân được
+  ✅ Giải ngân thành công khi nội dung khớp (nhận 200)
+  ✅ Giao dịch chuyển sang COMPLETED
+  ✅ Người bán nhận đúng toàn bộ 850000, không tách khoản
+  ✅ Phần bị khoá của ký quỹ giảm đúng 850000
+  ✅ Tổng biến động của mọi bút toán trong giao dịch bằng không
+
+SEC04: Phiếu uỷ quyền dùng một lần
+  ✅ Lệnh giải ngân thứ hai bị từ chối (nhận 409 INVALID_STATE)
+
+SEC05: Phiếu của giao dịch này không dùng được cho giao dịch khác
+  ✅ Phiếu của giao dịch A dùng cho giao dịch B bị từ chối (nhận 401 REAUTH_REQUIRED)
+  ✅ Phiếu hết hạn bị từ chối (nhận 401 REAUTH_REQUIRED)
+
+SEC06: Gửi lặp yêu cầu khoá tiền chỉ tạo một tác động
+  ✅ Cả hai lần gửi đều trả về 200
+  ✅ Chỉ có đúng 1 bút toán trừ tiền, không nhân đôi (đếm được 1)
+
+SEC07: Cùng mã yêu cầu nhưng khác nội dung thì báo xung đột
+  ✅ Mã yêu cầu đã dùng cho giao dịch khác bị chặn (nhận 409 IDEMPOTENCY_KEY_REUSED)
+  ✅ Giao dịch D không bị khoá tiền nhầm theo kết quả cũ
+
+SEC08: Hai người mua cùng một tin đăng, chỉ một người khoá được tiền
+  ✅ Đúng một người khoá được tiền (thành công: 1)
+  ✅ Người đến sau nhận đúng lỗi sản phẩm đã bán (nhận 409 LISTING_SOLD)
+
+SEC09: Thao tác trên giao dịch không thuộc về mình bị từ chối
+  ✅ Người ngoài giao dịch bị chặn ở bước kiểm quyền sở hữu (nhận 403 FORBIDDEN)
+
+SEC10: Nhiều passkey trên một tài khoản, quản lý passkey đòi xác thực lại
+  ✅ Sau đăng ký có đúng 1 thiết bị
+  ✅ Thêm thiết bị khi chỉ có mã phiên bị từ chối (nhận 401 REAUTH_REQUIRED)
+  ✅ Xác thực lại bằng passkey đang có thì nhận được phiếu uỷ quyền
+  ✅ Có phiếu thì thêm được thiết bị thứ hai
+  ✅ Thiết bị mới lưu đúng tên
+  ✅ Đăng nhập bằng thiết bị thứ hai vào đúng tài khoản cũ
+
+SEC11: Không cho tự khoá mình ra ngoài
+  ✅ Xoá thiết bị khi không có phiếu bị từ chối (nhận 401)
+  ✅ Có phiếu thì xoá được thiết bị khi còn cái khác
+  ✅ Xoá passkey CUỐI CÙNG bị từ chối (nhận 409 LAST_CREDENTIAL)
+
+SEC12: Chuỗi nhật ký phát hiện sửa, chèn và xoá bản ghi
+  ✅ Chuỗi nhật ký nguyên vẹn trước khi can thiệp
+  ✅ Sửa nội dung một bản ghi giữa chuỗi bị phát hiện
+  ✅ Xoá một bản ghi giữa chuỗi bị phát hiện qua số thứ tự
+  ✅ Khôi phục đúng bản ghi thì chuỗi hợp lệ trở lại
+     → Phát hiện được sửa, chèn và xoá giữa chuỗi. Tính lại toàn chuỗi và xoá
+       cuối chuỗi vẫn là giới hạn đã nêu ở mục 2.2.7, cần điểm neo bên ngoài.
+
+=== KẾT QUẢ: TẤT CẢ PASS ✅ ===
+
