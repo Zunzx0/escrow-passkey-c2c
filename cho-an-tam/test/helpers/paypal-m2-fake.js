@@ -95,7 +95,7 @@ function createDurableFake({ statePath, lockHooks = {} }) {
         catch(error) {
           let owners;
           try{owners=fs.readdirSync(lockPath);}catch(e){if(e.code==='ENOENT'){if(Date.now()>=end)throw error;pause();continue;}throw e;}
-          if(owners.length===0){try{fs.rmdirSync(lockPath);}catch(e){if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(e.code))throw e;}}
+          if(owners.length===0){try{retrySharing(()=>fs.rmdirSync(lockPath));}catch(e){if(!['ENOENT','ENOTEMPTY','EEXIST'].includes(e.code))throw e;}}
           else {
             if(owners.length!==1 || !/^owner-\d+-[a-f0-9]{32}$/.test(owners[0]))throw Error('invalid fake state lock owner');
             const oldName=owners[0],oldPid=Number(oldName.split('-')[1]);

@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const h = require('./paypal/harness');
+const BROWSER_CLEANUP_MS = 30000;
 const SPEC_DIR = path.join(__dirname, 'paypal');
 const SPECS = [
   { id: 'B1B2', file: 'payment-flow.browser.js' },
@@ -48,7 +49,7 @@ function createLock(lockPath, { isAlive = pid => {
             let owner;
             try { owner = JSON.parse(fs.readFileSync(path.join(lockPath, names[0]), 'utf8')); }
             catch (readError) { if (readError.code === 'ENOENT') continue; throw readError; }
-            if (!Number.isInteger(owner.pid) || owner.pid < 1 || !isAlive(owner.pid)) throw Error('Stale browser lock; verify owner manually before cleanup');
+            if (!Number.isInteger(owner.pid) || owner.pid < 1 || !isAlive(owner.pid)) throw Error(`Stale browser lock at ${lockPath}; owner PID ${owner.pid}; verify owner and Chrome children manually before cleanup`);
           }
           await sleep(25);
           continue;
@@ -95,7 +96,7 @@ function makeT(specId, totals, failedCases, skippedCases) {
         else if (!(e instanceof PreconditionFailed)) fail('Ngoại lệ trong ca: ' + (e.stack || e));
       } finally {
         for (const fnc of cleanups.reverse()) {
-          try { await h.withDeadline(fnc(), 5000, 'case cleanup'); } catch (e) { fail('Dọn tài nguyên: ' + e.message); }
+          try { await h.withDeadline(fnc(), h.SESSION_CLEANUP_MS, 'case cleanup'); } catch (e) { fail('Dọn tài nguyên: ' + e.message); }
         }
       }
       if (caseFail) failedCases.push(name);
@@ -117,14 +118,13 @@ async function main(args = process.argv.slice(2)) {
   const started = Date.now();
   let browser, cleanupPromise, interrupted = false;
   const cleanup = () => cleanupPromise ||= (async () => {
-    const results = await Promise.allSettled([
-      h.closeAllSessions(),
-      browser ? h.withDeadline(browser.close(), 5000, 'browser cleanup') : Promise.resolve(),
-    ]);
-    const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
+    // Avoid racing context shutdown against browser shutdown.
+    const errors = [];
+    try { await h.withDeadline(h.closeAllSessions(), h.SESSION_CLEANUP_MS, 'session cleanup'); } catch (e) { errors.push(e); }
+    try { if (browser) await h.withDeadline(browser.close(), BROWSER_CLEANUP_MS, 'browser cleanup'); } catch (e) { errors.push(e); }
     // Failed cleanup retains the owner's lock: do not let a second runner overlap a possibly live browser.
     if (!errors.length) { try { lock.release(); } catch (e) { errors.push(e); } }
-    for (const e of errors) { totals.fail++; console.error('Cleanup failed:', e.message); }
+    for (const e of errors) { totals.fail++; console.error('Cleanup failed:', e.message, `; lock retained at ${path.join(os.tmpdir(), 'enclave-paypal-browser.lock')}; owner PID ${process.pid}`); }
   })();
   const onSignal = () => { interrupted = true; abort.abort(); if (browser) void cleanup(); };
   process.on('SIGINT', onSignal);

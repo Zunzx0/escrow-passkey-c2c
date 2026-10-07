@@ -12,6 +12,8 @@
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const CONTEXT_CLEANUP_MS = 30000;
+const SESSION_CLEANUP_MS = 35000;
 const activeSessions = new Set();
 async function withDeadline(promise, ms, label) {
   let timer;
@@ -173,7 +175,7 @@ async function openSession(browser, opts = {}) {
   let ctx, closing;
   const close = () => closing ||= (async () => {
     const results = await Promise.allSettled([
-      ctx ? withDeadline(ctx.close(), 5000, 'context cleanup') : Promise.resolve(),
+      ctx ? withDeadline(ctx.close(), CONTEXT_CLEANUP_MS, 'context cleanup') : Promise.resolve(),
       withDeadline(fx.close(), 5000, 'fixture cleanup'),
     ]);
     const errors = results.filter(r => r.status === 'rejected').map(r => r.reason);
@@ -283,7 +285,7 @@ module.exports = {
   PUBLIC, SANDBOX, PAYPAL_HOST, INTENT_PREFIX, ID, KEY, AMOUNT, BUYER, OTHER, WALLET,
   json, HANG: hang, hang, sleep, deferred, CFG, quote, ppRow, intentJson, baseRoutes, paypalServer,
   // hạ tầng
-  findChrome, startFixture, openSession, withDeadline, closeAllSessions,
+  findChrome, startFixture, openSession, withDeadline, closeAllSessions, SESSION_CLEANUP_MS,
 };
 
 /*

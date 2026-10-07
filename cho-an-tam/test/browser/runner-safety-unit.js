@@ -82,3 +82,12 @@ test('failed page creation closes context and fixture, preserving setup failure'
 test('cleanup deadline fails bounded instead of hanging',async()=>{
   await assert.rejects(h.withDeadline(new Promise(()=>{}),20,'test cleanup'),/timed out/);
 });
+test('context cleanup lasting beyond five seconds completes before setup error is returned',async()=>{
+  let closed=false;
+  const ctx={on(){},route:async()=>{},newPage:async()=>{throw Error('controlled page failure');},close:async()=>{await new Promise(resolve=>setTimeout(resolve,5200));closed=true;}};
+  let failure;
+  try {await h.openSession({newContext:async()=>ctx});} catch(error){failure=error;}
+  assert.match(failure.message,/controlled page failure/);
+  assert.equal(failure.cleanupError,undefined);
+  assert.equal(closed,true);
+});
