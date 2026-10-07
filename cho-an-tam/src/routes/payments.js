@@ -10,7 +10,7 @@ const { getUserWallet } = require('../lib/walletOps');
 const router = express.Router();
 
 const {parseAmount,parseClientRequestId,assertTopupLimits}=require('../lib/topupPolicy');
-async function serializePaymentRequest(p) {
+async function serializePaymentRequest(p, options) {
   const base = {
     id: p.id,
     amount: p.amount,
@@ -26,7 +26,7 @@ async function serializePaymentRequest(p) {
     submissionStatus: p.submission_status || 'SUBMITTED',
   };
   if (p.provider !== 'PAYPAL_SANDBOX') return base;
-  return { ...base, ...await require('../lib/paypalRuntime').serializePayPal(p.id) };
+  return { ...base, ...await require('../lib/paypalRuntime').serializePayPal(p.id, options) };
 }
 
 const loadByClientKey = (userId, key) =>
@@ -139,7 +139,9 @@ router.get('/me', requireAuth, async (req, res) => {
   const rows = await db
     .prepare('SELECT * FROM payment_requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 200')
     .all(req.user.id);
-  res.json({ paymentRequests: await Promise.all(rows.map(serializePaymentRequest)) });
+  // History is a DB snapshot; one provider outage must not hide every payment.
+  // Fresh verification remains on detail/checkout/capture endpoints.
+  res.json({ paymentRequests: await Promise.all(rows.map(p => serializePaymentRequest(p, { allowProviderLookup: false }))) });
 });
 
 // ---------------------------------------------------------------------------

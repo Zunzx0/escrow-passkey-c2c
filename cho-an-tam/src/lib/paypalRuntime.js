@@ -60,12 +60,12 @@ function createPayPalRuntime({config=configFromEnvironment(),provider=null}={}) 
     if(row.status==='PENDING') await service.createOrder({paymentRequestId:row.id,userId});
     return serializePayPal(row.id,{approval:true});
   }
-  async function serializePayPal(id,{approval=false}={}) {
+  async function serializePayPal(id,{approval=false,allowProviderLookup=true}={}) {
     const binding=await store.loadByRequestId(id);if(!binding)return {};
     const pr=await db.prepare('SELECT * FROM payment_requests WHERE id=?').get(id);
     let approvalUrl=null,payerActionVerified=false;
     const actionHint=binding.capture.state==='UNKNOWN' && binding.capture.lastError==='PAYPAL_PAYER_ACTION_REQUIRED';
-    if(enabled && binding.status==='PENDING' && binding.orderId && ((approval && binding.capture.state==='READY') || actionHint)) {
+    if(allowProviderLookup && enabled && binding.status==='PENDING' && binding.orderId && ((approval && binding.capture.state==='READY') || actionHint)) {
       await owned(id,binding.userId);
       const current=await adapter.getOrder({orderId:binding.orderId,paymentRequestId:id,quote:binding.quote});
       if (!current || current.orderId!==binding.orderId || current.paymentRequestId!==id || current.amount!==binding.amountVnd) throw new AppError(409,'PAYPAL_ORDER_MISMATCH','Bằng chứng PayPal không khớp yêu cầu');
@@ -96,4 +96,4 @@ function createPayPalRuntime({config=configFromEnvironment(),provider=null}={}) 
 }
 let singleton;
 const getRuntime=()=>singleton||(singleton=createPayPalRuntime());
-module.exports={createPayPalRuntime,configFromEnvironment,serializePayPal:(id)=>getRuntime().serializePayPal(id),getRuntime};
+module.exports={createPayPalRuntime,configFromEnvironment,serializePayPal:(id,options)=>getRuntime().serializePayPal(id,options),getRuntime};
