@@ -36,8 +36,16 @@ function createAbandonment({ store, provider, db, serialize }) {
   // req: request Express của chủ ví (actor/ip/route cho audit). row: request đã qua owned().
   async function abandon(row, { req, nowIso }) {
     const id = row.paymentRequestId;
+    // Replay: có audit abandon VÀ binding mới nhất (đọc SAU truy vấn audit) chưa có bằng chứng thu tiền.
+    const replay = async () => {
+      if (!(await isAbandoned(id))) throw unsafe();
+      const b = await store.loadByRequestId(id);
+      if (!b || b.capture.state === 'RECOVERY_REQUIRED' || b.capture.state === 'VERIFIED' || b.capture.recoveryRequiredAt || b.capture.captureId ||
+          /^(CONFLICTING_CAPTURE|CAPTURED_AFTER_REQUEST_CLOSED)/.test(b.capture.lastError || '')) throw unsafe();
+      return done('ALREADY_ABANDONED');
+    };
     const done = async (outcome) => ({ ...await serialize(id, { allowProviderLookup: false }), outcome });
-    if (row.status === 'FAILED') { if (await isAbandoned(id)) return done('ALREADY_ABANDONED'); throw unsafe(); }
+    if (row.status === 'FAILED') return replay();
     const c = row.capture;
     if (row.status !== 'PENDING' || !row.orderId || c.state !== 'READY' || c.postSentAt !== null || c.claimedAt !== null) throw unsafe();
 
@@ -54,8 +62,7 @@ function createAbandonment({ store, provider, db, serialize }) {
     const closed = await store.closeUncaptured(id, { nowIso, reason: REASON, audit, onlyNeverPosted: true, expectedOrderId: current.orderId });
     if (closed.closed) return done('ABANDONED');
     // Thua race: nếu một lượt abandon song song đã thắng thì coi là replay, còn lại thì không an toàn.
-    if (await isAbandoned(id)) return done('ALREADY_ABANDONED');
-    throw unsafe();
+    return replay();
   }
   return { abandon };
 }

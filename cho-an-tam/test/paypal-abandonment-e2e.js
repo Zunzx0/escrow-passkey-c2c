@@ -464,7 +464,7 @@ async function main() {
       ok(out && (out.outcome === 'RECOVERY_REQUIRED'), `[${label}] kết quả RECOVERY_REQUIRED`, JSON.stringify(out));
       const s = await snap(r.id);
       ok(s.b.capture_state === 'RECOVERY_REQUIRED' && s.b.capture_id === 'CAP' + r.orderId && !!s.b.recovery_required_at, `[${label}] binding: RECOVERY_REQUIRED, capture_id lưu đúng, recovery_required_at có`);
-      ok(s.pr.status === 'FAILED' && s.pr.last_reconcile_error === 'USER_ABANDONED', `[${label}] request vẫn FAILED (không mở lại), dấu USER_ABANDONED còn`);
+      ok(s.pr.status === 'FAILED' && s.pr.last_reconcile_error === 'USER_ABANDONED', `[${label}] request vẫn FAILED (không mở lại), last_reconcile_error=USER_ABANDONED (chỉ đúng khi chưa qua lượt quét lô)`);
       ok((await balance(u)) === bal0 && (await ledger(u)) === led0 && (await H.credits(db, r.id)).length === 0, `[${label}] KHÔNG credit ví, KHÔNG ghi ledger`);
       eq(await cnt('SELECT COUNT(*) AS n FROM wallet_entries WHERE entry_type=?', 'TOPUP_CREDIT'), credits0, `[${label}] tổng bút toán TOPUP_CREDIT toàn DB không đổi`);
     }
@@ -495,7 +495,7 @@ async function main() {
     eq([e.event_type, e.outcome, e.actor_id], ['PAYPAL_REQUEST_ABANDONED', 'ALLOWED', u.id], 'event_type, outcome=ALLOWED, actor_id = chủ (lấy từ phiên)');
     eq([detail.action, detail.reason, detail.source], ['ABANDON', 'USER_ABANDONED', 'OWNER'], 'detail: action=ABANDON, reason=USER_ABANDONED, source=OWNER');
     const s = await snap(r.id);
-    eq([s.pr.status, s.pr.resolved_by, s.pr.last_reconcile_error, s.pr.user_id], ['FAILED', 'RECONCILER', 'USER_ABANDONED', u.id], 'payment_requests: FAILED, resolved_by=RECONCILER, last_reconcile_error=USER_ABANDONED, user_id=chủ');
+    eq([s.pr.status, s.pr.resolved_by, s.pr.last_reconcile_error, s.pr.user_id], ['FAILED', 'RECONCILER', 'USER_ABANDONED', u.id], 'payment_requests ngay sau abandon (chưa qua lượt quét): FAILED, resolved_by=RECONCILER, last_reconcile_error=USER_ABANDONED, user_id=chủ');
     ok(!!s.pr.resolved_at, 'resolved_at có giá trị');
     info(`audit: username=${e.username} route=${e.route} method=${e.method} status_code=${e.status_code} detail=${e.detail}`);
     ok(!/Bearer|eyJ/.test(JSON.stringify(e)), 'audit không chứa token/bí mật');
@@ -735,6 +735,319 @@ async function main() {
     const cd = await st.claimCapture(d.r.id, d.u.id, uuid(), nowIso(), cutoff());
     ok(cd.outcome === 'CLOSED' && !(await snap(d.r.id)).b.capture_claim, '(d) claimCapture trên request FAILED: CLOSED, không tạo claim');
     info('(d) điều kiện EXISTS pr.status trong UPDATE của claimCapture là phòng thủ chiều sâu: đã có nhánh CLOSED trong cùng transaction trước đó, nên không có ca nào bắt được qua API store; KHÔNG được báo là có phủ.');
+  });
+
+  // ---------------------------------------------------------------------------------------------------
+  // R2: đường LÔ của worker (C12) và replay sau RECOVERY_REQUIRED (C13)
+  const { reconcileOnce } = require('../src/lib/reconciler');
+  const { createAbandonment } = require('../src/lib/paypalAbandonment');
+  const FUTURE = '2999-01-01T00:00:00.000Z';
+  const ago = (sec) => new Date(Date.now() - sec * 1000).toISOString();
+  // Cô lập chặt: mọi request PayPal/MOCK khác bị đẩy ra created_at 2999 VÀ last_reconciled_at 2999 (không thoả created_at<=cutoff của nhóm PENDING,
+  // cũng không thoả last_reconciled_at<=cutoff của nhóm abandon), nên không còn dòng sót nào chiếm SHARE hay làm sai số đếm.
+  async function isolate(keepIds) {
+    const q = keepIds.length ? `AND id NOT IN (${keepIds.map(() => '?').join(',')})` : '';
+    await db.prepare(`UPDATE payment_requests SET created_at = ?, last_reconciled_at = ? WHERE provider IN ('PAYPAL_SANDBOX','MOCK') ${q}`).run(FUTURE, FUTURE, ...keepIds);
+  }
+  const batch = (limit = 10) => reconcileOnce({ minAgeSeconds: 0, limit, paypalRuntime: rtShort });
+  const lateCap = async (orderId) => {
+    fake.approve(orderId);
+    return (await fake.fetchImpl(`${SANDBOX}/v2/checkout/orders/${orderId}/capture`, { method: 'POST', headers: { 'PayPal-Request-Id': 'late-' + orderId }, body: '{}' })).status;
+  };
+  const gets = (r) => count('get', r.orderId);
+  async function abandoned(label) {
+    const x = await mkNew(label);
+    const ab = await abandon(PP, x.u, x.r.id);
+    ok(isOk(ab, 'ABANDONED'), `precond: request ${label} đã USER_ABANDONED`, `nhận ${ab.status}`);
+    return x;
+  }
+
+  await runCase('C12', 'Worker LÔ (reconcileOnce không paymentRequestId): quét dòng FAILED chưa-POST để bắt thu muộn', async () => {
+    // (a) thu muộn, không webhook
+    const A = await abandoned('c12a');
+    await isolate([A.r.id]);
+    eq(await lateCap(A.r.orderId), 201, 'precond: PayPal thu muộn (fake), KHÔNG webhook');
+    const pa = await snap(A.r.id);
+    ok(pa.pr.status === 'FAILED' && !pa.b.capture_post_sent_at && pa.b.capture_state === 'READY', 'precond: request FAILED, binding READY, chưa từng POST');
+    const bal0 = await balance(A.u); const led0 = await ledger(A.u); const g0 = gets(A.r);
+    const s1 = await batch();
+    ok(s1.paypal && s1.paypal.recoveryRequired === 1, '(a) summary.paypal.recoveryRequired = 1 [ĐỎ trên HEAD: dòng FAILED chưa-POST không được chọn]', JSON.stringify(s1.paypal));
+    const a1 = await snap(A.r.id);
+    ok(a1.pr.status === 'FAILED' && a1.b.capture_state === 'RECOVERY_REQUIRED' && a1.b.capture_id === 'CAP' + A.r.orderId && !!a1.b.recovery_required_at, '(a) FAILED giữ nguyên, capture_state=RECOVERY_REQUIRED, capture_id lưu, recovery_required_at có');
+    ok((await balance(A.u)) === bal0 && (await ledger(A.u)) === led0 && (await H.credits(db, A.r.id)).length === 0, '(a) ví và số hàng sổ cái KHÔNG đổi, không credit');
+    ok(gets(A.r) - g0 >= 1, '(a) transport thấy GET order thật trong lượt lô');
+    // (b) không quét lại dòng đã RECOVERY_REQUIRED
+    const g1 = gets(A.r);
+    const s2 = await batch();
+    eq([gets(A.r) - g1, s2.paypal && s2.paypal.scanned], [0, 0], '(b) lượt lô thứ hai: không GET lại dòng RECOVERY_REQUIRED, scanned=0');
+
+    // (c) cửa sổ
+    const Wo = await abandoned('c12co'); const Wi = await abandoned('c12ci');
+    await isolate([Wo.r.id, Wi.r.id]);
+    await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(73 * 3600), Wo.r.id);
+    await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(71 * 3600), Wi.r.id);
+    const go = gets(Wo.r); const gi = gets(Wi.r);
+    await batch();
+    eq([gets(Wo.r) - go, gets(Wi.r) - gi], [0, 1], '(c) chỉ dòng trong cửa sổ 72h (now-71h) được quét; dòng now-73h không [ĐỎ trên HEAD: không dòng nào được chọn]');
+
+    // (d) giãn cách RESCAN (900 s)
+    const D = await abandoned('c12d');
+    await isolate([D.r.id]);
+    let gd = gets(D.r);
+    await batch();
+    eq(gets(D.r) - gd, 1, '(d) lần đầu (last_reconciled_at NULL): quét 1 lần [ĐỎ trên HEAD]');
+    gd = gets(D.r); await batch();
+    eq(gets(D.r) - gd, 0, '(d) vừa quét xong: KHÔNG quét lại trước RESCAN');
+    await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(600), D.r.id);
+    gd = gets(D.r); await batch();
+    eq(gets(D.r) - gd, 0, '(d) last_reconciled_at = now-600s (< 900s): vẫn không quét');
+    await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(1000), D.r.id);
+    gd = gets(D.r); await batch();
+    eq(gets(D.r) - gd, 1, '(d) last_reconciled_at = now-1000s (> 900s): quét lại');
+
+    // (e) công bằng: PENDING không bị dòng đã đóng chiếm; nhóm abandon tối đa SHARE = max(1, floor(limit/5)), cũ nhất trước
+    const P = []; for (let i = 0; i < 4; i++) P.push((await mkNew('c12p')).r);
+    const M = []; for (let i = 1; i <= 6; i++) { const x = await abandoned('c12m'); M.push(x.r); }
+    const mockId = uuid();
+    await db.prepare("INSERT INTO payment_requests (id,user_id,amount,status,provider_ref,version,provider,created_at,updated_at) VALUES (?,?,10000,'PENDING',?,0,'MOCK',?,?)")
+      .run(mockId, M[0].user.id, 'mock-ref-' + uuid(), ago(3600), ago(3600));
+    await isolate([...P.map((x) => x.id), ...M.map((x) => x.id), mockId]);
+    await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(3600), mockId);
+    for (let i = 0; i < 6; i++) await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(1000 + 100 * (i + 1)), M[i].id); // M[5] cũ nhất
+    const scannedOf = (rows, before) => rows.map((r, i) => gets(r) - before[i] > 0);
+    let bp = P.map(gets); let bm = M.map(gets);
+    const e1 = await batch(5);
+    ok(scannedOf(P, bp).every(Boolean), '(e) limit=5: TẤT CẢ 4 dòng PENDING đều được quét (không bị dòng đã đóng chiếm chỗ)');
+    eq(scannedOf(M, bm), [false, false, false, false, false, true], '(e) limit=5 (SHARE=1): nhóm abandon quét đúng 1 dòng, là dòng last_reconciled_at cũ nhất [ĐỎ trên HEAD]');
+    ok(!(e1.results || []).some((x) => x.id === mockId && x.provider === 'PAYPAL_SANDBOX'), '(e) dòng MOCK không bị nhóm PayPal đụng tới');
+    bp = P.map(gets); bm = M.map(gets);
+    await batch(10);
+    ok(scannedOf(P, bp).every(Boolean), '(e) limit=10: 4 dòng PENDING vẫn đều được quét');
+    eq(scannedOf(M, bm), [false, false, false, true, true, false], '(e) limit=10 (SHARE=2): quét đúng 2 dòng cũ nhất còn đủ giãn cách (M[4], M[3]); M[5] vừa quét nên bị giãn cách [ĐỎ trên HEAD]');
+    eq((await snap(mockId)).pr.provider, 'MOCK', '(e) dòng MOCK vẫn là MOCK');
+
+    // (f) FAILED đã POST: quy tắc cũ
+    const F = await mkNew('c12f', { approve: true });
+    const cf = await claim(F.r); await rtShort.store.markCapturePostSent(F.r.id, cf.claimId);
+    await db.prepare("UPDATE payment_requests SET status='FAILED' WHERE id=?").run(F.r.id);   // fixture DB (như paypal-m2-settlement T6)
+    await isolate([F.r.id]);
+    await db.prepare('UPDATE paypal_payment_bindings SET capture_claim=NULL, capture_claimed_at=NULL, capture_state=? WHERE payment_request_id=?').run('UNKNOWN', F.r.id);
+    ok((await snap(F.r.id)).b.capture_post_sent_at && (await snap(F.r.id)).pr.status === 'FAILED', 'precond: FAILED đã POST (UNKNOWN)');
+    await lateCap(F.r.orderId);
+    const sf = await batch();
+    ok(sf.paypal && sf.paypal.recoveryRequired === 1 && (await snap(F.r.id)).b.capture_state === 'RECOVERY_REQUIRED', '(f) FAILED đã POST: vẫn được quét và chuyển RECOVERY_REQUIRED như quy tắc cũ', JSON.stringify(sf.paypal));
+
+    // (g) lỗi provider khi quét dòng abandon
+    for (const [mode, code] of [['timeout', 'PAYPAL_TIMEOUT'], ['drop', 'PAYPAL_UNAVAILABLE'], ['404', 'PAYPAL_API_ERROR']]) {
+      const G = await abandoned('c12g');
+      await isolate([G.r.id]);
+      const bal = await balance(G.u); const gg = gets(G.r);
+      inject[G.r.orderId] = { get: mode };
+      let sg; let thrown = null;
+      try { sg = await batch(); } catch (e) { thrown = e; } finally { delete inject[G.r.orderId]; }
+      ok(!thrown, `(g) ${mode}: lượt lô không ném lỗi`, thrown && thrown.message);
+      const s = await snap(G.r.id);
+      ok(gets(G.r) - gg >= 1 && sg && sg.paypal.errors === 1, `(g) ${mode}: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD]`, sg && JSON.stringify(sg.paypal));
+      ok(s.pr.status === 'FAILED' && (await H.credits(db, G.r.id)).length === 0 && (await balance(G.u)) === bal, `(g) ${mode}: request vẫn FAILED, không credit`);
+      eq(s.pr.last_reconcile_error, code, `(g) ${mode}: lỗi được ghi (recordError) = ${code} [ĐỎ trên HEAD]`);
+    }
+  });
+
+  await runCase('C13', 'Replay sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, giữ bằng chứng; nhánh thua race; replay thường vẫn 200', async () => {
+    const paths = [
+      ['store.markCaptureVerified', async (r) => rtShort.store.markCaptureVerified(r.id, 'CAP' + r.orderId)],
+      ['webhook', async (r) => rtShort.webhook(hdr(), evt(r.orderId))],
+      ['reconcileOne (worker)', async (r) => rtShort.reconcileOne(r.id)],
+    ];
+    for (const [label, run] of paths) {
+      const { u, r } = await abandoned('c13a');
+      await lateCap(r.orderId);
+      const out = await run(r);
+      const mid = await snap(r.id);
+      ok(mid.b.capture_state === 'RECOVERY_REQUIRED' && mid.pr.status === 'FAILED', `(a/${label}) precond: RECOVERY_REQUIRED sau capture muộn`, JSON.stringify(out));
+      const bal = await balance(u); const led = await ledger(u); const ev = await allAbandonEvents();
+      const again = await abandon(PP, u, r.id);
+      ok(again.status === 409 && again.body.error === 'PAYPAL_ABANDON_UNSAFE', `(a/${label}) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED]`, `nhận ${again.status} ${again.body && (again.body.outcome || again.body.error)}`);
+      ok(same(await snap(r.id), mid) && (await balance(u)) === bal && (await ledger(u)) === led && (await allAbandonEvents()) === ev, `(a/${label}) evidence, ví, sổ cái, audit không đổi`);
+    }
+    // (b) nhánh thua race, dựng createAbandonment với store thật bọc mỏng
+    const { u, r } = await mkNew('c13b');
+    const row = await rtLong.store.loadByRequestId(r.id);
+    const bArrived = defer(); const bRelease = defer();
+    let lost = 0;
+    const thin = { ...rtLong.store, closeUncaptured: async (id, o) => {
+      const res = await rtLong.store.closeUncaptured(id, o);
+      if (res.closed === false) { lost++; bArrived.resolve(); await bRelease.promise; }
+      return res;
+    } };
+    const svc = createAbandonment({ store: thin, provider: providerLong, db, serialize: (id, o) => rtLong.serializePayPal(id, o) });
+    const fakeReq = { user: { id: u.id, username: u.username }, method: 'POST', baseUrl: '/api/payments/paypal', route: { path: '/:id/abandon' }, path: `/${r.id}/abandon`, ip: '127.0.0.1' };
+    const g = { orderId: r.orderId, need: 2, arrived: 0, hit: defer(), release: defer() };
+    gate.armed = g;
+    const settle = (p) => p.then((v) => ({ v }), (e) => ({ e }));
+    try {
+      const p1 = settle(svc.abandon(row, { req: fakeReq, nowIso: nowIso() })); const p2 = settle(svc.abandon(row, { req: fakeReq, nowIso: nowIso() }));
+      const first = await Promise.race([g.hit.promise.then(() => 'hit'), Promise.all([p1, p2]).then(() => 'done'), sleep(10000).then(() => 'timeout')]);
+      ok(first === 'hit', '(b) precond: cả hai lời gọi abandon đã GET xong và cùng đứng ở barrier', `kết quả ${first}`);
+      g.release.resolve();
+      const arrived = await Promise.race([bArrived.promise.then(() => 'arrived'), sleep(10000).then(() => 'timeout')]);
+      ok(arrived === 'arrived' && lost === 1, '(b) precond: bên thua (closed:false) đã tới barrier và đang bị giữ', `kết quả ${arrived}, lost=${lost}`);
+      const states = await Promise.race([Promise.all([p1, p2]).then(() => 'both-done'), sleep(300).then(() => 'one-held')]);
+      eq(states, 'one-held', '(b) precond: bên thua vẫn bị giữ (chưa trả kết quả)');
+      const w = await snap(r.id);
+      ok(w.pr.status === 'FAILED' && (await abandonEvents(u)).length === 1, '(b) precond: bên thắng đã đóng FAILED với đúng 1 audit');
+      await lateCap(r.orderId);
+      const rec = await rtLong.store.markCaptureVerified(r.id, 'CAP' + r.orderId);
+      const afterRec = await snap(r.id);
+      ok(rec.outcome === 'RECOVERY_REQUIRED' && afterRec.b.capture_state === 'RECOVERY_REQUIRED' && afterRec.b.capture_id === 'CAP' + r.orderId, '(b) precond: recovery đã được lưu TRƯỚC khi thả bên thua', JSON.stringify(rec));
+      const bal = await balance(u); const led = await ledger(u);
+      bRelease.resolve();
+      const [x1, x2] = await Promise.all([p1, p2]);
+      const winner = [x1, x2].find((x) => x.v && x.v.outcome === 'ABANDONED'); const loser = [x1, x2].find((x) => x !== winner);
+      ok(!!winner, '(b) một bên trả ABANDONED');
+      ok(loser && loser.e && loser.e.status === 409 && loser.e.code === 'PAYPAL_ABANDON_UNSAFE', '(b) bên thua sau khi có recovery: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG ALREADY_ABANDONED [ĐỎ trên HEAD]', loser && JSON.stringify(loser.v ? { outcome: loser.v.outcome } : { code: loser.e && loser.e.code }));
+      ok(same(await snap(r.id), afterRec) && (await balance(u)) === bal && (await ledger(u)) === led && (await abandonEvents(u)).length === 1, '(b) evidence, ví, sổ cái giữ nguyên; vẫn đúng 1 audit');
+    } finally { gate.armed = null; g.release.resolve(); bRelease.resolve(); }
+    // (c) hồi quy: replay thường (không có bằng chứng thu)
+    const n = await abandoned('c13c');
+    const sn = await snap(n.r.id);
+    const rn = await abandon(PP, n.u, n.r.id);
+    ok(isOk(rn, 'ALREADY_ABANDONED') && same(await snap(n.r.id), sn), '(c) replay thường (không có capture): vẫn 200 ALREADY_ABANDONED, không đổi', `nhận ${rn.status} ${rn.body && (rn.body.outcome || rn.body.error)}`);
+  });
+
+  await runCase('C14', 'R2b: replay 409 khi bằng chứng xung đột/VERIFIED cũ; cột last_reconcile_error không phải nguồn; thứ tự và biên của nhóm quét abandon', async () => {
+    // (1) CAPTURE_ID_CONFLICT trên request đã abandon: A giữ lastError CONFLICTING_CAPTURE, state READY, capture_id NULL
+    const A = await abandoned('c14a');
+    const B = await mkNew('c14b', { approve: true });
+    const capB = await call(PP, `/${B.r.id}/capture`, { method: 'POST', token: B.u.token, body: {} });
+    ok(capB.status === 200 && capB.body.outcome === 'APPLIED', '(1) precond: request B khác đã giữ capture_id X (capture thật)');
+    const X = (await snap(B.r.id)).b.capture_id;
+    const cf = await rtShort.store.markCaptureVerified(A.r.id, X);
+    const a0 = await snap(A.r.id);
+    ok(cf.ok === false && cf.reason === 'CAPTURE_ID_CONFLICT', '(1) precond: markCaptureVerified(A, X) = CAPTURE_ID_CONFLICT', JSON.stringify(cf));
+    ok(a0.b.capture_state === 'READY' && a0.b.capture_id === null && a0.b.recovery_required_at === null && /^CONFLICTING_CAPTURE:/.test(a0.b.last_capture_error || ''), '(1) precond: A vẫn READY, capture_id NULL, recovery_required_at NULL, last_capture_error CONFLICTING_CAPTURE:...');
+    const balA = await balance(A.u); const ledA = await ledger(A.u); const evA = await allAbandonEvents();
+    const again = await abandon(PP, A.u, A.r.id);
+    ok(again.status === 409 && again.body.error === 'PAYPAL_ABANDON_UNSAFE', '(1) abandon lại khi capture.lastError=CONFLICTING_CAPTURE: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200]', `nhận ${again.status} ${again.body && (again.body.outcome || again.body.error)}`);
+    ok(same(await snap(A.r.id), a0) && (await balance(A.u)) === balA && (await ledger(A.u)) === ledA && (await allAbandonEvents()) === evA, '(1) bằng chứng, ví, sổ cái, audit không đổi');
+
+    // (2) VERIFIED cũ trên request FAILED (persistLegacyRecovery): fixture DB (dữ liệu legacy), có audit abandon từ trước
+    const V = await abandoned('c14v');
+    await db.prepare("UPDATE paypal_payment_bindings SET capture_state='VERIFIED', capture_id=?, capture_verified_at=? WHERE payment_request_id=?").run('CAPLEG' + V.r.id, nowIso(), V.r.id);
+    const lv = await rtShort.store.markCaptureVerified(V.r.id, 'CAPLEG' + V.r.id);
+    const v0 = await snap(V.r.id);
+    ok(lv.outcome === 'RECOVERY_REQUIRED' && v0.b.capture_state === 'VERIFIED' && !!v0.b.recovery_required_at && v0.b.last_capture_error === 'CAPTURED_AFTER_REQUEST_CLOSED', '(2) precond (fixture DB): VERIFIED cũ trên request FAILED + recovery_required_at + CAPTURED_AFTER_REQUEST_CLOSED', JSON.stringify(lv));
+    const balV = await balance(V.u); const evV = await allAbandonEvents();
+    const rv = await abandon(PP, V.u, V.r.id);
+    ok(rv.status === 409 && rv.body.error === 'PAYPAL_ABANDON_UNSAFE', '(2) abandon lại với VERIFIED cũ trên FAILED: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200]', `nhận ${rv.status} ${rv.body && (rv.body.outcome || rv.body.error)}`);
+    ok(same(await snap(V.r.id), v0) && (await balance(V.u)) === balV && (await allAbandonEvents()) === evV, '(2) bằng chứng/ví/audit không đổi');
+
+    // (3) cột last_reconcile_error bị ghi đè bởi lượt quét LỖI: replay vẫn dựa vào audit
+    const E = await abandoned('c14e');
+    await isolate([E.r.id]);
+    eq((await snap(E.r.id)).pr.last_reconcile_error, 'USER_ABANDONED', '(3) precond: ngay sau abandon (chưa qua lượt quét) cột = USER_ABANDONED');
+    inject[E.r.orderId] = { get: 'timeout' };
+    try { await batch(); } finally { delete inject[E.r.orderId]; }
+    info(`(3) sau lượt quét LỖI cột last_reconcile_error = ${(await snap(E.r.id)).pr.last_reconcile_error} (có thể bị ghi đè bằng mã lỗi; USER_ABANDONED chỉ đảm bảo khi chưa quét hoặc quét thành công theo backend)`);
+    await db.prepare("UPDATE payment_requests SET last_reconcile_error='PAYPAL_TIMEOUT' WHERE id=?").run(E.r.id);     // đảm bảo ghi đè, bất kể backend
+    const se = await snap(E.r.id); const evE = await allAbandonEvents();
+    const re = await abandon(PP, E.u, E.r.id);
+    ok(isOk(re, 'ALREADY_ABANDONED') && same(await snap(E.r.id), se) && (await allAbandonEvents()) === evE, '(3) cột đã bị ghi đè bằng mã lỗi nhưng chưa có bằng chứng thu: replay vẫn 200 ALREADY_ABANDONED nhờ audit, không thêm dữ liệu', `nhận ${re.status} ${re.body && (re.body.outcome || re.body.error)}`);
+
+    // (4) thứ tự quét theo chính sách hiệu dụng ORDER BY COALESCE(last_reconciled_at, created_at) ASC ("nhìn lần cuối hoặc tạo, cái nào sớm hơn đi trước").
+    // Mục tiêu: NULL không bị xếp cuối theo từng loại DB. Kỳ vọng "NULL luôn đứng trước" ban đầu mạnh hơn yêu cầu; Pro đã đính chính (sửa kỳ vọng, không phải lỗi sản phẩm).
+    const orderOfGets = async (rows, limit) => {
+      const mark = net.length;
+      await batch(limit);
+      const seq = [];
+      for (const e of net.slice(mark)) if (e.kind === 'get' && rows.some((x) => x.r.orderId === e.orderId) && !seq.includes(e.orderId)) seq.push(e.orderId);
+      return seq.map((id) => rows.findIndex((x) => x.r.orderId === id));
+    };
+    {
+      // (i) dòng NULL có created_at CŨ HƠN thời điểm quét của các dòng kia -> được GET ĐẦU TIÊN (NULL không bị đẩy cuối)
+      const O = [await abandoned('c14o1'), await abandoned('c14o2'), await abandoned('c14o3')];
+      await isolate(O.map((x) => x.r.id));
+      await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(9000), O[0].r.id);                 // NULL, tạo từ now-9000s
+      await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(5000), O[1].r.id);
+      await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(1500), O[2].r.id);
+      ok((await snap(O[0].r.id)).pr.last_reconciled_at === null, '(4i) precond: dòng O0 có last_reconciled_at NULL');
+      eq(await orderOfGets(O, 25), [0, 1, 2], `(4i) NULL (created now-9000s) được GET trước dòng quét now-5000s rồi now-1500s [${db.dialect}]`);
+      // (ii) dòng NULL có created_at MỚI hơn thời điểm quét của dòng khác -> đứng SAU dòng đó (chính sách hiệu dụng COALESCE)
+      const Q = [await abandoned('c14q1'), await abandoned('c14q2')];
+      await isolate(Q.map((x) => x.r.id));
+      await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(3000), Q[1].r.id);          // Q0 NULL, created ~now; Q1 quét now-3000s
+      eq(await orderOfGets(Q, 25), [1, 0], `(4ii) NULL tạo gần đây đứng SAU dòng đã quét now-3000s (chính sách hiệu dụng: lần nhìn cuối hoặc tạo, cái nào sớm hơn đi trước) [${db.dialect}]`);
+      info(`(4iii) thứ tự GET tin cậy trên ${db.dialect}: (i) [0,1,2], (ii) [1,0]; so sánh chéo SQLite/PG qua hai log`);
+    }
+
+    // (5) biên cửa sổ và RESCAN
+    const W = [await abandoned('c14w1'), await abandoned('c14w2'), await abandoned('c14w3'), await abandoned('c14w4')];
+    await isolate(W.map((x) => x.r.id));
+    await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(72 * 3600 - 10), W[0].r.id);   // trong cửa sổ 10s
+    await db.prepare('UPDATE payment_requests SET created_at=? WHERE id=?').run(ago(72 * 3600 + 10), W[1].r.id);   // ngoài cửa sổ 10s
+    await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(900 - 10), W[2].r.id); // chưa đủ giãn cách 10s
+    await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(900 + 10), W[3].r.id); // đủ giãn cách 10s
+    const bw = W.map((x) => gets(x.r));
+    await batch(25);
+    eq(W.map((x, i) => gets(x.r) - bw[i]), [1, 0, 0, 1], '(5) biên: created_at now-72h+10s quét, now-72h-10s không; last_reconciled_at now-890s không, now-910s có [ĐỎ trên HEAD]');
+    // state không READY không bị quét
+    const NR = [await abandoned('c14n1'), await abandoned('c14n2')];
+    await isolate(NR.map((x) => x.r.id));
+    await db.prepare("UPDATE paypal_payment_bindings SET capture_state='UNKNOWN' WHERE payment_request_id=?").run(NR[0].r.id);
+    await db.prepare("UPDATE paypal_payment_bindings SET capture_state='IN_FLIGHT', capture_claim=?, capture_claimed_at=? WHERE payment_request_id=?").run(uuid(), nowIso(), NR[1].r.id);
+    const bn = NR.map((x) => gets(x.r));
+    await batch(25);
+    eq(NR.map((x, i) => gets(x.r) - bn[i]), [0, 0], '(5) request FAILED có capture_state UNKNOWN/IN_FLIGHT (không READY) không bị nhóm abandon quét');
+    // FAILED đã POST thuộc truy vấn cũ: không quét hai lần trong một lượt
+    const FP = await mkNew('c14fp', { approve: true });
+    const cfp = await claim(FP.r); await rtShort.store.markCapturePostSent(FP.r.id, cfp.claimId);
+    await rtShort.store.finishCaptureAttempt(FP.r.id, cfp.claimId, { state: 'UNKNOWN', errorCode: 'X' });
+    await db.prepare("UPDATE payment_requests SET status='FAILED' WHERE id=?").run(FP.r.id);   // fixture DB
+    await isolate([FP.r.id]);
+    const bf = gets(FP.r);
+    const sfp = await batch(25);
+    const ids = (sfp.results || []).filter((x) => x.provider === 'PAYPAL_SANDBOX').map((x) => x.id);
+    eq([gets(FP.r) - bf, ids.filter((i) => i === FP.r.id).length], [1, 1], '(5) FAILED đã POST (truy vấn cũ): đúng 1 GET và 1 kết quả trong một lượt (không quét hai lần)');
+  });
+
+  await runCase('C15', 'R9/R10: theo id không kích hoạt nhóm quét mới; quét lô thành công không clearError dòng abandon', async () => {
+    // R9
+    const A = await abandoned('c15a'); const R = await abandoned('c15r');
+    await isolate([A.r.id, R.r.id]);
+    const gA = gets(A.r); const gR = gets(R.r);
+    const [byId, lot] = await Promise.all([reconcileOnce({ minAgeSeconds: 0, limit: 10, paymentRequestId: A.r.id, paypalRuntime: rtShort }), batch(10)]);
+    ok(byId.paypal && byId.paypal.abandonedScanned === 0, '(R9) reconcileOnce({paymentRequestId}) KHÔNG kích hoạt nhóm quét mới: abandonedScanned === 0 [ĐỎ trên HEAD: chưa có trường abandonedScanned]', JSON.stringify(byId.paypal));
+    eq(byId.paypal && byId.paypal.scanned, 1, '(R9) theo id: hành vi cũ giữ nguyên (scanned=1, chọn theo id) [guard hồi quy: đạt cả trên HEAD]');
+    ok(lot.paypal && lot.paypal.abandonedScanned >= 1, '(R9) lượt lô riêng cùng lúc vẫn quét nhóm mới (abandonedScanned >= 1) [ĐỎ trên HEAD]', JSON.stringify(lot.paypal));
+    ok(gets(R.r) - gR >= 1 && gets(A.r) - gA >= 1, '(R9) transport: dòng R (chỉ qua lô) và dòng A (theo id) đều có GET thật [R: ĐỎ trên HEAD]');
+    // R10
+    const Z = await abandoned('c15z'); const P = await mkNew('c15p');
+    await isolate([Z.r.id, P.r.id]);
+    await db.prepare("UPDATE payment_requests SET last_reconcile_error='STALE_ERR' WHERE id=?").run(P.r.id);
+    eq((await snap(Z.r.id)).pr.last_reconcile_error, 'USER_ABANDONED', '(R10) precond: dòng abandon có last_reconcile_error=USER_ABANDONED');
+    const gz = gets(Z.r); const gp = gets(P.r);
+    const s = await batch(10);
+    ok(gets(Z.r) - gz >= 1 && gets(P.r) - gp >= 1, '(R10) precond: lượt lô quét thành công CẢ dòng abandon và dòng PENDING (provider trả PENDING, không thu) [dòng abandon: ĐỎ trên HEAD]', JSON.stringify(s.paypal));
+    eq((await snap(Z.r.id)).pr.last_reconcile_error, 'USER_ABANDONED', '(R10) dòng abandon: sau quét thành công cột VẪN là USER_ABANDONED (không bị clearError) [guard mới; trên HEAD đạt vì không quét]');
+    eq((await snap(P.r.id)).pr.last_reconcile_error, null, '(R10) dòng PENDING: vẫn bị clearError như cũ (STALE_ERR -> NULL) [guard hồi quy]');
+    eq((await snap(Z.r.id)).pr.status, 'FAILED', '(R10) dòng abandon vẫn FAILED, không credit');
+  });
+
+  await runCase('C16', 'Hạn mức lô: số PENDING >= limit vẫn quét ĐÚNG limit dòng PENDING cũ nhất, SHARE abandon CỘNG THÊM NGOÀI hạn mức', async () => {
+    // Có chủ ý: nhóm abandon (SHARE=max(1,floor(limit/5))) được cộng THÊM ngoài hạn mức của truy vấn PENDING cũ, nên tổng có thể > limit.
+    for (const [limit, nP, nA, share] of [[5, 6, 2, 1], [10, 11, 3, 2]]) {
+      const P = []; for (let i = 0; i < nP; i++) P.push((await mkNew('c16p')).r);
+      const A = []; for (let i = 0; i < nA; i++) A.push((await abandoned('c16a')).r);
+      await isolate([...P.map((x) => x.id), ...A.map((x) => x.id)]);
+      for (let i = 0; i < nP; i++) await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(8000 - 100 * i), P[i].id);   // P[0] cũ nhất ... P[nP-1] mới nhất
+      for (let i = 0; i < nA; i++) await db.prepare('UPDATE payment_requests SET last_reconciled_at=? WHERE id=?').run(ago(3000 - 100 * i), A[i].id);   // A[0] cũ nhất, đều > RESCAN
+      const bp = P.map(gets); const ba = A.map(gets);
+      const s = await batch(limit);
+      const sp = P.map((r, i) => gets(r) - bp[i] > 0); const sa = A.map((r, i) => gets(r) - ba[i] > 0);
+      eq(sp, P.map((_, i) => i < limit), `(limit=${limit}) ${nP} dòng PENDING đủ tuổi: ĐÚNG ${limit} dòng PENDING cũ nhất được GET, dòng thứ ${nP} KHÔNG (hạn mức cũ giữ nguyên, không bị cắt vì có dòng abandon) [guard mới; trên HEAD phần PENDING đạt]`);
+      eq(sa, A.map((_, i) => i < share), `(limit=${limit}) nhóm abandon quét ĐÚNG SHARE=${share} dòng cũ nhất, cộng thêm NGOÀI hạn mức (tổng ${limit + share} > limit) [ĐỎ trên HEAD: không có nhóm abandon]`);
+      eq([s.paypal && s.paypal.scanned, s.paypal && s.paypal.abandonedScanned], [limit, share], `(limit=${limit}) summary.paypal: scanned=${limit} (PENDING), abandonedScanned=${share} [abandonedScanned: ĐỎ trên HEAD]`);
+    }
   });
 
   await runCase('C9', 'Bất biến tài chính (9) và bất biến PayPal sau toàn bộ kịch bản', async () => {

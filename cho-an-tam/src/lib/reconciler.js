@@ -23,6 +23,17 @@ const { logSecurityEvent, EVENTS } = require('./securityEvents');
 
 const DEFAULT_MIN_AGE_SECONDS = parseInt(process.env.RECONCILE_MIN_AGE_SECONDS || '30', 10);
 
+// Quét lại request PayPal ĐÃ đóng FAILED mà chưa từng POST capture (abandon của chủ ví), phòng capture
+// muộn khi mất webhook. Hạn mức RIÊNG cộng thêm ngoài truy vấn PENDING nên không chiếm lượt của PENDING.
+// Cận 72 giờ tính từ created_at: tài liệu PayPal nêu order CREATED chỉ giữ 3 giờ và gia hạn tối đa 72 giờ
+// (adapter của ta không gia hạn). CHƯA kiểm chứng trên Sandbox.
+function boundedEnvInt(name, fallback, max) {
+  const n = Number(process.env[name]);
+  return Number.isSafeInteger(n) && n > 0 ? Math.min(n, max) : fallback;
+}
+const abandonedWindowHours = () => boundedEnvInt('PAYPAL_ABANDONED_SCAN_WINDOW_HOURS', 72, 24 * 30);
+const abandonedRescanSeconds = () => boundedEnvInt('PAYPAL_ABANDONED_RESCAN_SECONDS', 900, 7 * 24 * 3600);
+
 async function markAttempt(id, paymentProvider='MOCK') {
   // Chỉ là vết vận hành: không tăng version, nên không bao giờ làm hỏng lượt tất toán đang chạy
   // song song ở webhook.
@@ -194,15 +205,24 @@ async function reconcileOnce({
     const rows=paymentRequestId
       ? await db.prepare("SELECT id FROM payment_requests WHERE id=? AND provider='PAYPAL_SANDBOX' AND status IN ('PENDING','FAILED') AND created_at<=?").all(paymentRequestId,cutoff)
       : await db.prepare("SELECT pr.id FROM payment_requests pr JOIN paypal_payment_bindings b ON b.payment_request_id=pr.id WHERE pr.provider='PAYPAL_SANDBOX' AND b.order_id IS NOT NULL AND b.recovery_required_at IS NULL AND pr.created_at<=? AND (pr.status='PENDING' OR (pr.status='FAILED' AND b.capture_post_sent_at IS NOT NULL AND b.recovery_required_at IS NULL)) ORDER BY COALESCE(pr.last_reconciled_at,pr.created_at) ASC LIMIT ?").all(cutoff,limit);
-    summary.paypal={scanned:rows.length,applied:0,errors:0,recoveryRequired:0};
-    for(const row of rows) {
+    // Nhóm FAILED-chưa-POST: truy vấn thứ hai, chỉ ở lượt lô, tập rời với truy vấn trên (đã chặn trùng id).
+    let abandoned=[];
+    if(!paymentRequestId) {
+      const nowMs=Date.now(),share=Math.max(1,Math.floor(limit/5));
+      const seen=new Set(rows.map(r=>r.id));
+      abandoned=(await db.prepare("SELECT pr.id FROM payment_requests pr JOIN paypal_payment_bindings b ON b.payment_request_id=pr.id WHERE pr.provider='PAYPAL_SANDBOX' AND pr.status='FAILED' AND b.order_id IS NOT NULL AND b.capture_post_sent_at IS NULL AND b.capture_state='READY' AND b.recovery_required_at IS NULL AND pr.created_at>? AND (pr.last_reconciled_at IS NULL OR pr.last_reconciled_at<=?) ORDER BY COALESCE(pr.last_reconciled_at,pr.created_at) ASC LIMIT ?")
+        .all(new Date(nowMs-abandonedWindowHours()*3600*1000).toISOString(),new Date(nowMs-abandonedRescanSeconds()*1000).toISOString(),share))
+        .filter(r=>!seen.has(r.id)).map(r=>({id:r.id,abandoned:true}));
+    }
+    summary.paypal={scanned:rows.length,applied:0,errors:0,recoveryRequired:0,abandonedScanned:abandoned.length};
+    for(const row of [...rows,...abandoned]) {
       await markAttempt(row.id,'PAYPAL_SANDBOX');
       try {
         const result=await paypal.reconcileOne(row.id);
         if(result.outcome==='APPLIED')summary.paypal.applied++;
         if(result.outcome==='RECOVERY_REQUIRED')summary.paypal.recoveryRequired++;
         summary.results.push({id:row.id,provider:'PAYPAL_SANDBOX',...result});
-        await clearError(row.id);
+        if(!row.abandoned)await clearError(row.id); // nhóm abandon: giữ USER_ABANDONED chỉ ở nhánh quét thành công (recordError khi lỗi có thể ghi đè); replay không dựa vào cột này
       } catch(error) {
         summary.paypal.errors++;
         // Never store upstream bodies/secrets in the operational error column.

@@ -6,6 +6,46 @@ Ngày 07/10/2026. Chỉ backend. Không sửa `public/`, schema/migration, adapt
 - Base: `d7929d72abcd47af4613e4b588b6839857155642` (`codex/payment-provider-isolation`, trùng đầu nhánh lúc fetch). Nhánh Pro: `claude/paypal-abandon-request`. Compare vào `codex/payment-provider-isolation`.
 - Ba agent cấp 3 (backend, kiểm thử, review an toàn độc lập); Pro đối chiếu hợp đồng với mã nền trước khi cho viết code, tự đọc diff, tự chạy mutation và lượt kiểm tra ghép.
 
+## 0. Vòng R2 theo phản hồi của Codex tại `5e25f57`
+
+Giữ nhánh `claude/paypal-abandon-request`, chỉ thêm commit (không force-push). Chỉ backend, test và báo cáo; không đụng `public/`, adapter, schema, migration, `package.json`, `run-suite.js`. Phạm vi mở rộng được cho phép: `src/lib/reconciler.js` (chỉ nhánh PayPal; đường MOCK không đổi). Kết quả PostgreSQL ở đây là kết quả tự chạy của Pro, không phải của Codex. Ba agent cấp 3 (backend, kiểm thử, review an toàn độc lập) đã làm hai vòng đọc/ghi riêng; Pro đọc diff, tự chạy mutation và chạy bản ghép.
+
+**0.1 Thu tiền muộn sau abandon khi mất webhook (điểm 1).** Truy vấn lô của worker từng bỏ qua request FAILED chưa có `capture_post_sent_at`; ca C6 chỉ gọi `reconcileOne(id)` nên không chứng minh đường lô. R2 thêm MỘT truy vấn thứ hai ngay sau truy vấn lô cũ (không đổi truy vấn cũ), chỉ khi KHÔNG truyền `paymentRequestId`:
+- Chọn request `PAYPAL_SANDBOX`, `FAILED`, đã bind order, `capture_post_sent_at IS NULL`, `capture_state='READY'`, `recovery_required_at IS NULL`, `created_at > now - WINDOW`, và (`last_reconciled_at IS NULL` hoặc `<= now - RESCAN`), xếp theo `COALESCE(last_reconciled_at, created_at)` tăng dần, `LIMIT SHARE`.
+- Tham số (env, số nguyên dương có chặn trên, sai thì dùng mặc định): `PAYPAL_ABANDONED_SCAN_WINDOW_HOURS`=72, `PAYPAL_ABANDONED_RESCAN_SECONDS`=900, `SHARE = max(1, floor(limit/5))`.
+- Công bằng: hạn mức `SHARE` CỘNG THÊM ngoài hạn mức của truy vấn PENDING cũ (tổng PayPal ≤ limit + SHARE), hai tập rời nhau, nên dòng đã đóng không chiếm được lượt của PENDING hay của FAILED-đã-POST. Test C16 dựng đúng trường hợp PENDING chiếm hết `limit`: chỉ `limit` dòng PENDING cũ nhất được quét cộng đúng `SHARE` dòng abandon.
+- Không quét lặp vô hạn: dòng nào `reconcileOne` thấy capture COMPLETED sẽ được store ghi `RECOVERY_REQUIRED` + capture ID + `recovery_required_at` và tự rời tập quét; request VẪN `FAILED`, không credit ví/sổ cái, không mở lại. Dòng mà PayPal luôn trả PENDING bị chặn bởi cửa sổ và giãn cách (tối đa 72h/900s = 288 lần GET mỗi dòng).
+- Nhóm này không gọi `clearError` (giữ `USER_ABANDONED` tham khảo); khi quét LỖI vẫn `recordError` nên cột có thể bị ghi đè bằng mã lỗi (vận hành cần thấy lỗi). Replay KHÔNG dựa vào cột này (chỉ dựa vào hàng audit). Nhóm này không áp `minAgeSeconds` vì request đã do chủ ví đóng.
+- **Căn cứ cho cửa sổ 72 giờ (cần Codex xác nhận):** tìm kiếm tài liệu chính thức của PayPal cho thấy order ở trạng thái `CREATED` chỉ giữ 3 giờ, có thể gia hạn tối đa 72 giờ, và order đã duyệt mà không capture trong 3 giờ bị tự hoàn; adapter của ta không gia hạn order (`createOrder` không có expiration/PATCH). 72 giờ là cận trên đã ghi tài liệu, tính từ `created_at`; trang tham chiếu API tôi lấy được không chứa đoạn đó nên coi là CHƯA kiểm chứng trên Sandbox. Nếu Codex muốn cửa sổ khác, chỉ cần đặt `PAYPAL_ABANDONED_SCAN_WINDOW_HOURS`.
+- Giới hạn còn lại: năng lực quét của nhóm này ≈ `SHARE × 900 / chu kỳ` dòng mỗi lượt; nhiều abandon từ nhiều IP có thể làm chu kỳ quét một dòng vượt 72h thì mất phát hiện. Truy vấn cũ cho FAILED-đã-POST không có cửa sổ thời gian (nợ có sẵn, không thuộc R2).
+
+**0.2 Replay sau RECOVERY_REQUIRED (điểm 2).** `ALREADY_ABANDONED` giờ chỉ trả khi: request FAILED, CÓ hàng audit abandon, và binding đọc LẠI (sau truy vấn audit) có `capture.state` khác `RECOVERY_REQUIRED`/`VERIFIED`, `recoveryRequiredAt` và `captureId` rỗng, và `capture.lastError` không bắt đầu bằng `CONFLICTING_CAPTURE` hay `CAPTURED_AFTER_REQUEST_CLOSED`. Ngược lại trả `409 PAYPAL_ABANDON_UNSAFE`, không ghi gì, giữ nguyên bằng chứng và ví. Áp dụng cho CẢ nhánh FAILED ban đầu LẪN nhánh thua race sau `closeUncaptured`. Khe còn lại: recovery xuất hiện giữa lần đọc binding cuối và lúc trả lời không có transaction bao hai việc; hậu quả chỉ là nội dung DTO trả về (không ghi gì).
+
+**0.3 Kết quả R2** (bản ghép, tuần tự trong cluster riêng, origin khớp cổng; log trong `test/evidence/pro-abandon-r2/`; cây `src/` và `test/` không đổi giữa lượt chạy và commit):
+
+| Lượt | Kết quả | Exit |
+| --- | --- | --- |
+| Full suite SQLite | 1006 PASS / 0 FAIL (997 assertion thật + 9 runner cộng cho `check-invariants`), 26 mục | 0 |
+| Full suite PostgreSQL | 997 PASS / 0 FAIL (988 thật + 9), 26 mục | 0 |
+| 9 bất biến tài chính | đúng ở bước cuối mỗi full suite; `check-invariants.js` chạy độc lập sau suite: "Không có vi phạm nào trên 9 bất biến" trên SQLite và PostgreSQL | 0 |
+| `paypal-abandonment-e2e` SQLite / PostgreSQL | 394 / 394 đạt, 0 hỏng mỗi nền (C1…C16 + C9 bất biến) | 0 / 0 |
+| `paypal-history-isolation` (F-05) SQLite / PG | 27 / 27 | 0 / 0 |
+| `node --test` module PayPal (6 tệp) | 53 pass, 0 fail, 0 skip | 0 |
+| M2 HTTP / settlement / recovery, SQLite và PG | 67 / 85 / 47 đạt mỗi nền | 0 |
+| store-concurrency (SQLite + `--pg`, 4 chế độ × 106) / binding-migration `--pg` / evidence-upgrade `--pg` | ALL PASS / 9 / 12 | 0 |
+| `reconcile-e2e` (đường MOCK, trong full suite) | xanh cả hai nền (65 đạt), MOCK không đổi | 0 |
+
+Không có skip. Đỏ/xanh của test mới: trên bản sao nguyên vẹn của `5e25f57` (trước R2) bộ test cuối cho 363 đạt / 31 hỏng (exit 1), tức C12 31/45, C13 18/22, C14 25/30, C15 8/12, C16 7/11; các lượt trung gian và lượt xanh có một assert đỏ (C14(4)) được giữ trong `agent-and-mutation-logs/`. Ca đỏ thật trên HEAD: worker lô không quét dòng FAILED chưa-POST (không thấy thu muộn), replay trả 200 thay vì 409 ở cả ba đường recovery và nhánh thua race, replay với `CONFLICTING_CAPTURE`. Các assert đạt trên HEAD vì chưa có hành vi tương ứng là guard mới, ghi riêng trong báo cáo test. Barrier ở C13(b) là barrier thật (hai abandon cùng đứng sau GET, bên thua bị giữ sau `closed:false`, recovery được lưu TRƯỚC khi thả), không dùng delay.
+
+**Điều chỉnh do Pro quyết:** C14(4) từng kỳ vọng dòng `last_reconciled_at` NULL luôn được quét trước. Pro giữ `ORDER BY COALESCE(last_reconciled_at, created_at)` (cùng quy tắc "chờ lâu nhất đi trước" của truy vấn PENDING hiện có) và sửa kỳ vọng: dòng NULL có `created_at` cũ được quét trước; dòng NULL vừa tạo đứng sau dòng đã quét lâu hơn; SQLite và PostgreSQL cho cùng thứ tự. Đó là sửa kỳ vọng, không phải lỗi sản phẩm; log lượt đỏ giữ nguyên.
+
+**0.4 Mutation do Pro tự chạy cho hành vi R2** (từng mutation riêng biệt trên bản sao, SQLite, mỗi lần từ mã sạch, baseline xanh):
+- Bị bắt đúng ca: bỏ cận cửa sổ (C12, C14); bỏ giãn cách (C12, C14); `SHARE = limit` (C12, C16); bỏ `capture_state='READY'` (C14); replay không đọc lại binding (C13); bỏ điều kiện `lastError` (C14); `paymentRequestId` kích hoạt nhóm mới (C15); `clearError` cho nhóm abandon (C15); `ORDER BY` không `COALESCE` (C14); gộp hạn mức làm PENDING bị cắt ở `limit` (C16).
+- Khe đã vá trong vòng này: mutation gộp hạn mức (cắt PENDING ở `limit`) ban đầu KHÔNG bị bắt vì ca công bằng chưa bao giờ để PENDING chiếm hết `limit`; sau khi thêm C16, mutation đó đỏ (2 assert).
+- Không bị bắt, ghi nhận: bỏ `recovery_required_at IS NULL` (gần như mutant tương đương vì `capture_state='READY'` đã loại các hàng đó); bỏ chặn trùng id (mã thừa vì hai truy vấn rời nhau nhờ `capture_post_sent_at`); đảo thứ tự replay và bỏ riêng `VERIFIED`/`captureId` (dư thừa, mức thấp); C13(b) dựng `createAbandonment` với request giả không qua router (router đã được kiểm ở C2/C5).
+
+**0.5 Tệp thay đổi trong R2:** `cho-an-tam/src/lib/reconciler.js`, `cho-an-tam/src/lib/paypalAbandonment.js`, `cho-an-tam/test/paypal-abandonment-e2e.js`, `PRO-PAYPAL-ABANDONMENT-BACKEND-NOTES.md`, `PRO-PAYPAL-ABANDONMENT-TEST-REPORT.md`, `PRO-PAYPAL-ABANDONMENT-SAFETY-REVIEW.md`, `PRO-PAYPAL-ABANDONMENT-REPORT.md` (tệp này) và `cho-an-tam/test/evidence/pro-abandon-r2/` (các tệp `.log` thêm bằng `git add -f` do quy tắc `*.log` của `.gitignore`). Bằng chứng vòng 1 ở `test/evidence/pro-abandon/` giữ nguyên.
+
 ## 1. Hợp đồng API để Codex tích hợp UI
 
 `POST /api/payments/paypal/:id/abandon` — chủ ví chủ động bỏ ý định CHƯA gửi thu tiền. Không phải hoàn tiền, không hủy order ở PayPal (link phê duyệt đã mở trước đó vẫn dùng được ở PayPal, nhưng server không bao giờ capture sau khi request FAILED), không chạm ví/sổ cái.
@@ -20,7 +60,7 @@ Ngày 07/10/2026. Chỉ backend. Không sửa `public/`, schema/migration, adapt
 | `outcome` | Ý nghĩa | DTO |
 | --- | --- | --- |
 | `ABANDONED` | Lần này đóng thành công | `status:'FAILED'`, `stage:'FAILED'`, `approvalUrl:null`, `resolvedAt` có giá trị, ví/sổ cái không đổi |
-| `ALREADY_ABANDONED` | Request đã được CHÍNH endpoint này đóng trước đó (replay hoặc hai lần bấm song song; bên thua đọc lại) | cùng DTO FAILED, không tạo dữ liệu/audit mới |
+| `ALREADY_ABANDONED` | Request đã được CHÍNH endpoint này đóng trước đó (replay hoặc hai lần bấm song song; bên thua đọc lại) VÀ binding đọc lại ngay lúc trả lời chưa có bằng chứng thu tiền (xem mục 0.2) | cùng DTO FAILED, không tạo dữ liệu/audit mới |
 
 **Lỗi**
 
@@ -30,7 +70,7 @@ Ngày 07/10/2026. Chỉ backend. Không sửa `public/`, schema/migration, adapt
 | 401 | (xác thực) | thiếu/hết hạn token | không đổi |
 | 403 | `FORBIDDEN` | không phải chủ request, hoặc vai trò không được (ADMIN) | không đổi |
 | 404 | `PAYMENT_REQUEST_NOT_FOUND` | id không phải request PayPal | không đổi |
-| 409 | `PAYPAL_ABANDON_UNSAFE` | không thể bỏ an toàn: chưa bind order/create mơ hồ, đã có dấu POST capture hoặc claim, capture IN_FLIGHT/UNKNOWN/VERIFIED/NOT_CAPTURED/RECOVERY_REQUIRED, SUCCEEDED, FAILED vì lý do khác, order PayPal có capture hoặc trạng thái không thuộc nhóm chưa thu | không đổi; giữ requestId và chờ đối soát |
+| 409 | `PAYPAL_ABANDON_UNSAFE` | không thể bỏ an toàn: chưa bind order/create mơ hồ, đã có dấu POST capture hoặc claim, capture IN_FLIGHT/UNKNOWN/VERIFIED/NOT_CAPTURED/RECOVERY_REQUIRED, SUCCEEDED, FAILED vì lý do khác, FAILED do abandon nhưng đã có bằng chứng thu tiền sau đó (RECOVERY_REQUIRED, VERIFIED, có capture ID, hoặc lỗi capture xung đột `CONFLICTING_CAPTURE`/`CAPTURED_AFTER_REQUEST_CLOSED`), order PayPal có capture hoặc trạng thái không thuộc nhóm chưa thu | không đổi; giữ requestId, bằng chứng và ví nguyên, chờ xử lý thủ công/đối soát |
 | 409 | `PAYPAL_ORDER_MISMATCH` | bằng chứng PayPal không khớp (order/request/số tiền/merchant) | không đổi |
 | 429 | rate limit | quá 10 lần/phút/IP | không đổi |
 | 503 | `PAYPAL_DISABLED` | PayPal Sandbox chưa bật/đủ cấu hình | không đổi |
@@ -115,7 +155,7 @@ C1 quota 5 PENDING rồi abandon một và tạo mới được (số dư và s�
 
 ## 7. Giới hạn đã biết và đề xuất cho Codex (không làm trong PR này)
 
-1. Worker đối soát quét LÔ chỉ lấy request FAILED đã POST (`reconciler.js` ~dòng 196) nên capture muộn sau abandon (không thể xảy ra nếu server không POST, nhưng nếu xảy ra ngoài luồng) chỉ lộ qua webhook/GET xác minh/đường quét theo id (`scripts/reconcile.js --id`, ~dòng 195), không qua worker lô.
+1. (Đã xử lý ở vòng R2, xem mục 0.1.) Từ R2 worker lô quét thêm request đã abandon trong cửa sổ có hạn. Còn lại: request abandon cũ hơn cửa sổ (mặc định 72 giờ tính từ `created_at`) không còn được worker lô quét, chỉ còn webhook, GET xác minh hoặc quét theo id; năng lực quét của nhóm này bị chặn bởi hạn mức riêng và giãn cách (mục 0.1).
 2. Request `UNKNOWN` + `PAYPAL_PAYER_ACTION_REQUIRED` chưa từng POST (người dùng bấm xác nhận trước khi phê duyệt) chưa abandon được ở bản tối thiểu (409). Có thể mở rộng sau với bằng chứng chưa POST.
 3. DTO chưa có trường lý do đóng; `resolvedBy` vẫn `RECONCILER`. Nếu UI cần phân biệt lâu dài, cân nhắc thêm trường lý do/`closedBy` vào DTO hoặc cột/enum bền (cần schema, ngoài PR này).
 4. Vòng tạo rồi abandon liên tục chỉ bị rate limit theo IP (10 lần/phút): mỗi vòng tốn một lần tạo order và một lần GET ở PayPal; hạn mức pending/ngày được giải phóng đúng như policy hiện có. Mức thấp.

@@ -220,3 +220,110 @@ Gốc rễ M2/M3/M4/M7: guard atomic ở store bị tiền kiểm và nhánh JS 
 
 ### (6) Hai test cũ
 Test mới không sửa `paypal-m2-settlement-e2e.js` hay `paypal-store-concurrency-e2e.js`, không đăng ký vào suite chung, dùng DB riêng, khôi phục `runtimeModule.serializePayPal` (634) và gỡ trigger test-only trong `finally`. Ảnh hưởng lên test cũ chỉ có thể đến từ backend, đã đọc ở mục Giai đoạn 2 — backend: `paypal-m2-settlement-e2e.js:182` vẫn nhận `CAPTURE_IN_FLIGHT`; `paypal-store-concurrency-e2e.js` không bị ảnh hưởng về mặt đọc code, vẫn cần chạy thật cả `--pg`.
+
+## Vòng R2 — giai đoạn 1 (đọc mã HEAD 5e25f57, chưa có diff R2)
+
+Chính sách Pro: (1) truy vấn thứ hai cho FAILED + order bound + `capture_post_sent_at` NULL + `capture_state='READY'` + `recovery_required_at` NULL + `created_at > now-72h` + `last_reconciled_at` cách >= 900s, ORDER BY `last_reconciled_at` cũ nhất, LIMIT `max(1,floor(limit/5))` NGOÀI hạn mức PENDING, không `clearError`; (2) replay sau recovery. Không chạy gì. `rec` = `cho-an-tam/src/lib/reconciler.js`.
+
+### (1d) `reconcileOne` trên FAILED qua apply -> settle: KHÔNG có đường credit hay mở lại (đã đọc kỹ)
+- `reconcileOne` (`paypalRuntime.js:85-89`) -> `owned(id,null)` -> `service.reconcile` -> `load(...,false)`: `trusted()` chấp nhận `status` PENDING/SUCCEEDED/FAILED (`paypalSandboxService.js:24`), nên FAILED đi tiếp -> `provider.getOrder` -> `apply` (`:56-70`). PENDING (kể cả capture PENDING) trả `STILL_PENDING`. SUCCEEDED -> `settle`.
+- `settle.transaction` (`paypalSettlement.js:13-45`) với `claimId` rỗng gọi `store.markCaptureVerified`. Trên request FAILED, `markCaptureVerified` (`paypalPaymentStore.js:494-528`) tới `if (r.status==='FAILED') return persistRecovery(...)` (dòng 510) và trả `{ok:false,outcome:'RECOVERY_REQUIRED'}`; `settle` trả sớm ở dòng 28, TRƯỚC check `pr.status` (31), TRƯỚC UPDATE `SUCCEEDED` (33, vốn đòi `status='PENDING' AND version=`), TRƯỚC ví/sổ cái (35-42). VERIFIED cũ trên FAILED đi nhánh 505-508 (`persistLegacyRecovery`) cũng trả RECOVERY_REQUIRED. `ok:true` chỉ tới được khi request không FAILED (dòng 509 đứng sau 505). Không có UPDATE nào đưa status từ FAILED về PENDING/SUCCEEDED. `logSecurityEvent`/`onTopupResolved` chỉ chạy khi APPLIED (`:52-57`). KẾT LUẬN: không credit, không mở lại.
+- Có thể ném: lỗi provider (timeout/mismatch), `owned()` khi đổi merchant (409), `trusted()` khi binding hỏng. `CAPTURE_ID_CONFLICT` thì `settle` trả `outcome:'CONFLICT'` (không ném; `recordConflict` ghi `last_capture_error`, state vẫn READY, xem F-R2-3). Mọi lỗi ném bị bắt trong `catch` của vòng lặp (`rec:206-211`), không hỏng cả lượt; nhưng `catch` gọi `recordError` (xem 1e).
+
+### (1e) markAttempt / recordError / clearError / replay
+- `markAttempt` (`rec:26-33`): `WHERE status='PENDING' OR (provider='PAYPAL_SANDBOX' AND status='FAILED')` đã áp cho FAILED PayPal; chỉ cộng `reconcile_attempts` và đặt `last_reconciled_at`, không tăng version, không ảnh hưởng đóng/claim. Ghi trước GET nên GET lỗi vẫn dời lượt quét kế +900s (lỗi tạm làm trễ phát hiện tối đa ~15 phút/lượt).
+- `recordError`/`clearError` (`rec:35-41`) ghi `last_reconcile_error` KHÔNG kiểm status. Replay đã audit-only (`paypalAbandonment.js:26-33`): ĐÚNG, replay không còn phụ thuộc cột. NHƯNG nếu nhóm mới chỉ "không clearError" mà vẫn `recordError` khi ném, `USER_ABANDONED` (lý do đóng theo hợp đồng) bị ghi đè bởi `PAYPAL_TIMEOUT`. Test C6 (dòng 465) và C7 (496) khẳng định `last_reconcile_error==='USER_ABANDONED'` (C6 gọi `reconcileOne` thẳng nên chưa lộ). **F-R2-1 (Thấp-Trung):** nhóm mới KHÔNG chạm cột này ở cả hai nhánh; lỗi đưa vào `summary.results`/log. Nếu chấp nhận ghi đè thì phải bỏ khẳng định cột ở C6/C7 và ghi rõ nguồn duy nhất là audit.
+
+### (1a) Có bỏ sót bằng chứng thu muộn không
+- Không bỏ sót nếu worker bật, Sandbox enabled, và capture hoàn tất nằm trong 72h từ `created_at`: capture COMPLETED là trạng thái bền ở PayPal, chậm quét chỉ làm chậm. Độ trễ phát hiện ≈ RESCAN (900s) + interval worker + xếp hàng. Webhook là đường nhanh song song (`paypalSandboxService.js:126-143`), vẫn chạy cho request FAILED.
+- Hở thật: (i) sau 72h chỉ còn webhook; (ii) cửa sổ tính từ `created_at`, không từ lúc đóng. Hợp lý vì vòng đời order bắt đầu từ lúc tạo và adapter không gia hạn (1f); nếu sau này gia hạn order thì cửa sổ phải theo giới hạn mới.
+- **F-R2-2 (Trung bình, đặc thù PostgreSQL):** `ORDER BY last_reconciled_at ASC` thuần: SQLite xếp NULL TRƯỚC, PG xếp NULL SAU. Dòng vừa abandon (chưa quét, NULL) trên PG bị xếp cuối và có thể đói. Truy vấn cũ dùng `COALESCE(last_reconciled_at,created_at)`; nhóm mới phải dùng đúng biểu thức đó (hoặc `NULLS FIRST`). Điều kiện lọc phải là `(last_reconciled_at IS NULL OR last_reconciled_at <= ?)`; chỉ so sánh với cột thì NULL bị loại ở cả hai DB.
+
+### (1b) Có làm đói PENDING / FAILED-đã-POST không
+- Không: nhóm mới có LIMIT riêng NGOÀI `limit`, hai tập rời nhau (FAILED-đã-POST có `post_sent_at` NOT NULL; nhóm mới đòi NULL + READY); truy vấn cũ giữ nguyên thứ tự và LIMIT. Chi phí/lượt tăng tối đa 20% số GET (10 trên 50). Mỗi `reconcileOne` tuần tự tối đa `timeoutMs` (mặc định 10s) nên lượt xấu nhất thêm ~100s; `running` guard của `startReconciler` ngăn chồng lượt (lượt kế bị bỏ, như cũ).
+- Chiều ngược (đói nhóm mới): năng lực ~SHARE*900/I dòng mỗi chu kỳ 900s với interval I giây (I=60 -> 150 dòng). Quá ngưỡng thì chu kỳ quét dài ra (vẫn công bằng nhờ cũ-nhất-trước); chỉ mất bằng chứng khi chu kỳ thực tế > 72h. Create và abandon dùng chung bucket 10/phút/IP nên một IP sinh tối đa khoảng 5 dòng/phút (~21.600 dòng/72h), chu kỳ ≈ N/10 phút ≈ 36h < 72h cho một IP; nhiều IP có thể vượt. **F-R2-4 (Thấp):** chấp nhận, ghi giới hạn; cân nhắc SHARE co giãn hoặc trần dòng hợp lệ mỗi user.
+
+### (1c) Quét lặp vô hạn
+- Không vô hạn: chặn bởi `created_at > now-72h`. Mỗi dòng tối đa 72*3600/900 = 288 lần `getOrder` (nếu quét đúng nhịp); tổng/lượt luôn <= SHARE GET bất kể số dòng. Dòng không bao giờ RECOVERY_REQUIRED (provider luôn PENDING) ngưng sau 72h. So sánh: truy vấn cũ (FAILED-đã-POST + `recovery_required_at IS NULL`) KHÔNG có cửa sổ nên các dòng NOT_CAPTURED/FAILED-đã-POST bị quét vĩnh viễn (nợ có sẵn, F-R2-5, không thuộc R2).
+
+### (1f) Căn cứ 72h và gia hạn order
+- Adapter KHÔNG gia hạn: `createOrder` (`paypalSandboxProvider.js:219-235`) gửi `intent`, `purchase_units`, `payment_source.paypal.experience_context`; không có `expiration_time`, không PATCH/gia hạn (grep `PATCH|expir|extend` chỉ trúng `expires_in` của token OAuth, dòng 162-166). Order theo vòng đời mặc định của PayPal. Theo mô tả của Pro (order CREATED giữ khoảng 3 giờ, tối đa 72 giờ nếu gia hạn; order đã duyệt không capture trong 3 giờ bị tự hoàn) thì 72h là cận trên thận trọng. CHƯA KIỂM CHỨNG trên Sandbox: mốc 3h/72h, hành vi tự hoàn, mốc hết hạn của order APPROVED chưa capture. Cần ghi "chưa kiểm chứng" trong tài liệu (F-R2-6).
+
+### (2) Replay sau RECOVERY_REQUIRED (`paypalAbandonment.js`)
+Hiện tại: nhánh FAILED ban đầu (`:40`) và nhánh thua race (`:57`) chỉ cần `isAbandoned` (FAILED + audit) để trả `ALREADY_ABANDONED`, kể cả sau khi đã RECOVERY_REQUIRED. Đề xuất của Pro (đọc lại binding sau audit; 409 nếu RECOVERY_REQUIRED/VERIFIED hoặc có `recoveryRequiredAt`/`captureId`) đúng hướng.
+- **Danh sách điều kiện:** request abandon là FAILED chưa từng POST nên chỉ đi READY -> RECOVERY_REQUIRED (`persistRecovery`); VERIFIED chỉ có ở dữ liệu cũ FAILED+VERIFIED, được `persistLegacyRecovery` gắn `recovery_required_at`; `captureId != null` bao trùm cả hai; IN_FLIGHT/UNKNOWN/NOT_CAPTURED không thể xảy ra sau close. Danh sách của Pro đủ cho các trạng thái đạt được.
+- **F-R2-3 (Thấp-Trung): thiếu một dấu bằng chứng.** Khi capture ID đã thuộc request khác (`CAPTURE_ID_CONFLICT` -> `recordConflict`), `last_capture_error='CONFLICTING_CAPTURE:<id>'` còn state READY, `capture_id` NULL, `recovery_required_at` NULL: danh sách không bắt được. Thêm điều kiện `capture.lastError` bắt đầu bằng `CONFLICTING_CAPTURE` hoặc bằng `CAPTURED_AFTER_REQUEST_CLOSED` (cả hai do store ghi, không do client). Không dùng "mọi lastError khác null" vì dương tính giả; request READY bình thường có `last_capture_error` null (`finishCaptureAttempt(READY)` ghi null qua coordinator).
+- **Áp ở cả hai nhánh** (`:40` và `:57`), cùng một hàm kiểm, cùng một lần đọc binding. Quyết định dựa trên binding, không dựa trên `stage` của DTO: `serializePayPal` xếp `FAILED` trước các trạng thái capture trừ RECOVERY_REQUIRED (`paypalRuntime.js:76-79`), nên VERIFIED/`captureId` không hiện thành stage riêng.
+- **Khoảng hở còn lại chấp nhận được:** recovery xuất hiện giữa lần đọc cuối và phản hồi là TOCTOU của phản hồi chỉ đọc: không ghi, không quyết định nghiệp vụ; `serialize()` đọc binding lần nữa nên `stage` thường đã là RECOVERY_REQUIRED, UI vẫn thấy đúng. Tệ nhất là một phản hồi `ALREADY_ABANDONED` lệch vài mili giây so với DB, không gây thiệt hại. Muốn khép hẳn thì dựng quyết định và DTO từ một lần đọc.
+- **Mã trả:** 409 `PAYPAL_ABANDON_UNSAFE` hợp hợp đồng; không audit mới, không đổi dữ liệu.
+- **Hồi quy C5:** request abandon bình thường có capture READY, `captureId`, `recoveryRequiredAt`, `lastError` đều null, không dương tính giả: C5 (replay 200 ALREADY_ABANDONED), C4c (bên thua race đọc sau khi bên thắng commit, vẫn READY/null) và C10/S3 (`reconcileOne` trả STILL_PENDING rồi abandon lại) vẫn đạt.
+- **Test cần có (C12/C13 gợi ý):** replay sau webhook/`reconcileOne`/`markCaptureVerified` COMPLETED -> 409, không audit mới, DTO stage RECOVERY_REQUIRED, ở cả nhánh FAILED ban đầu LẪN nhánh thua race (barrier C4c + recovery chen giữa); legacy VERIFIED+FAILED -> 409; `CONFLICTING_CAPTURE` -> 409. Nhóm quét mới: dòng READY/no-POST FAILED được quét; ngoài 72h, trong RESCAN, hoặc đã recovery thì không; không đói PENDING (đếm GET theo nhóm); thứ tự cũ-nhất-trước kể cả `last_reconciled_at` NULL trên PG; `last_reconcile_error` không đổi sau lượt quét lỗi.
+
+### Finding R2 giai đoạn 1
+
+| Mức | Mã | Nội dung | Vị trí |
+|---|---|---|---|
+| Trung bình | F-R2-2 | NULL xếp cuối trên PG làm đói dòng mới; dùng `COALESCE(last_reconciled_at,created_at)` và lọc `(IS NULL OR <= cutoff)` | truy vấn mới; so `rec:196` |
+| Thấp-Trung | F-R2-1 | Nhóm mới không được `recordError`/`clearError` (ghi đè `USER_ABANDONED`), kể cả khi ném | `rec:205-211`; test C6:465, C7:496 |
+| Thấp-Trung | F-R2-3 | Danh sách replay thiếu `lastError` `CONFLICTING_CAPTURE*` / `CAPTURED_AFTER_REQUEST_CLOSED` | `paypalAbandonment.js:40,57` |
+| Thấp | F-R2-4 | Năng lực quét ~SHARE*900/I dòng/chu kỳ; nhiều abandon (nhiều IP) kéo chu kỳ vượt 72h thì mất phát hiện | chính sách SHARE |
+| Thấp | F-R2-5 | Truy vấn cũ cho FAILED-đã-POST không có cửa sổ: quét vĩnh viễn (nợ có sẵn) | `rec:196` |
+| Thông tin | F-R2-6 | Mốc 72h/3h và hết hạn order chưa kiểm chứng trên Sandbox; adapter không gia hạn | `paypalSandboxProvider.js:219-235` |
+| Xác nhận | (1d) | `reconcileOne` FAILED không thể credit hay mở lại; lỗi ném bị bắt trong vòng lặp | `paypalPaymentStore.js:505-510`; `paypalSettlement.js:28` |
+
+Giai đoạn 2 của vòng R2 (diff + test C12/C13) chờ Pro nhắn.
+
+## Vòng R2 — giai đoạn 2 (đọc diff `reconciler.js`, `paypalAbandonment.js`, notes, test C12/C13/C14; không chạy)
+
+### (1) Finding giai đoạn 1 đã vào mã chưa
+| Mã | Kết luận | Bằng chứng |
+|---|---|---|
+| F-R2-2 | ĐẠT | Truy vấn nhóm mới (`reconciler.js` ~dòng 213): `ORDER BY COALESCE(pr.last_reconciled_at,pr.created_at) ASC` và lọc `(pr.last_reconciled_at IS NULL OR pr.last_reconciled_at<=?)`. |
+| F-R2-3 | ĐẠT | `replay()` (`paypalAbandonment.js` ~39-46) kiểm regex `^(CONFLICTING_CAPTURE\|CAPTURED_AFTER_REQUEST_CLOSED)` trên `capture.lastError`; nhánh FAILED ban đầu (`return replay()`) và nhánh thua race (`return replay()` cuối) đều đi qua cùng hàm. |
+| F-R2-1 | MỘT PHẦN, có chủ ý | `clearError` bị bỏ cho nhóm abandon (`if(!row.abandoned)`), nhưng `recordError` ở `catch` vẫn chạy cho nhóm này, nên `USER_ABANDONED` bị ghi đè khi quét lỗi, và sau đó không còn bị xoá (không `clearError`) nên mã lỗi cũ nằm lại. Comment trong mã và notes mục 11 nói đúng điều này; replay không dựa vào cột. Chấp nhận (Thấp), nhưng lý do đóng trong cột mất; audit là nguồn duy nhất. |
+
+### (2) Nhóm quét mới — ĐẠT
+- Chỉ chạy khi `!paymentRequestId`: id truyền vào không kích hoạt nhóm mới. Đường MOCK (nhánh trước, dòng ~100-190) không đổi trong diff. `markAttempt`/`reconcileOne` dùng lại.
+- Tập rời với truy vấn cũ: cũ đòi `pr.status='PENDING' OR (FAILED AND post_sent_at NOT NULL)`; mới đòi `FAILED AND post_sent_at IS NULL AND capture_state='READY' AND recovery_required_at IS NULL`. `Set seen` chỉ là chốt phụ (tập đã rời nhau bằng SQL).
+- LIMIT riêng `share=max(1,floor(limit/5))` NGOÀI `limit` của truy vấn cũ; cửa sổ `created_at > now-WINDOW` (72h) và RESCAN 900s đọc từ env có chặn trên. `summary.paypal.abandonedScanned` mới; `scanned` giữ nghĩa cũ.
+- Không áp `cutoff` (minAge 30s) cho nhóm mới: hợp lý (request đã đóng).
+
+### (3) Replay: thứ tự audit rồi đọc lại binding — ĐẠT
+`isAbandoned` (truy vấn audit) -> `store.loadByRequestId` -> kiểm. 409 `PAYPAL_ABANDON_UNSAFE` nếu `!b`, state RECOVERY_REQUIRED/VERIFIED, `recoveryRequiredAt`, `captureId`, hoặc lastError xung đột. Khe còn lại (giữa lần đọc cuối và `serialize()`) chấp nhận được như đã phân tích. Lưu ý `store` ở đây là `secureStore` (merchantGuard): đổi merchant sẽ ném 409 `PAYPAL_ORDER_MISMATCH` thay vì `UNSAFE` (đã đúng với phần còn lại).
+
+### (4) Test
+- **C13(b) — barrier thật, ĐẠT.** Hai `abandon` cùng đứng ở `gate` sau GET (need 2, precond `hit`), bên thắng đóng + audit (đọc DB: FAILED, đúng 1 audit), bên thua đã gọi `closeUncaptured` THẬT (store thật, chỉ bọc để giữ SAU khi close trả `closed:false`, `lost===1`, `bArrived` resolve), bị giữ tới khi `bRelease`. Recovery được lưu BẰNG `lateCap` + `markCaptureVerified` thật và xác nhận trong DB (`afterRec`) TRƯỚC `bRelease.resolve()`. Không delay làm bằng chứng: `sleep(300)` ở dòng 894 chỉ là kiểm "vẫn bị giữ", đúng bằng cấu trúc (tautological, vô hại, không phải bằng chứng chính). Không mock close thành công (close thật chạy). Lưu ý: dựng `createAbandonment` thủ công với `fakeReq`, nên không qua router/auth; chấp nhận cho ca này.
+- **C13(a)**: ba đường tạo recovery (markCaptureVerified, webhook, reconcileOne), replay qua HTTP: 409, bằng chứng/ví/sổ cái/audit giữ nguyên. **(c)** hồi quy replay thường 200.
+- **C14**: (1) CAPTURE_ID_CONFLICT thật (request B giữ capture_id X, A xung đột), (2) VERIFIED cũ bằng fixture DB (legacy, ghi rõ), (3) cột bị ghi đè nhưng replay 200 nhờ audit, (4) thứ tự GET lấy từ nhật ký transport thật, (5) biên cửa sổ/RESCAN ±10s, state UNKNOWN/IN_FLIGHT không quét, FAILED-đã-POST không quét hai lần.
+- **Đo bằng nhật ký transport thật:** `gets()`/`count('get')` đến từ `net[]`; số dòng/audit/credit từ DB. Không có biến test tự đặt thay cho bằng chứng.
+- **Giá trị khớp mã:** WINDOW 72h, RESCAN 900s, SHARE `floor(limit/5)` (limit 5 -> 1, 10 -> 2) khớp. Test dùng mặc định, không đặt env.
+- **Nhãn đỏ/xanh:** các assert gắn `[ĐỎ trên HEAD]` đều là hành vi mới (HEAD không có nhóm quét hoặc trả 200); các assert không gắn nhãn (C12(b) scanned=0, (e) MOCK không bị đụng, C13(c)) là guard/hồi quy đạt ở HEAD. Phù hợp con số đỏ 31/45, 18/22, 22/26 mà Pro nêu (tôi không kiểm lại số).
+
+**Finding test R2**
+| Mức | Mã | Nội dung | Vị trí |
+|---|---|---|---|
+| Trung bình | T-R2-1 | **C14(4) có vẻ kỳ vọng ngược mã.** `O[0]` có `last_reconciled_at` NULL nhưng `created_at` mới (vừa tạo) nên `COALESCE` xếp `O[0]` SAU `O[1]` (now-5000s) và `O[2]` (now-1500s): thứ tự GET dự kiến `[O1,O2,O0]`, trong khi assert đòi `[O0,O1,O2]` ("NULL trước"). Trên mã đã sửa (COALESCE) ca này nhiều khả năng ĐỎ. Muốn kiểm "NULL không xếp cuối" đúng nghĩa cần đặt `created_at` của `O[0]` cũ hơn 5000s (ví dụ now-6000s) để kỳ vọng `[O0,O1,O2]` đúng với COALESCE và sai với `NULLS LAST` thuần. Cần xác minh khi chạy xanh. | test:959-964 |
+| Thấp-Trung | T-R2-2 | `isolate()` đẩy các request khác về `created_at=FUTURE`, mà FUTURE > now-72h nên mọi dòng abandon cũ (READY, chưa quét) vẫn đủ điều kiện nhóm mới và chiếm SHARE sau dòng của ca (xếp cuối theo COALESCE). Các assert đếm chính xác (ví dụ C12(g) `errors===1`) phụ thuộc việc không dòng "thừa" nào lỗi/ chen. Nên cô lập thêm bằng `last_reconciled_at=now` cho dòng ngoài ca (loại khỏi RESCAN). | test:747-750 |
+| Thấp | T-R2-3 | Không có ca nào gọi `reconcileOnce({paymentRequestId})` để chứng minh nhóm mới không kích hoạt (mutation M-R2-9). | C12 |
+| Thấp | T-R2-4 | Không có ca khẳng định `last_reconcile_error` giữ `USER_ABANDONED` sau một lượt quét THÀNH CÔNG của nhóm abandon (mutation bỏ `if(!row.abandoned)`); C14(3) ghi đè tay nên không chạm tới. | C12/C14 |
+| Thấp | T-R2-5 | C13(b) dựng `createAbandonment` với `fakeReq`, không qua router (auth/body); chấp nhận, ghi giới hạn. | 882-883 |
+
+### (5) Mutation — đánh giá bằng đọc
+
+| # | Mutation | Ca bắt | Kết luận |
+|---|---|---|---|
+| R1 | Bỏ `b.recovery_required_at IS NULL` khỏi nhóm mới | Không ca nào: recovery đặt `capture_state='RECOVERY_REQUIRED'` (hoặc VERIFIED cũ) nên `capture_state='READY'` đã loại; không có hàng READY mà `recovery_required_at` NOT NULL | KHÔNG CÓ CA BẮT (gần như mutant tương đương) |
+| R2 | Bỏ cận cửa sổ `created_at` | C12(c) (now-73h phải 0 GET), C14(5) (±10s) | BẮT |
+| R3 | Bỏ lọc giãn cách `last_reconciled_at` | C12(d) (vừa quét/now-600s phải 0), C14(5) | BẮT |
+| R4 | Gộp SHARE vào cùng LIMIT với truy vấn PENDING | C12(e) limit=5: 4 PENDING phải đều được quét và nhóm abandon đúng 1 dòng; gộp sẽ chiếm chỗ | BẮT |
+| R5 | Bỏ `b.capture_state='READY'` | C14(5) (UNKNOWN/IN_FLIGHT sẽ bị quét) | BẮT |
+| R6 | Bỏ lần đọc lại binding trong `replay()` | C13(a) và C13(b) (nhánh thua race) | BẮT |
+| R7 | Bỏ điều kiện lastError | C14(1) | BẮT |
+| R8 | Bỏ chặn trùng id (`Set seen`) | Không ca nào, và không thể: tập hai truy vấn đã rời nhau bằng SQL (`post_sent_at` NOT NULL vs NULL) | KHÔNG CÓ CA BẮT (mutant tương đương, mã thừa) |
+| R9 | `paymentRequestId` vẫn kích hoạt nhóm mới (bỏ `if(!paymentRequestId)`) | Không ca nào (T-R2-3) | KHÔNG CÓ CA BẮT |
+| R10 | Gọi `clearError` cho nhóm abandon (bỏ `if(!row.abandoned)`) | Không ca nào (T-R2-4) | KHÔNG CÓ CA BẮT |
+| R11 | Đảo thứ tự replay (đọc binding trước audit) | Không ca nào: recovery luôn được lưu trước cả hai lần đọc trong C13(b) | KHÔNG CÓ CA BẮT (thấp) |
+| R12 | Bỏ riêng `VERIFIED`/`captureId` khỏi `replay()` nhưng giữ `recoveryRequiredAt` | Không ca nào: mọi dữ liệu tạo ra đều có `recoveryRequiredAt` kèm theo | KHÔNG CÓ CA BẮT (dư thừa, thấp) |
+| R13 | Đổi `COALESCE` thành `last_reconciled_at` thuần | C14(4) nếu sửa như T-R2-1; như viết hiện tại sẽ KHÔNG phân biệt đúng (xem T-R2-1) | BẮT NẾU SỬA T-R2-1 |
+
+Mutation đáng làm bổ sung ca: R9, R10, R13 (sau khi sửa T-R2-1).

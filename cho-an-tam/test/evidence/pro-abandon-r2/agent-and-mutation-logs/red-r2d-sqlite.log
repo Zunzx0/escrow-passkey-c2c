@@ -1,0 +1,481 @@
+﻿[migrate] admin_provenance: đã tạo bảng nguồn gốc quyền quản trị, backfill 0 tài khoản ADMIN có sẵn.
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+
+C1 — 5 ý định PENDING chặn hạn mức; abandon một request rồi tạo mới được
+  ✅ precond: tạo được 5 ý định PayPal PENDING có order
+  ✅ precond: ý định thứ 6 bị 409 TOPUP_LIMIT_EXCEEDED
+  ✅ abandon hợp lệ một ý định: 200, status FAILED, outcome ABANDONED
+  ✅ số dư ví trước/sau abandon bằng nhau
+  ✅ số hàng sổ cái trước/sau abandon bằng nhau
+  ✅ request đích chuyển PENDING -> FAILED, các request khác không đổi
+  ✅ request 252427ca khác vẫn PENDING
+  ✅ request 6f79b21f khác vẫn PENDING
+  ✅ request 8c34666e khác vẫn PENDING
+  ✅ request 8545007d khác vẫn PENDING
+  ✅ sau abandon: tạo được ý định mới với requestId mới
+  ✅ hạn mức KHÔNG bị nới: lại đủ 5 PENDING thì ý định kế tiếp lại bị chặn
+
+C2 — Xác thực, vai trò, chủ sở hữu, body bị cấm
+  ✅ thiếu token: 401
+  ✅ người ngoài (BUYER khác): 403
+  ✅ ADMIN (có ví nhưng sai vai trò) không dùng được endpoint ví: 403
+  ✅ các lần từ chối không đổi trạng thái và không ghi audit thành công
+  ✅ body có khoá "userId": 400
+  ✅ body có khoá "status": 400
+  ✅ body có khoá "evidence": 400
+  ✅ body có khoá "actor": 400
+  ✅ body có khoá "khoá bất kỳ": 400
+  ✅ body có khoá "amount": 400
+  ✅ body có khoá "requestId": 400
+  ✅ sau mọi body bị cấm: trạng thái request không đổi
+  ✅ body bị cấm: không có audit PAYPAL_REQUEST_ABANDONED
+  ✅ người ngoài giả userId chủ trong body: bị chặn (400/403), không thành chủ
+  ✅ giả userId: không đổi trạng thái
+  ✅ BUYER chính chủ: 200 ABANDONED
+  ✅ SELLER chính chủ: 200 ABANDONED
+  ✅ không gửi body (undefined) cũng hợp lệ
+  ✅ chủ BUYER có đúng 1 audit; người ngoài/admin 0
+  ✅ người ngoài và admin không có audit ABANDONED
+
+C3a — Provider không cho phép đóng: lỗi/mismatch/capture -> request giữ nguyên
+  ✅ mismatch orderId khác: 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch orderId khác: request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ mismatch paymentRequestId khác (reference_id): 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch paymentRequestId khác (reference_id): request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ mismatch paymentRequestId khác (custom_id): 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch paymentRequestId khác (custom_id): request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ mismatch số tiền/quote USD khác: 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch số tiền/quote USD khác: request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ mismatch merchant khác: 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch merchant khác: request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ mismatch tiền tệ khác: 409 PAYPAL_ORDER_MISMATCH, không đóng
+  ✅ mismatch tiền tệ khác: request/binding nguyên vẹn, không audit, không lệnh ghi tới provider
+  ✅ GET timeout: lỗi an toàn 503/PAYPAL_TIMEOUT
+  ✅ GET timeout: request vẫn PENDING/READY, không audit, không lệnh ghi
+  ✅ GET lỗi mạng: lỗi an toàn 503/PAYPAL_UNAVAILABLE
+  ✅ GET lỗi mạng: request vẫn PENDING/READY, không audit, không lệnh ghi
+  ✅ order không tồn tại (404 PayPal): lỗi an toàn 502/PAYPAL_API_ERROR
+  ✅ order không tồn tại (404 PayPal): request vẫn PENDING/READY, không audit, không lệnh ghi
+  ✅ capture PENDING, order APPROVED: 409 PAYPAL_ABANDON_UNSAFE, không đóng
+  ✅ capture PENDING, order APPROVED: request vẫn PENDING, không audit, không lệnh ghi, không cộng ví
+  ✅ capture PENDING, order PAYER_ACTION_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, không đóng
+  ✅ capture PENDING, order PAYER_ACTION_REQUIRED: request vẫn PENDING, không audit, không lệnh ghi, không cộng ví
+  ✅ capture PENDING, order VOIDED: 409 PAYPAL_ABANDON_UNSAFE, không đóng
+  ✅ capture PENDING, order VOIDED: request vẫn PENDING, không audit, không lệnh ghi, không cộng ví
+  ✅ capture COMPLETED (đã thu thật): 409 PAYPAL_ABANDON_UNSAFE, không đóng
+  ✅ capture COMPLETED (đã thu thật): request vẫn PENDING, không audit, không lệnh ghi, không cộng ví
+  ✅ order COMPLETED nhưng không có capture: 502 PAYPAL_RESPONSE_INVALID, không đóng
+  ✅ order COMPLETED nhưng không có capture: request vẫn PENDING, không audit, không lệnh ghi, không cộng ví
+
+C3b — orderStatus được chấp nhận: CREATED/SAVED/APPROVED/PAYER_ACTION_REQUIRED/VOIDED
+  ✅ orderStatus=CREATED: 200 ABANDONED, stage FAILED
+  ✅ orderStatus=CREATED: FAILED, bằng chứng capture giữ nguyên (READY, chưa POST)
+  ✅ orderStatus=CREATED: không có POST capture/void/refund tới provider
+  ✅ orderStatus=CREATED: ví và sổ cái không đổi
+  ✅ orderStatus=CREATED: order phía PayPal không bị hủy/đổi
+  ✅ orderStatus=SAVED: 200 ABANDONED, stage FAILED
+  ✅ orderStatus=SAVED: FAILED, bằng chứng capture giữ nguyên (READY, chưa POST)
+  ✅ orderStatus=SAVED: không có POST capture/void/refund tới provider
+  ✅ orderStatus=SAVED: ví và sổ cái không đổi
+  ✅ orderStatus=SAVED: order phía PayPal không bị hủy/đổi
+  ✅ orderStatus=APPROVED: 200 ABANDONED, stage FAILED
+  ✅ orderStatus=APPROVED: FAILED, bằng chứng capture giữ nguyên (READY, chưa POST)
+  ✅ orderStatus=APPROVED: không có POST capture/void/refund tới provider
+  ✅ orderStatus=APPROVED: ví và sổ cái không đổi
+  ✅ orderStatus=APPROVED: order phía PayPal không bị hủy/đổi
+  ✅ orderStatus=PAYER_ACTION_REQUIRED: 200 ABANDONED, stage FAILED
+  ✅ orderStatus=PAYER_ACTION_REQUIRED: FAILED, bằng chứng capture giữ nguyên (READY, chưa POST)
+  ✅ orderStatus=PAYER_ACTION_REQUIRED: không có POST capture/void/refund tới provider
+  ✅ orderStatus=PAYER_ACTION_REQUIRED: ví và sổ cái không đổi
+  ✅ orderStatus=PAYER_ACTION_REQUIRED: order phía PayPal không bị hủy/đổi
+  ✅ orderStatus=VOIDED: 200 ABANDONED, stage FAILED
+  ✅ orderStatus=VOIDED: FAILED, bằng chứng capture giữ nguyên (READY, chưa POST)
+  ✅ orderStatus=VOIDED: không có POST capture/void/refund tới provider
+  ✅ orderStatus=VOIDED: ví và sổ cái không đổi
+  ✅ orderStatus=VOIDED: order phía PayPal không bị hủy/đổi
+
+C3c — Trạng thái cục bộ không an toàn -> 409 PAYPAL_ABANDON_UNSAFE và KHÔNG gọi getOrder
+  ✅ precond: dựng được trạng thái IN_FLIGHT (có claim, chưa POST)
+  ✅ IN_FLIGHT (có claim, chưa POST): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ IN_FLIGHT (có claim, chưa POST): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ IN_FLIGHT (có claim, chưa POST): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái IN_FLIGHT + đã POST
+  ✅ IN_FLIGHT + đã POST: 409 PAYPAL_ABANDON_UNSAFE
+  ✅ IN_FLIGHT + đã POST: KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ IN_FLIGHT + đã POST: request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái UNKNOWN sau khi POST
+  ✅ UNKNOWN sau khi POST: 409 PAYPAL_ABANDON_UNSAFE
+  ✅ UNKNOWN sau khi POST: KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ UNKNOWN sau khi POST: request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái UNKNOWN (khai UNKNOWN, chưa POST)
+  ✅ UNKNOWN (khai UNKNOWN, chưa POST): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ UNKNOWN (khai UNKNOWN, chưa POST): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ UNKNOWN (khai UNKNOWN, chưa POST): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái VERIFIED (PENDING chờ tất toán)
+  ✅ VERIFIED (PENDING chờ tất toán): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ VERIFIED (PENDING chờ tất toán): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ VERIFIED (PENDING chờ tất toán): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái NOT_CAPTURED (order VOIDED sau POST)
+  ✅ NOT_CAPTURED (order VOIDED sau POST): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ NOT_CAPTURED (order VOIDED sau POST): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ NOT_CAPTURED (order VOIDED sau POST): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái RECOVERY_REQUIRED (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic)
+  ✅ RECOVERY_REQUIRED (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ RECOVERY_REQUIRED (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ RECOVERY_REQUIRED (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: dựng được trạng thái READY nhưng còn claim (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic; guard atomic ở C11)
+  ✅ READY nhưng còn claim (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic; guard atomic ở C11): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ READY nhưng còn claim (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic; guard atomic ở C11): KHÔNG gọi provider.getOrder (kiểm cục bộ đã từ chối)
+  ✅ READY nhưng còn claim (fixture DB; chỉ chạm tiền kiểm, không chạm guard atomic; guard atomic ở C11): request/binding nguyên vẹn, không audit, không lệnh ghi
+  ✅ precond: request PENDING chưa gắn order (create mơ hồ)
+  ✅ chưa bind order / create mơ hồ: 409 PAYPAL_ABANDON_UNSAFE
+  ✅ chưa bind order: không GET, không đổi, không audit
+
+C4a — Race: abandon GET xong, capture giành claim (POST đang bay), rồi thả close -> close KHÔNG thắng
+  ✅ precond: abandon đã GET xong và đang đứng ở barrier (chưa đóng)
+  ✅ precond: trong lúc barrier request còn PENDING/READY
+  ✅ precond: capture đã giành claim, đã ghi dấu POST và POST đang treo ở provider
+  ✅ precond: DB: IN_FLIGHT, capture_post_sent_at có, request PENDING
+  ✅ thả close sau khi capture đã claim: 409 PAYPAL_ABANDON_UNSAFE (close KHÔNG thắng)
+  ✅ close thua: request vẫn PENDING, claim còn nguyên, không audit
+  ✅ capture tiếp tục bình thường và tất toán (APPLIED)
+  ✅ đúng một POST capture tới provider
+  ✅ đúng một bút toán TOPUP_CREDIT
+  ✅ ví tăng đúng một lần số tiền
+  ✅ kết thúc SUCCEEDED, có capture_id, không bị ghi USER_ABANDONED
+  ✅ sổ cái chỉ thêm đúng một hàng (từ capture)
+
+C4b — Race: close thắng trước -> capture sau nhận CLOSED và provider.captureOrder KHÔNG bị gọi
+  ✅ precond: abandon thắng (FAILED)
+  ✅ capture sau close: outcome CLOSED, status FAILED
+  ✅ provider POST capture = 0 sau khi close thắng
+  ✅ tổng POST capture của order = 0
+  ✅ không có bút toán
+  ✅ ví không đổi
+  ✅ DB: FAILED, capture READY, chưa claim/POST lần nào
+
+C4b2 — Race song song abandon || capture: luôn nhất quán (chỉ một bên thắng), lặp 8 lần
+  ✅ mọi lần chạy: hoặc (close thắng, POST=0, không credit) hoặc (capture thắng, POST=1, 1 credit); không lẫn
+  ℹ phân bố: close thắng 8, capture thắng 0
+
+C4c — Race: hai abandon song song (barrier chờ cả hai GET xong) -> một ABANDONED, một ALREADY_ABANDONED, một audit
+  ✅ precond: cả hai abandon đã GET xong và cùng đứng ở barrier (chưa bên nào đóng)
+  ✅ precond: request còn PENDING khi cả hai đang giữ
+  ✅ cả hai trả 200
+  ✅ đúng một ABANDONED và một ALREADY_ABANDONED
+  ✅ đúng MỘT hàng audit
+  ✅ đóng đúng một lần (version tăng 1)
+  ✅ provider POST capture = 0
+
+C5 — Replay: abandon lại, key cũ, FAILED vì lý do khác
+  ✅ precond: tạo request PayPal
+  ✅ precond: abandon lần đầu 200 ABANDONED
+  ✅ abandon lại: 200 ALREADY_ABANDONED
+  ✅ replay: payment_requests và binding không đổi (không đổi version/updated_at)
+  ✅ replay: không thêm hàng audit/sổ cái/request, không order mới, không lệnh ghi provider
+  ✅ requestId cũ gọi create lại: trả lại request FAILED cũ (cùng id)
+  ✅ requestId cũ KHÔNG tạo order mới (đếm order và POST create)
+  ✅ requestId cũ không tạo request mới
+  ✅ precond: request FAILED vì lý do khác (ORDER_EXPIRED) bằng closeUncaptured
+  ✅ FAILED vì ORDER_EXPIRED: 409, KHÔNG phải replay thành công
+  ✅ FAILED lý do khác: không đổi, không audit ABANDONED
+  ✅ precond: request FAILED qua đường NOT_CAPTURED (ORDER_VOIDED)
+  ✅ FAILED qua NOT_CAPTURED: 409, không phải replay
+  ✅ NOT_CAPTURED đã đóng: không đổi
+  ✅ precond: request SUCCEEDED qua capture thật
+  ✅ abandon request đã SUCCEEDED: 409
+  ✅ SUCCEEDED không đổi, vẫn đúng một credit
+
+C6 — Capture muộn sau close: RECOVERY_REQUIRED, lưu capture_id, không credit/ledger
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] precond: request đã USER_ABANDONED
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] precond: PayPal thu tiền muộn (order COMPLETED phía fake)
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] kết quả RECOVERY_REQUIRED
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] binding: RECOVERY_REQUIRED, capture_id lưu đúng, recovery_required_at có
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] request vẫn FAILED (không mở lại), last_reconcile_error=USER_ABANDONED (chỉ đúng khi chưa qua lượt quét lô)
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] KHÔNG credit ví, KHÔNG ghi ledger
+  ✅ [webhook PAYMENT.CAPTURE.COMPLETED] tổng bút toán TOPUP_CREDIT toàn DB không đổi
+  ✅ [đối soát worker (reconcileOne, GET)] precond: request đã USER_ABANDONED
+  ✅ [đối soát worker (reconcileOne, GET)] precond: PayPal thu tiền muộn (order COMPLETED phía fake)
+  ✅ [đối soát worker (reconcileOne, GET)] kết quả RECOVERY_REQUIRED
+  ✅ [đối soát worker (reconcileOne, GET)] binding: RECOVERY_REQUIRED, capture_id lưu đúng, recovery_required_at có
+  ✅ [đối soát worker (reconcileOne, GET)] request vẫn FAILED (không mở lại), last_reconcile_error=USER_ABANDONED (chỉ đúng khi chưa qua lượt quét lô)
+  ✅ [đối soát worker (reconcileOne, GET)] KHÔNG credit ví, KHÔNG ghi ledger
+  ✅ [đối soát worker (reconcileOne, GET)] tổng bút toán TOPUP_CREDIT toàn DB không đổi
+  ✅ [store.markCaptureVerified trực tiếp] precond: request đã USER_ABANDONED
+  ✅ [store.markCaptureVerified trực tiếp] precond: PayPal thu tiền muộn (order COMPLETED phía fake)
+  ✅ [store.markCaptureVerified trực tiếp] kết quả RECOVERY_REQUIRED
+  ✅ [store.markCaptureVerified trực tiếp] binding: RECOVERY_REQUIRED, capture_id lưu đúng, recovery_required_at có
+  ✅ [store.markCaptureVerified trực tiếp] request vẫn FAILED (không mở lại), last_reconcile_error=USER_ABANDONED (chỉ đúng khi chưa qua lượt quét lô)
+  ✅ [store.markCaptureVerified trực tiếp] KHÔNG credit ví, KHÔNG ghi ledger
+  ✅ [store.markCaptureVerified trực tiếp] tổng bút toán TOPUP_CREDIT toàn DB không đổi
+  ✅ capture HTTP sau RECOVERY_REQUIRED: outcome/stage RECOVERY_REQUIRED
+  ✅ không POST capture thêm
+  ✅ bằng chứng không bị mất sau lần capture HTTP
+  ✅ đối soát lặp: vẫn RECOVERY_REQUIRED, không tự credit
+
+C7 — Audit actor/source và tính nguyên tử khi INSERT audit lỗi
+  ✅ precond: abandon thành công
+  ✅ ĐÚNG MỘT hàng security_events PAYPAL_REQUEST_ABANDONED của chủ
+  ✅ event_type, outcome=ALLOWED, actor_id = chủ (lấy từ phiên)
+  ✅ detail: action=ABANDON, reason=USER_ABANDONED, source=OWNER
+  ✅ payment_requests ngay sau abandon (chưa qua lượt quét): FAILED, resolved_by=RECONCILER, last_reconcile_error=USER_ABANDONED, user_id=chủ
+  ✅ resolved_at có giá trị
+  ℹ audit: username=c7-cf030801 route=/api/payments/paypal/:id/abandon method=POST status_code=200 detail={"action":"ABANDON","reason":"USER_ABANDONED","source":"OWNER","paymentRequestId":"3705957d-db83-4e8c-83b3-600c751ca519","amount":10000}
+  ✅ audit không chứa token/bí mật
+  ✅ INSERT audit lỗi: API trả 5xx
+  ✅ INSERT audit lỗi: request vẫn PENDING/READY (không đóng nửa vời)
+  ✅ INSERT audit lỗi: payment_requests/binding nguyên vẹn, không có hàng audit, ví không đổi
+  ✅ INSERT audit lỗi: không lệnh ghi tới provider
+  ✅ sau khi gỡ trigger: abandon lại thành công (ABANDONED)
+  ✅ sau retry: đúng một hàng audit
+
+C8 — Hồi quy: lịch sử/chi tiết thấy FAILED, /me không gọi provider, xác minh fresh còn nguyên
+  ✅ precond: /me khi còn request PENDING không gọi provider (đếm GET = 0)
+  ✅ precond: /me thấy request PENDING
+  ✅ precond: abandon thành công
+  ✅ /me sau abandon: getOrder = 0 (F-05)
+  ✅ /me vẫn thấy request cũ ở trạng thái FAILED, stage FAILED
+  ✅ /me vẫn thấy request PENDING khác
+  ✅ detail thấy request FAILED (stage FAILED, requestId cũ)
+  ✅ checkout request PENDING: 200 AWAITING_APPROVAL
+  ✅ checkout giữ xác minh fresh (đúng 1 GET provider)
+  ✅ detail (UNKNOWN + payer-action) giữ xác minh fresh (1 GET)
+  ✅ detail PENDING 200
+  ✅ /me với UNKNOWN: không GET, stage RECONCILING (F-05)
+  ✅ capture bình thường vẫn xác minh fresh (>=1 GET) rồi APPLIED
+  ✅ capture bình thường: đúng một POST
+
+C10 — Review an toàn: replay bền (S3), NOT_CAPTURED + caller cũ (S2), order lệch (S5), claim sau close (S4), isolation (S8)
+  ✅ S3 precond: abandon thành công
+  ✅ S3: đối soát ghi đè last_reconcile_error=null: abandon lại vẫn 200 ALREADY_ABANDONED (nguồn bền là security_events)
+  ✅ S3 (null): không thêm audit/dữ liệu, không đổi hàng
+  ✅ S3: đối soát ghi đè last_reconcile_error=SOME_OTHER_ERROR: abandon lại vẫn 200 ALREADY_ABANDONED (nguồn bền là security_events)
+  ✅ S3 (SOME_OTHER_ERROR): không thêm audit/dữ liệu, không đổi hàng
+  ✅ S3: sau reconcileOne theo id vẫn ALREADY_ABANDONED
+  ✅ S3 precond: FAILED reason=ORDER_EXPIRED bằng closeUncaptured cũ, không có audit
+  ✅ S3: FAILED reason=ORDER_EXPIRED không có hàng audit: 409 PAYPAL_ABANDON_UNSAFE
+  ✅ S3 (ORDER_EXPIRED): không đổi, không audit
+  ✅ S3 precond: FAILED reason=USER_ABANDONED bằng closeUncaptured cũ, không có audit
+  ✅ S3: FAILED reason=USER_ABANDONED không có hàng audit: 409 PAYPAL_ABANDON_UNSAFE
+  ✅ S3 (USER_ABANDONED): không đổi, không audit
+  ✅ S2 precond: NOT_CAPTURED dựng qua store.finishCaptureAttempt(ORDER_VOIDED)
+  ✅ S2: NOT_CAPTURED PENDING: abandon 409, không GET, không đổi
+  ✅ S2: closeUncaptured kiểu cũ vẫn đóng được NOT_CAPTURED (caller cũ không đổi)
+  ✅ S2: closeUncaptured(READY, ORDER_EXPIRED) cũ: FAILED, resolved_by=RECONCILER, last_reconcile_error=ORDER_EXPIRED
+  ✅ S2: caller cũ không sinh audit ABANDONED
+  ✅ S5: order GET được mang id khác binding: 409, không đóng (order_id trong binding bất biến nên chỉ dựng được phía provider)
+  ✅ S4 precond: đã abandon
+  ✅ S4: claimCapture trên request FAILED: outcome CLOSED
+  ✅ S4: không có claim, không dấu POST, attempts/post_count = 0
+  ✅ closeUncaptured audit sql lạ: 400 VALIDATION_ERROR
+  ✅ audit sql lạ: request không đóng, không hàng security_events mới
+  ✅ closeUncaptured audit params thiếu: 400 VALIDATION_ERROR
+  ✅ audit params thiếu: request không đóng, không hàng security_events mới
+  ✅ closeUncaptured audit params thừa: 400 VALIDATION_ERROR
+  ✅ audit params thừa: request không đóng, không hàng security_events mới
+  ✅ closeUncaptured audit params không phải mảng: 400 VALIDATION_ERROR
+  ✅ audit params không phải mảng: request không đóng, không hàng security_events mới
+  ℹ S8: SQLite — không áp dụng transaction_isolation
+
+C4d — Race barrier: capture đã claim nhưng CHƯA ghi dấu POST (preflight GET treo) khi thả close -> close KHÔNG thắng
+  ✅ precond: abandon đã GET xong, đứng ở barrier
+  ✅ precond: capture đã claim và đang treo ở preflight GET
+  ✅ precond: DB IN_FLIGHT có claim, CHƯA có capture_post_sent_at, chưa POST
+  ✅ thả close khi capture đã claim (chưa POST): 409 PAYPAL_ABANDON_UNSAFE
+  ✅ close thua: request vẫn PENDING
+  ✅ capture tiếp tục và APPLIED
+  ✅ 1 POST, 1 credit, 0 audit
+
+C4e — Race barrier: capture claim rồi trả READY (order chưa duyệt, chưa POST) giữa GET và close -> close hợp lệ thắng, không POST
+  ✅ precond: abandon đã GET xong, đứng ở barrier
+  ✅ precond: capture claim rồi trả AWAITING_APPROVAL (không POST)
+  ✅ precond: DB trở lại READY, không claim, không POST, capture_attempts=1
+  ✅ thả close: vẫn đóng được (chưa từng POST, không claim): 200 ABANDONED
+  ✅ bằng chứng capture giữ nguyên (attempts=1 không bị reset)
+  ✅ 0 POST capture, 1 audit
+
+C11 — Guard chiều sâu Ở STORE (gọi thẳng store, fixture DB): onlyNeverPosted, expectedOrderId, markCapturePostSent trên request FAILED
+  ✅ (a) READY còn capture_claim + onlyNeverPosted:true: closed:false, không đổi
+  ✅ (a) READY còn claim, gọi kiểu cũ: cũng closed:false (không đóng khi còn claim)
+  ✅ (a) đối chứng: READY sạch + onlyNeverPosted:true đóng được
+  ✅ (a) precond: NOT_CAPTURED qua store
+  ✅ (a) NOT_CAPTURED + onlyNeverPosted:true: closed:false, không đổi
+  ✅ (a) hồi quy caller cũ: NOT_CAPTURED gọi kiểu cũ (không onlyNeverPosted) vẫn đóng được
+  ✅ (b) expectedOrderId khác order_id đang bind: {closed:false, reason:ORDER_CHANGED}, không đổi
+  ✅ (b) expectedOrderId đúng: closed:true
+  ✅ (c) precond: binding IN_FLIGHT với claim X
+  ✅ (c) precond: request FAILED, binding IN_FLIGHT, capture_post_sent_at NULL
+  ✅ (c) markCapturePostSent với claim ĐÚNG trên request FAILED: ok:false, capture_post_sent_at vẫn NULL, post_count=0
+  ✅ (c) đối chứng: cùng thao tác trên request PENDING: ok:true và có dấu POST
+  ✅ (d) claimCapture trên request FAILED: CLOSED, không tạo claim
+  ℹ (d) điều kiện EXISTS pr.status trong UPDATE của claimCapture là phòng thủ chiều sâu: đã có nhánh CLOSED trong cùng transaction trước đó, nên không có ca nào bắt được qua API store; KHÔNG được báo là có phủ.
+
+C12 — Worker LÔ (reconcileOnce không paymentRequestId): quét dòng FAILED chưa-POST để bắt thu muộn
+  ✅ precond: request c12a đã USER_ABANDONED
+  ✅ precond: PayPal thu muộn (fake), KHÔNG webhook
+  ✅ precond: request FAILED, binding READY, chưa từng POST
+  ❌ (a) summary.paypal.recoveryRequired = 1 [ĐỎ trên HEAD: dòng FAILED chưa-POST không được chọn] — {"scanned":0,"applied":0,"errors":0,"recoveryRequired":0}
+  ❌ (a) FAILED giữ nguyên, capture_state=RECOVERY_REQUIRED, capture_id lưu, recovery_required_at có
+  ✅ (a) ví và số hàng sổ cái KHÔNG đổi, không credit
+  ❌ (a) transport thấy GET order thật trong lượt lô
+  ✅ (b) lượt lô thứ hai: không GET lại dòng RECOVERY_REQUIRED, scanned=0
+  ✅ precond: request c12co đã USER_ABANDONED
+  ✅ precond: request c12ci đã USER_ABANDONED
+  ❌ (c) chỉ dòng trong cửa sổ 72h (now-71h) được quét; dòng now-73h không [ĐỎ trên HEAD: không dòng nào được chọn] — nhận [0,0], kỳ vọng [0,1]
+  ✅ precond: request c12d đã USER_ABANDONED
+  ❌ (d) lần đầu (last_reconciled_at NULL): quét 1 lần [ĐỎ trên HEAD] — nhận 0, kỳ vọng 1
+  ✅ (d) vừa quét xong: KHÔNG quét lại trước RESCAN
+  ✅ (d) last_reconciled_at = now-600s (< 900s): vẫn không quét
+  ❌ (d) last_reconciled_at = now-1000s (> 900s): quét lại — nhận 0, kỳ vọng 1
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ precond: request c12m đã USER_ABANDONED
+  ✅ (e) limit=5: TẤT CẢ 4 dòng PENDING đều được quét (không bị dòng đã đóng chiếm chỗ)
+  ❌ (e) limit=5 (SHARE=1): nhóm abandon quét đúng 1 dòng, là dòng last_reconciled_at cũ nhất [ĐỎ trên HEAD] — nhận [false,false,false,false,false,false], kỳ vọng [false,false,false,false,false,true]
+  ✅ (e) dòng MOCK không bị nhóm PayPal đụng tới
+  ✅ (e) limit=10: 4 dòng PENDING vẫn đều được quét
+  ❌ (e) limit=10 (SHARE=2): quét đúng 2 dòng cũ nhất còn đủ giãn cách (M[4], M[3]); M[5] vừa quét nên bị giãn cách [ĐỎ trên HEAD] — nhận [false,false,false,false,false,false], kỳ vọng [false,false,false,true,true,false]
+  ✅ (e) dòng MOCK vẫn là MOCK
+  ✅ precond: FAILED đã POST (UNKNOWN)
+  ✅ (f) FAILED đã POST: vẫn được quét và chuyển RECOVERY_REQUIRED như quy tắc cũ
+  ✅ precond: request c12g đã USER_ABANDONED
+  ✅ (g) timeout: lượt lô không ném lỗi
+  ❌ (g) timeout: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] — {"scanned":0,"applied":0,"errors":0,"recoveryRequired":0}
+  ✅ (g) timeout: request vẫn FAILED, không credit
+  ❌ (g) timeout: lỗi được ghi (recordError) = PAYPAL_TIMEOUT [ĐỎ trên HEAD] — nhận "USER_ABANDONED", kỳ vọng "PAYPAL_TIMEOUT"
+  ✅ precond: request c12g đã USER_ABANDONED
+  ✅ (g) drop: lượt lô không ném lỗi
+  ❌ (g) drop: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] — {"scanned":0,"applied":0,"errors":0,"recoveryRequired":0}
+  ✅ (g) drop: request vẫn FAILED, không credit
+  ❌ (g) drop: lỗi được ghi (recordError) = PAYPAL_UNAVAILABLE [ĐỎ trên HEAD] — nhận "USER_ABANDONED", kỳ vọng "PAYPAL_UNAVAILABLE"
+  ✅ precond: request c12g đã USER_ABANDONED
+  ✅ (g) 404: lượt lô không ném lỗi
+  ❌ (g) 404: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] — {"scanned":0,"applied":0,"errors":0,"recoveryRequired":0}
+  ✅ (g) 404: request vẫn FAILED, không credit
+  ❌ (g) 404: lỗi được ghi (recordError) = PAYPAL_API_ERROR [ĐỎ trên HEAD] — nhận "USER_ABANDONED", kỳ vọng "PAYPAL_API_ERROR"
+
+C13 — Replay sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, giữ bằng chứng; nhánh thua race; replay thường vẫn 200
+  ✅ precond: request c13a đã USER_ABANDONED
+  ✅ (a/store.markCaptureVerified) precond: RECOVERY_REQUIRED sau capture muộn
+  ❌ (a/store.markCaptureVerified) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] — nhận 200 ALREADY_ABANDONED
+  ✅ (a/store.markCaptureVerified) evidence, ví, sổ cái, audit không đổi
+  ✅ precond: request c13a đã USER_ABANDONED
+  ✅ (a/webhook) precond: RECOVERY_REQUIRED sau capture muộn
+  ❌ (a/webhook) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] — nhận 200 ALREADY_ABANDONED
+  ✅ (a/webhook) evidence, ví, sổ cái, audit không đổi
+  ✅ precond: request c13a đã USER_ABANDONED
+  ✅ (a/reconcileOne (worker)) precond: RECOVERY_REQUIRED sau capture muộn
+  ❌ (a/reconcileOne (worker)) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] — nhận 200 ALREADY_ABANDONED
+  ✅ (a/reconcileOne (worker)) evidence, ví, sổ cái, audit không đổi
+  ✅ (b) precond: cả hai lời gọi abandon đã GET xong và cùng đứng ở barrier
+  ✅ (b) precond: bên thua (closed:false) đã tới barrier và đang bị giữ
+  ✅ (b) precond: bên thua vẫn bị giữ (chưa trả kết quả)
+  ✅ (b) precond: bên thắng đã đóng FAILED với đúng 1 audit
+  ✅ (b) precond: recovery đã được lưu TRƯỚC khi thả bên thua
+  ✅ (b) một bên trả ABANDONED
+  ❌ (b) bên thua sau khi có recovery: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG ALREADY_ABANDONED [ĐỎ trên HEAD] — {"outcome":"ALREADY_ABANDONED"}
+  ✅ (b) evidence, ví, sổ cái giữ nguyên; vẫn đúng 1 audit
+  ✅ precond: request c13c đã USER_ABANDONED
+  ✅ (c) replay thường (không có capture): vẫn 200 ALREADY_ABANDONED, không đổi
+
+C14 — R2b: replay 409 khi bằng chứng xung đột/VERIFIED cũ; cột last_reconcile_error không phải nguồn; thứ tự và biên của nhóm quét abandon
+  ✅ precond: request c14a đã USER_ABANDONED
+  ✅ (1) precond: request B khác đã giữ capture_id X (capture thật)
+  ✅ (1) precond: markCaptureVerified(A, X) = CAPTURE_ID_CONFLICT
+  ✅ (1) precond: A vẫn READY, capture_id NULL, recovery_required_at NULL, last_capture_error CONFLICTING_CAPTURE:...
+  ❌ (1) abandon lại khi capture.lastError=CONFLICTING_CAPTURE: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200] — nhận 200 ALREADY_ABANDONED
+  ✅ (1) bằng chứng, ví, sổ cái, audit không đổi
+  ✅ precond: request c14v đã USER_ABANDONED
+  ✅ (2) precond (fixture DB): VERIFIED cũ trên request FAILED + recovery_required_at + CAPTURED_AFTER_REQUEST_CLOSED
+  ❌ (2) abandon lại với VERIFIED cũ trên FAILED: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200] — nhận 200 ALREADY_ABANDONED
+  ✅ (2) bằng chứng/ví/audit không đổi
+  ✅ precond: request c14e đã USER_ABANDONED
+  ✅ (3) precond: ngay sau abandon (chưa qua lượt quét) cột = USER_ABANDONED
+  ℹ (3) sau lượt quét LỖI cột last_reconcile_error = USER_ABANDONED (có thể bị ghi đè bằng mã lỗi; USER_ABANDONED chỉ đảm bảo khi chưa quét hoặc quét thành công theo backend)
+  ✅ (3) cột đã bị ghi đè bằng mã lỗi nhưng chưa có bằng chứng thu: replay vẫn 200 ALREADY_ABANDONED nhờ audit, không thêm dữ liệu
+  ✅ precond: request c14o1 đã USER_ABANDONED
+  ✅ precond: request c14o2 đã USER_ABANDONED
+  ✅ precond: request c14o3 đã USER_ABANDONED
+  ✅ (4i) precond: dòng O0 có last_reconciled_at NULL
+  ❌ (4i) NULL (created now-9000s) được GET trước dòng quét now-5000s rồi now-1500s [sqlite] — nhận [], kỳ vọng [0,1,2]
+  ✅ precond: request c14q1 đã USER_ABANDONED
+  ✅ precond: request c14q2 đã USER_ABANDONED
+  ❌ (4ii) NULL tạo gần đây đứng SAU dòng đã quét now-3000s (chính sách hiệu dụng: lần nhìn cuối hoặc tạo, cái nào sớm hơn đi trước) [sqlite] — nhận [], kỳ vọng [1,0]
+  ℹ (4iii) thứ tự GET tin cậy trên sqlite: (i) [0,1,2], (ii) [1,0]; so sánh chéo SQLite/PG qua hai log
+  ✅ precond: request c14w1 đã USER_ABANDONED
+  ✅ precond: request c14w2 đã USER_ABANDONED
+  ✅ precond: request c14w3 đã USER_ABANDONED
+  ✅ precond: request c14w4 đã USER_ABANDONED
+  ❌ (5) biên: created_at now-72h+10s quét, now-72h-10s không; last_reconciled_at now-890s không, now-910s có [ĐỎ trên HEAD] — nhận [0,0,0,0], kỳ vọng [1,0,0,1]
+  ✅ precond: request c14n1 đã USER_ABANDONED
+  ✅ precond: request c14n2 đã USER_ABANDONED
+  ✅ (5) request FAILED có capture_state UNKNOWN/IN_FLIGHT (không READY) không bị nhóm abandon quét
+  ✅ (5) FAILED đã POST (truy vấn cũ): đúng 1 GET và 1 kết quả trong một lượt (không quét hai lần)
+
+C15 — R9/R10: theo id không kích hoạt nhóm quét mới; quét lô thành công không clearError dòng abandon
+  ✅ precond: request c15a đã USER_ABANDONED
+  ✅ precond: request c15r đã USER_ABANDONED
+  ❌ (R9) reconcileOnce({paymentRequestId}) KHÔNG kích hoạt nhóm quét mới: abandonedScanned === 0 [ĐỎ trên HEAD: chưa có trường abandonedScanned] — {"scanned":1,"applied":0,"errors":0,"recoveryRequired":0}
+  ✅ (R9) theo id: hành vi cũ giữ nguyên (scanned=1, chọn theo id) [guard hồi quy: đạt cả trên HEAD]
+  ❌ (R9) lượt lô riêng cùng lúc vẫn quét nhóm mới (abandonedScanned >= 1) [ĐỎ trên HEAD] — {"scanned":0,"applied":0,"errors":0,"recoveryRequired":0}
+  ❌ (R9) transport: dòng R (chỉ qua lô) và dòng A (theo id) đều có GET thật [R: ĐỎ trên HEAD]
+  ✅ precond: request c15z đã USER_ABANDONED
+  ✅ (R10) precond: dòng abandon có last_reconcile_error=USER_ABANDONED
+  ❌ (R10) precond: lượt lô quét thành công CẢ dòng abandon và dòng PENDING (provider trả PENDING, không thu) [dòng abandon: ĐỎ trên HEAD] — {"scanned":1,"applied":0,"errors":0,"recoveryRequired":0}
+  ✅ (R10) dòng abandon: sau quét thành công cột VẪN là USER_ABANDONED (không bị clearError) [guard mới; trên HEAD đạt vì không quét]
+  ✅ (R10) dòng PENDING: vẫn bị clearError như cũ (STALE_ERR -> NULL) [guard hồi quy]
+  ✅ (R10) dòng abandon vẫn FAILED, không credit
+
+C16 — Hạn mức lô: số PENDING >= limit vẫn quét ĐÚNG limit dòng PENDING cũ nhất, SHARE abandon CỘNG THÊM NGOÀI hạn mức
+  ✅ precond: request c16a đã USER_ABANDONED
+  ✅ precond: request c16a đã USER_ABANDONED
+  ✅ (limit=5) 6 dòng PENDING đủ tuổi: ĐÚNG 5 dòng PENDING cũ nhất được GET, dòng thứ 6 KHÔNG (hạn mức cũ giữ nguyên, không bị cắt vì có dòng abandon) [guard mới; trên HEAD phần PENDING đạt]
+  ❌ (limit=5) nhóm abandon quét ĐÚNG SHARE=1 dòng cũ nhất, cộng thêm NGOÀI hạn mức (tổng 6 > limit) [ĐỎ trên HEAD: không có nhóm abandon] — nhận [false,false], kỳ vọng [true,false]
+  ❌ (limit=5) summary.paypal: scanned=5 (PENDING), abandonedScanned=1 [abandonedScanned: ĐỎ trên HEAD] — nhận [5,null], kỳ vọng [5,1]
+  ✅ precond: request c16a đã USER_ABANDONED
+  ✅ precond: request c16a đã USER_ABANDONED
+  ✅ precond: request c16a đã USER_ABANDONED
+  ✅ (limit=10) 11 dòng PENDING đủ tuổi: ĐÚNG 10 dòng PENDING cũ nhất được GET, dòng thứ 11 KHÔNG (hạn mức cũ giữ nguyên, không bị cắt vì có dòng abandon) [guard mới; trên HEAD phần PENDING đạt]
+  ❌ (limit=10) nhóm abandon quét ĐÚNG SHARE=2 dòng cũ nhất, cộng thêm NGOÀI hạn mức (tổng 12 > limit) [ĐỎ trên HEAD: không có nhóm abandon] — nhận [false,false,false], kỳ vọng [true,true,false]
+  ❌ (limit=10) summary.paypal: scanned=10 (PENDING), abandonedScanned=2 [abandonedScanned: ĐỎ trên HEAD] — nhận [10,null], kỳ vọng [10,2]
+
+C9 — Bất biến tài chính (9) và bất biến PayPal sau toàn bộ kịch bản
+  ✅ chín bất biến tài chính đúng (đã kiểm 9)
+  ✅ ba bất biến PayPal riêng đúng
+  ✅ không có bút toán TOPUP_CREDIT nào gắn với request FAILED (kể cả đã abandon)
+
+[F-03 abandon] 363 đạt, 31 hỏng, 0 lỗi đã biết (tái hiện)
+
+TÓM TẮT THEO CA
+  C1 PASS 12/12 — 5 ý định PENDING chặn hạn mức; abandon một request rồi tạo mới được
+  C2 PASS 20/20 — Xác thực, vai trò, chủ sở hữu, body bị cấm
+  C3a PASS 28/28 — Provider không cho phép đóng: lỗi/mismatch/capture -> request giữ nguyên
+  C3b PASS 25/25 — orderStatus được chấp nhận: CREATED/SAVED/APPROVED/PAYER_ACTION_REQUIRED/VOIDED
+  C3c PASS 35/35 — Trạng thái cục bộ không an toàn -> 409 PAYPAL_ABANDON_UNSAFE và KHÔNG gọi getOrder
+  C4a PASS 12/12 — Race: abandon GET xong, capture giành claim (POST đang bay), rồi thả close -> close KHÔNG thắng
+  C4b PASS 7/7 — Race: close thắng trước -> capture sau nhận CLOSED và provider.captureOrder KHÔNG bị gọi
+  C4b2 PASS 1/1 — Race song song abandon || capture: luôn nhất quán (chỉ một bên thắng), lặp 8 lần
+  C4c PASS 7/7 — Race: hai abandon song song (barrier chờ cả hai GET xong) -> một ABANDONED, một ALREADY_ABANDONED, một audit
+  C5 PASS 17/17 — Replay: abandon lại, key cũ, FAILED vì lý do khác
+  C6 PASS 25/25 — Capture muộn sau close: RECOVERY_REQUIRED, lưu capture_id, không credit/ledger
+  C7 PASS 13/13 — Audit actor/source và tính nguyên tử khi INSERT audit lỗi
+  C8 PASS 14/14 — Hồi quy: lịch sử/chi tiết thấy FAILED, /me không gọi provider, xác minh fresh còn nguyên
+  C10 PASS 29/29 — Review an toàn: replay bền (S3), NOT_CAPTURED + caller cũ (S2), order lệch (S5), claim sau close (S4), isolation (S8)
+  C4d PASS 7/7 — Race barrier: capture đã claim nhưng CHƯA ghi dấu POST (preflight GET treo) khi thả close -> close KHÔNG thắng
+  C4e PASS 6/6 — Race barrier: capture claim rồi trả READY (order chưa duyệt, chưa POST) giữa GET và close -> close hợp lệ thắng, không POST
+  C11 PASS 13/13 — Guard chiều sâu Ở STORE (gọi thẳng store, fixture DB): onlyNeverPosted, expectedOrderId, markCapturePostSent trên request FAILED
+  C12 FAIL 31/45 — Worker LÔ (reconcileOnce không paymentRequestId): quét dòng FAILED chưa-POST để bắt thu muộn
+      hỏng: (a) summary.paypal.recoveryRequired = 1 [ĐỎ trên HEAD: dòng FAILED chưa-POST không được chọn] | (a) FAILED giữ nguyên, capture_state=RECOVERY_REQUIRED, capture_id lưu, recovery_required_at có | (a) transport thấy GET order thật trong lượt lô | (c) chỉ dòng trong cửa sổ 72h (now-71h) được quét; dòng now-73h không [ĐỎ trên HEAD: không dòng nào được chọn] | (d) lần đầu (last_reconciled_at NULL): quét 1 lần [ĐỎ trên HEAD] | (d) last_reconciled_at = now-1000s (> 900s): quét lại | (e) limit=5 (SHARE=1): nhóm abandon quét đúng 1 dòng, là dòng last_reconciled_at cũ nhất [ĐỎ trên HEAD] | (e) limit=10 (SHARE=2): quét đúng 2 dòng cũ nhất còn đủ giãn cách (M[4], M[3]); M[5] vừa quét nên bị giãn cách [ĐỎ trên HEAD] | (g) timeout: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] | (g) timeout: lỗi được ghi (recordError) = PAYPAL_TIMEOUT [ĐỎ trên HEAD] | (g) drop: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] | (g) drop: lỗi được ghi (recordError) = PAYPAL_UNAVAILABLE [ĐỎ trên HEAD] | (g) 404: dòng abandon được quét (transport có GET) và đếm 1 lỗi [ĐỎ trên HEAD] | (g) 404: lỗi được ghi (recordError) = PAYPAL_API_ERROR [ĐỎ trên HEAD]
+  C13 FAIL 18/22 — Replay sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, giữ bằng chứng; nhánh thua race; replay thường vẫn 200
+      hỏng: (a/store.markCaptureVerified) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] | (a/webhook) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] | (a/reconcileOne (worker)) abandon lại sau RECOVERY_REQUIRED: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG 200 [ĐỎ trên HEAD: trả 200 ALREADY_ABANDONED] | (b) bên thua sau khi có recovery: 409 PAYPAL_ABANDON_UNSAFE, KHÔNG ALREADY_ABANDONED [ĐỎ trên HEAD]
+  C14 FAIL 25/30 — R2b: replay 409 khi bằng chứng xung đột/VERIFIED cũ; cột last_reconcile_error không phải nguồn; thứ tự và biên của nhóm quét abandon
+      hỏng: (1) abandon lại khi capture.lastError=CONFLICTING_CAPTURE: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200] | (2) abandon lại với VERIFIED cũ trên FAILED: 409 PAYPAL_ABANDON_UNSAFE [ĐỎ trên HEAD: trả 200] | (4i) NULL (created now-9000s) được GET trước dòng quét now-5000s rồi now-1500s [sqlite] | (4ii) NULL tạo gần đây đứng SAU dòng đã quét now-3000s (chính sách hiệu dụng: lần nhìn cuối hoặc tạo, cái nào sớm hơn đi trước) [sqlite] | (5) biên: created_at now-72h+10s quét, now-72h-10s không; last_reconciled_at now-890s không, now-910s có [ĐỎ trên HEAD]
+  C15 FAIL 8/12 — R9/R10: theo id không kích hoạt nhóm quét mới; quét lô thành công không clearError dòng abandon
+      hỏng: (R9) reconcileOnce({paymentRequestId}) KHÔNG kích hoạt nhóm quét mới: abandonedScanned === 0 [ĐỎ trên HEAD: chưa có trường abandonedScanned] | (R9) lượt lô riêng cùng lúc vẫn quét nhóm mới (abandonedScanned >= 1) [ĐỎ trên HEAD] | (R9) transport: dòng R (chỉ qua lô) và dòng A (theo id) đều có GET thật [R: ĐỎ trên HEAD] | (R10) precond: lượt lô quét thành công CẢ dòng abandon và dòng PENDING (provider trả PENDING, không thu) [dòng abandon: ĐỎ trên HEAD]
+  C16 FAIL 7/11 — Hạn mức lô: số PENDING >= limit vẫn quét ĐÚNG limit dòng PENDING cũ nhất, SHARE abandon CỘNG THÊM NGOÀI hạn mức
+      hỏng: (limit=5) nhóm abandon quét ĐÚNG SHARE=1 dòng cũ nhất, cộng thêm NGOÀI hạn mức (tổng 6 > limit) [ĐỎ trên HEAD: không có nhóm abandon] | (limit=5) summary.paypal: scanned=5 (PENDING), abandonedScanned=1 [abandonedScanned: ĐỎ trên HEAD] | (limit=10) nhóm abandon quét ĐÚNG SHARE=2 dòng cũ nhất, cộng thêm NGOÀI hạn mức (tổng 12 > limit) [ĐỎ trên HEAD: không có nhóm abandon] | (limit=10) summary.paypal: scanned=10 (PENDING), abandonedScanned=2 [abandonedScanned: ĐỎ trên HEAD]
+  C9 PASS 3/3 — Bất biến tài chính (9) và bất biến PayPal sau toàn bộ kịch bản
+RESULT {"pass":363,"fail":31,"cases":{"C1":{"pass":12,"fail":0},"C2":{"pass":20,"fail":0},"C3a":{"pass":28,"fail":0},"C3b":{"pass":25,"fail":0},"C3c":{"pass":35,"fail":0},"C4a":{"pass":12,"fail":0},"C4b":{"pass":7,"fail":0},"C4b2":{"pass":1,"fail":0},"C4c":{"pass":7,"fail":0},"C5":{"pass":17,"fail":0},"C6":{"pass":25,"fail":0},"C7":{"pass":13,"fail":0},"C8":{"pass":14,"fail":0},"C10":{"pass":29,"fail":0},"C4d":{"pass":7,"fail":0},"C4e":{"pass":6,"fail":0},"C11":{"pass":13,"fail":0},"C12":{"pass":31,"fail":14},"C13":{"pass":18,"fail":4},"C14":{"pass":25,"fail":5},"C15":{"pass":8,"fail":4},"C16":{"pass":7,"fail":4},"C9":{"pass":3,"fail":0}}}
