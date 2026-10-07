@@ -1,0 +1,17 @@
+﻿◇ injected env (0) from .env // tip: ◈ secrets for agents [www.dotenvx.com]
+
+  Kiểm 9 bất biến hệ thống
+  Cơ sở dữ liệu: PostgreSQL 127.0.0.1:55432/enclave_pro_abandon_full_test
+  ----------------------------------------------------------------------
+   ĐÚNG  1. Số dư không âm
+   ĐÚNG  2. Tổng biến động của nghiệp vụ chuyển tiền bằng 0
+   ĐÚNG  3. Giao dịch chỉ tất toán một lần
+   ĐÚNG  4. Phiếu uỷ quyền dùng một lần và đúng phạm vi
+   ĐÚNG  5. Phiếu phân xử đúng hồ sơ tranh chấp và đúng quyết định
+   ĐÚNG  6. Tin đăng đơn chiếc chỉ một lần khoá tiền thành công
+   ĐÚNG  7. Cân đối số tiền đang giữ
+   ĐÚNG  8. Tài khoản ACTIVE luôn có Passkey
+   ĐÚNG  9. Một giao dịch tối đa một hồ sơ tranh chấp
+  ----------------------------------------------------------------------
+  Không có vi phạm nào trên 9 bất biến.
+

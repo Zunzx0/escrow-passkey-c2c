@@ -67,6 +67,9 @@ const EVENTS = {
   RECONCILE_CONFLICT: 'RECONCILE_CONFLICT',
   // signCount của Passkey không tăng như kỳ vọng — tín hiệu rủi ro, xác thực vẫn được chấp nhận.
   COUNTER_ANOMALY: 'COUNTER_ANOMALY',
+  // Chủ ví chủ động bỏ ý định nạp PayPal chưa gửi thu tiền. Ghi ATOMIC cùng việc đóng request
+  // (xem paypalPaymentStore.closeUncaptured), không đi qua logSecurityEvent best-effort.
+  PAYPAL_REQUEST_ABANDONED: 'PAYPAL_REQUEST_ABANDONED',
 };
 
 // Mã lỗi của tầng ứng dụng -> loại sự kiện an toàn. Nhờ bảng này, việc ghi nhận nằm gọn ở
@@ -98,6 +101,7 @@ const ERROR_TO_EVENT = {
   LAST_CREDENTIAL: EVENTS.FORBIDDEN,
   INVALID_SIGNATURE: EVENTS.WEBHOOK_INVALID_SIGNATURE,
   WEBHOOK_CONFLICT: EVENTS.WEBHOOK_CONFLICT,
+  PAYPAL_ABANDON_UNSAFE: EVENTS.INVALID_STATE,
 };
 
 function sanitize(detail) {
@@ -110,18 +114,17 @@ function sanitize(detail) {
   return out;
 }
 
+const INSERT_SQL = `INSERT INTO security_events (event_type, outcome, actor_id, username, ip, method, route, status_code, detail)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`;
+
 /**
- * Ghi một sự kiện an toàn.
- *
- * Hàm này KHÔNG BAO GIỜ được phép làm hỏng luồng nghiệp vụ đang chạy: nếu ghi log thất bại
- * thì nuốt lỗi. Một lần giải ngân hợp lệ không nên thất bại chỉ vì bảng nhật ký gặp sự cố.
+ * Dựng câu INSERT + tham số (đã qua sanitize) mà KHÔNG thực thi. Dành cho nơi cần ghi sự kiện TRONG
+ * một transaction nghiệp vụ và để lỗi ghi làm rollback cả transaction (logSecurityEvent thì nuốt lỗi).
  */
-async function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = null, username = null, actorId = null, detail = {} }) {
-  try {
-    await db.prepare(
-      `INSERT INTO security_events (event_type, outcome, actor_id, username, ip, method, route, status_code, detail)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    ).run(
+function buildSecurityEventInsert(req, { type, outcome = 'DENIED', statusCode = null, username = null, actorId = null, detail = {} }) {
+  return {
+    sql: INSERT_SQL,
+    params: [
       type,
       outcome,
       // actorId cho những lúc chủ thể đã xác định được nhưng request chưa mang phiên (ví dụ
@@ -132,8 +135,21 @@ async function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = nu
       (req && req.method) || null,
       req ? `${req.baseUrl || ''}${(req.route && req.route.path) || req.path || ''}` : null,
       statusCode,
-      JSON.stringify(sanitize(detail))
-    );
+      JSON.stringify(sanitize(detail)),
+    ],
+  };
+}
+
+/**
+ * Ghi một sự kiện an toàn.
+ *
+ * Hàm này KHÔNG BAO GIỜ được phép làm hỏng luồng nghiệp vụ đang chạy: nếu ghi log thất bại
+ * thì nuốt lỗi. Một lần giải ngân hợp lệ không nên thất bại chỉ vì bảng nhật ký gặp sự cố.
+ */
+async function logSecurityEvent(req, { type, outcome = 'DENIED', statusCode = null, username = null, actorId = null, detail = {} }) {
+  try {
+    const { sql, params } = buildSecurityEventInsert(req, { type, outcome, statusCode, username, actorId, detail });
+    await db.prepare(sql).run(...params);
   } catch (e) {
     console.error('[security-events] không ghi được sự kiện:', e.message);
   }
@@ -179,4 +195,4 @@ async function listSecurityEvents({ limit = 100, type = null } = {}) {
   }));
 }
 
-module.exports = { EVENTS, logSecurityEvent, logFromError, listSecurityEvents };
+module.exports = { EVENTS, INSERT_SQL, buildSecurityEventInsert, logSecurityEvent, logFromError, listSecurityEvents };

@@ -388,9 +388,15 @@ function createPayPalPaymentStore({ db } = {}) {
          SET capture_state = 'IN_FLIGHT', capture_claim = ?, capture_claimed_at = ?,
              capture_attempts = capture_attempts + 1, first_capture_at = COALESCE(first_capture_at, ?)
          WHERE payment_request_id = ? AND order_id IS NOT NULL AND capture_state IN ('READY','IN_FLIGHT','UNKNOWN')
-           AND (capture_claim IS NULL OR capture_claimed_at < ?)`
+           AND (capture_claim IS NULL OR capture_claimed_at < ?)
+           AND EXISTS (SELECT 1 FROM payment_requests pr WHERE pr.id = paypal_payment_bindings.payment_request_id
+                       AND pr.status = 'PENDING' AND pr.provider = 'PAYPAL_SANDBOX')`
       ).run(claimId, nowIso, nowIso, paymentRequestId, leaseCutoffIso);
-      if (upd.changes !== 1) return { outcome: 'BUSY', row };
+      if (upd.changes !== 1) {
+        // Phòng thủ chiều sâu: request bị đóng (ví dụ abandon) giữa lúc đọc và giành claim -> CLOSED, không BUSY.
+        const now = await rawById(paymentRequestId);
+        return now && now.status === 'FAILED' ? { outcome: 'CLOSED', row: toTrusted(now) } : { outcome: 'BUSY', row };
+      }
       const fresh = toTrusted(await rawById(paymentRequestId));
       return {
         outcome: 'CLAIMED',
@@ -412,7 +418,9 @@ function createPayPalPaymentStore({ db } = {}) {
     const r = await db.prepare(
       `UPDATE paypal_payment_bindings
        SET capture_post_sent_at = COALESCE(capture_post_sent_at, ?), capture_post_count = capture_post_count + 1
-       WHERE payment_request_id = ? AND capture_claim = ? AND capture_state = 'IN_FLIGHT'`
+       WHERE payment_request_id = ? AND capture_claim = ? AND capture_state = 'IN_FLIGHT'
+         AND EXISTS (SELECT 1 FROM payment_requests pr WHERE pr.id = paypal_payment_bindings.payment_request_id
+                     AND pr.status = 'PENDING')`
     ).run(nowIso, paymentRequestId, claimId);
     return r.changes === 1 ? { ok: true } : { ok: false, reason: 'STALE_CLAIM' };
   }
@@ -533,16 +541,26 @@ function createPayPalPaymentStore({ db } = {}) {
    *   - đã có bằng chứng mạnh NOT_CAPTURED.
    * IN_FLIGHT (kể cả lease hết hạn), UNKNOWN, VERIFIED, RECOVERY_REQUIRED -> từ chối (cần đối soát).
    * Kiểm và cập nhật trong cùng transaction tuần tự với claimCapture. Root vẫn phải GET order trước.
+   * audit (tuỳ chọn): { sql, params } từ securityEvents.buildSecurityEventInsert. Khi và chỉ khi đóng được
+   * (changes === 1) hàng audit được INSERT trong CÙNG transaction; INSERT lỗi thì lỗi nổi lên và cả việc
+   * đóng rollback. Không truyền audit -> hành vi cũ.
+   * onlyNeverPosted (mặc định false = hành vi cũ): chỉ nhận READY + chưa POST + không claim, loại NOT_CAPTURED
+   *   (dùng cho abandon của chủ ví). expectedOrderId (tuỳ chọn): chỉ đóng nếu order_id đang bind khớp.
    * @returns {{ closed: boolean, reason?: string }}
    */
-  async function closeUncaptured(paymentRequestId, { nowIso, reason }) {
+  async function closeUncaptured(paymentRequestId, { nowIso, reason, audit = null, onlyNeverPosted = false, expectedOrderId = null }) {
     if (!isoString(nowIso) || !identifier(reason)) fail('VALIDATION_ERROR', 'nowIso and reason are required', 400);
+    // require lười: store giữ độc lập db.js khi không dùng audit. Chỉ nhận đúng câu INSERT chuẩn + 9 tham số.
+    if (audit && !(audit.sql === require('./securityEvents').INSERT_SQL && Array.isArray(audit.params) && audit.params.length === 9)) {
+      fail('VALIDATION_ERROR', 'audit must be a security_events INSERT', 400);
+    }
     return db.transaction(async () => {
       const r = await rawById(paymentRequestId);
       if (!r) return { closed: false, reason: 'NOT_FOUND' };
       if (r.status !== 'PENDING') return { closed: false, reason: `STATUS_${r.status}` };
       const neverPosted = r.capture_state === 'READY' && !r.capture_post_sent_at && !r.capture_claim;
-      if (!neverPosted && r.capture_state !== 'NOT_CAPTURED') return { closed: false, reason: `CAPTURE_${r.capture_state}` };
+      if (expectedOrderId && r.order_id !== expectedOrderId) return { closed: false, reason: 'ORDER_CHANGED' };
+      if (!neverPosted && (onlyNeverPosted || r.capture_state !== 'NOT_CAPTURED')) return { closed: false, reason: `CAPTURE_${r.capture_state}` };
       const upd = await db.prepare(
         `UPDATE payment_requests
          SET status = 'FAILED', version = version + 1, resolved_at = ?, resolved_by = 'RECONCILER',
@@ -550,9 +568,12 @@ function createPayPalPaymentStore({ db } = {}) {
          WHERE id = ? AND status = 'PENDING' AND provider = 'PAYPAL_SANDBOX'
            AND EXISTS (SELECT 1 FROM paypal_payment_bindings b WHERE b.payment_request_id = payment_requests.id
                        AND ((b.capture_state = 'READY' AND b.capture_post_sent_at IS NULL AND b.capture_claim IS NULL)
-                            OR b.capture_state = 'NOT_CAPTURED'))`
-      ).run(nowIso, String(reason).slice(0, 200), nowIso, paymentRequestId);
-      return upd.changes === 1 ? { closed: true } : { closed: false, reason: 'RACE_LOST' };
+                            OR (b.capture_state = 'NOT_CAPTURED' AND ? = 0))
+                       AND (CAST(? AS TEXT) IS NULL OR b.order_id = CAST(? AS TEXT)))`
+      ).run(nowIso, String(reason).slice(0, 200), nowIso, paymentRequestId, onlyNeverPosted ? 1 : 0, expectedOrderId, expectedOrderId);
+      if (upd.changes !== 1) return { closed: false, reason: 'RACE_LOST' };
+      if (audit) await db.prepare(audit.sql).run(...audit.params);
+      return { closed: true };
     })();
   }
 

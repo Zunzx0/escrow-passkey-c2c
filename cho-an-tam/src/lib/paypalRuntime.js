@@ -9,6 +9,7 @@ const {createCaptureCoordinator}=require('./paypalCaptureCoordinator');
 const {createSandboxPaymentService}=require('./paypalSandboxService');
 const {parseAmount,parseClientRequestId,assertTopupLimits}=require('./topupPolicy');
 const {getUserWallet}=require('./walletOps');
+const {createAbandonment}=require('./paypalAbandonment');
 function configFromEnvironment() {
   return {enabled:process.env.PAYPAL_SANDBOX_ENABLED==='1',mode:'sandbox',clientId:process.env.PAYPAL_SANDBOX_CLIENT_ID,
     clientSecret:process.env.PAYPAL_SANDBOX_CLIENT_SECRET,merchantId:process.env.PAYPAL_SANDBOX_MERCHANT_ID,
@@ -87,9 +88,12 @@ function createPayPalRuntime({config=configFromEnvironment(),provider=null}={}) 
     if(!row.orderId)return {status:row.status,outcome:row.createAttemptAt && Date.now()-Date.parse(row.createAttemptAt)>=300000?'CREATE_RECOVERY_REQUIRED':'NOT_READY'};
     return service.reconcile({paymentRequestId:id}); // GET only: worker never initiates capture.
   }
+  const abandonment=createAbandonment({store:secureStore,provider:adapter,db,serialize:(id,o)=>serializePayPal(id,o)});
   return Object.freeze({store,settle,service,
     publicConfig:()=>({paypalSandbox:{enabled,mode:'sandbox',rateKind:'DEMO_FIXED'},mockPayments:{enabled:config.enabled!==true && process.env.MOCK_PROVIDER_CHECKOUT!=='0'}}),create,serializePayPal,reconcileOne,
     async capture(id,userId){ready();await owned(id,userId);const outcome=await coordinator.capture({paymentRequestId:id,userId});if(outcome.outcome==='CONFLICT')throw new AppError(409,'PAYPAL_CAPTURE_CONFLICT','Bằng chứng thu tiền cần được đối soát thủ công');return {...await serializePayPal(id),outcome:outcome.outcome};},
+    // Chủ ví bỏ ý định chưa gửi thu tiền: đóng local FAILED/USER_ABANDONED, không chạm PayPal ngoài một GET.
+    async abandon(id,userId,req){ready();return abandonment.abandon(await owned(id,userId),{req,nowIso:nowIso()});},
     async checkout(id,userId){ready();await owned(id,userId);return serializePayPal(id,{approval:true});},
     async webhook(headers,event){ready();return service.webhook({headers,event});}
   });
