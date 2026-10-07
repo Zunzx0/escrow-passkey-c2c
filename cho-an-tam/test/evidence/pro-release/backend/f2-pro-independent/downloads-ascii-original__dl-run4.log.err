@@ -1,0 +1,11 @@
+﻿node : Error: capture child exited before durable POST barrier: 0 null ; child stderr=
+At line:12 char:3
++   node --env-file=.env.test test/paypal-m2-recovery-e2e.js > $log 2>  ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error: capture ...; child stderr=:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+    at C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:43:65
+    at waitFor (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:17:40)
+    at async waitForPendingPost (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:42:5)
+    at async main (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:252:5)

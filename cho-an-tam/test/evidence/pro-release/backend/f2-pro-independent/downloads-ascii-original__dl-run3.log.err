@@ -1,0 +1,57 @@
+﻿node : Error: capture child exited before durable POST barrier: 1 null node:fs:1429
+At line:12 char:3
++   node --env-file=.env.test test/paypal-m2-recovery-e2e.js > $log 2>  ...
++   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (Error: capture ...ll node:fs:1429:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  binding.rmdir(path);
+          ^
+
+Error: EPERM: operation not permitted, rmdir 
+'C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\data\test\paypal-m2-recovery-state.json.lock'
+    at Object.rmdirSync (node:fs:1429:11)
+    at withStateLock (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:98:40)
+    at mutate (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:145:20)
+    at Object.plan (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:235:7)
+    at run (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-child.js:16:35)
+    at Object.<anonymous> (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-child.js:27:1)
+    at Module._compile (node:internal/modules/cjs/loader:1944:14)
+    at Object..js (node:internal/modules/cjs/loader:2084:10)
+    at Module.load (node:internal/modules/cjs/loader:1666:32)
+    at Module._load (node:internal/modules/cjs/loader:1447:12) {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'rmdir',
+  path: 'C:\\Users\\tranq\\Downloads\\zz-f2-probe\\cho-an-tam\\data\\test\\paypal-m2-recovery-state.json.lock'
+}
+
+Node.js v26.4.0
+; child stderr=node:fs:1429
+  binding.rmdir(path);
+          ^
+
+Error: EPERM: operation not permitted, rmdir 
+'C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\data\test\paypal-m2-recovery-state.json.lock'
+    at Object.rmdirSync (node:fs:1429:11)
+    at withStateLock (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:98:40)
+    at mutate (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:145:20)
+    at Object.plan (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-fake.js:235:7)
+    at run (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-child.js:16:35)
+    at Object.<anonymous> (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\helpers\paypal-m2-child.js:27:1)
+    at Module._compile (node:internal/modules/cjs/loader:1944:14)
+    at Object..js (node:internal/modules/cjs/loader:2084:10)
+    at Module.load (node:internal/modules/cjs/loader:1666:32)
+    at Module._load (node:internal/modules/cjs/loader:1447:12) {
+  errno: -4048,
+  code: 'EPERM',
+  syscall: 'rmdir',
+  path: 'C:\\Users\\tranq\\Downloads\\zz-f2-probe\\cho-an-tam\\data\\test\\paypal-m2-recovery-state.json.lock'
+}
+
+Node.js v26.4.0
+
+    at C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:43:65
+    at waitFor (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:17:40)
+    at async waitForPendingPost (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:42:5)
+    at async main (C:\Users\tranq\Downloads\zz-f2-probe\cho-an-tam\test\paypal-m2-recovery-e2e.js:225:5)

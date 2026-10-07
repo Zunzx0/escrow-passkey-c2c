@@ -1,0 +1,3 @@
+rerun1 exit=1
+rerun2 exit=1
+rerun3 exit=1

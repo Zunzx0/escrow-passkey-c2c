@@ -1,0 +1,4 @@
+sqlite-m2-recovery-freshdb-run1 exit=1
+sqlite-m2-recovery-freshdb-run2 exit=0
+pg-m2-recovery-run1 exit=1
+pg-m2-recovery-run2 exit=1

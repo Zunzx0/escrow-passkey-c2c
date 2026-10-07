@@ -1,0 +1,13 @@
+sqlite-paypal-store exit=0
+sqlite-paypal-migration exit=0
+sqlite-paypal-evidence-upgrade exit=0
+sqlite-paypal-m2-settlement exit=0
+sqlite-paypal-m2-api exit=0
+sqlite-paypal-m2-recovery exit=1
+sqlite-check-invariants exit=0
+paypal-modules-node-test exit=0
+count-marks-unit exit=0
+pg-paypal-m2-settlement exit=0
+pg-paypal-m2-api exit=0
+pg-paypal-m2-recovery exit=0
+pg-check-invariants exit=0

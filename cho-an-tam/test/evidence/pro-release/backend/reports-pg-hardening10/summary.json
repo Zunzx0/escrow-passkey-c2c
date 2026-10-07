@@ -1,0 +1,31 @@
+{
+  "startedAt": "2026-10-07T09-09-48-439Z",
+  "startedAtIso": "2026-10-07T09:09:48.439Z",
+  "environment": "test",
+  "baseUrl": "http://localhost:3910",
+  "database": "PostgreSQL enclave_pro_release_test",
+  "freshDatabase": true,
+  "node": "v26.4.0",
+  "platform": "win32 x64",
+  "ok": true,
+  "totalAssertionsPassed": 36,
+  "totalAssertionsFailed": 0,
+  "suites": [
+    {
+      "suite": "hardening-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 27,
+      "fail": 0,
+      "seconds": 5
+    },
+    {
+      "suite": "check-invariants",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 9,
+      "fail": 0,
+      "seconds": 1
+    }
+  ]
+}

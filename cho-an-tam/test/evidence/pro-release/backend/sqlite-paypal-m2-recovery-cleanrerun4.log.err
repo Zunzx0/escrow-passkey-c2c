@@ -1,0 +1,5 @@
+Error: capture child exited before durable POST barrier: 0 null ; child stderr=
+    at C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:43:65
+    at waitFor (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:17:40)
+    at async waitForPendingPost (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:42:5)
+    at async main (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:225:5)

@@ -1,0 +1,10 @@
+Error: EPERM: operation not permitted, rmdir 'C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\data\test\paypal-m2-recovery-state.json.lock'; child stderr=
+    at Object.rmdirSync (node:fs:1429:11)
+    at withStateLock (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\helpers\paypal-m2-fake.js:98:40)
+    at read (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\helpers\paypal-m2-fake.js:135:18)
+    at Object.pendingEffects (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\helpers\paypal-m2-fake.js:247:29)
+    at C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:252:59
+    at C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:44:20
+    at waitFor (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:17:40)
+    at async waitForPendingPost (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:42:5)
+    at async main (C:\Users\tranq\Downloads\đồ án\claude-wt\paypal-release-review\cho-an-tam\test\paypal-m2-recovery-e2e.js:252:5)
