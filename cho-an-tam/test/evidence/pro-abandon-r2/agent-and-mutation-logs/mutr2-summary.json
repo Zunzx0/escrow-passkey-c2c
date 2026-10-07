@@ -1,0 +1,74 @@
+﻿[
+    {
+        "mut":  "BASE",
+        "exit":  0,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "0 R1 bo recovery_required_at IS NULL (nhom quet moi)",
+        "exit":  0,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "1 R2 bo can cua so (WINDOW vo han)",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "2 R3 bo gian cach RESCAN",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "3 R4a SHARE = limit (khong gioi han rieng)",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "4 R4b gop hang muc (PENDING bi cat o limit)",
+        "exit":  0,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "5 R5 bo capture_state READY",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "6 R6 replay khong doc lai binding",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "7 R7 bo dieu kien lastError (CONFLICTING_CAPTURE...)",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "8 R8 bo chan trung id",
+        "exit":  0,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "9 R9 paymentRequestId van kich hoat nhom moi",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    },
+    {
+        "mut":  "10 R10 clearError cho nhom abandon",
+        "exit":  1,
+        "reds":  0,
+        "first":  ""
+    }
+]
