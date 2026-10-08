@@ -2377,7 +2377,8 @@ const App = (() => {
         </table>`;
     renderChrome();
     // Vừa được PayPal đưa quay lại (?paypal=return|cancel): xác minh rồi tự hoàn tất khi return hợp lệ.
-    Promise.resolve(processPaypalCallback()).catch(() => { /* lỗi đã được báo ở nơi xử lý */ });
+    if (state.paypalCallback) Promise.resolve(processPaypalCallback()).catch(() => {});
+    else Promise.resolve(resumePaypalAfterBack()).catch(() => {});
   }
 
   // ---------- Nạp tiền qua Mock Payment Provider ----------
@@ -3288,12 +3289,33 @@ const App = (() => {
       return;
     }
     if (!ctxAlive(ctx)) return;
+    try { sessionStorage.setItem('cat_paypal_departure', JSON.stringify({ userId: state.user.id, id: row.id, requestId: row.requestId, amount: row.amount })); } catch (_) {}
     goTo(url);
+  }
+
+  // Browser Back không phải return phê duyệt: chỉ đọc trạng thái và cho tiếp tục/huỷ.
+  async function resumePaypalAfterBack() {
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem('cat_paypal_departure') || 'null'); } catch (_) { return; }
+    const intent = loadIntent();
+    if (!saved || !state.user || saved.userId !== state.user.id || !intent || intent.provider !== PAYPAL_PROVIDER
+      || saved.id !== intent.paymentId || saved.requestId !== intent.requestId || saved.amount !== intent.amount) return;
+    const ctx = topupCtx(intent.requestId);
+    try { sessionStorage.removeItem('cat_paypal_departure'); } catch (_) {}
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(saved.id)); } catch (_) {
+      if (ctxAlive(ctx)) setTopupNotice({ kind: 'unconfirmed', paymentId: saved.id });
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id: saved.id, requestId: intent.requestId, amount: intent.amount });
+    if (!row) return setTopupNotice({ kind: 'unconfirmed', paymentId: saved.id });
+    await settlePaypalRow(row, { ctx, fromGet: true, cancelled: true });
   }
 
   function paypalAbandonButton(row) {
     if (row.status !== 'PENDING' || row.stage !== 'AWAITING_APPROVAL' || !row.orderId) return '';
-    return `<button class="btn btn-sm btn-ghost" data-act="paypal-abandon" data-id="${esc(row.id)}" data-request-id="${esc(row.requestId)}" data-amount="${esc(row.amount)}">Bỏ yêu cầu nạp</button>`;
+    return `<button class="btn btn-sm btn-ghost" data-act="paypal-abandon" data-id="${esc(row.id)}" data-request-id="${esc(row.requestId)}" data-amount="${esc(row.amount)}">Huỷ yêu cầu nạp</button>`;
   }
 
   async function openPaypalAbandon(btn) {
@@ -3446,6 +3468,7 @@ const App = (() => {
     const cb = state.paypalCallback;
     if (!cb || !state.user || !state.token) return;
     state.paypalCallback = null; // dùng một lần
+    try { sessionStorage.removeItem('cat_paypal_departure'); } catch (_) {}
     const intent = loadIntent();
     const mine = intent && intent.provider === PAYPAL_PROVIDER ? intent : null;
     const ctx = topupCtx(mine ? mine.requestId : null);
@@ -4453,6 +4476,11 @@ const App = (() => {
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
     window.addEventListener('hashchange', route);
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted && currentHead() === 'wallet' && !state.paypalCallback) {
+        Promise.resolve(resumePaypalAfterBack()).catch(() => {});
+      }
+    });
     const topSearch = $('#topSearch');
     if (topSearch) topSearch.addEventListener('submit', (e) => {
       e.preventDefault();

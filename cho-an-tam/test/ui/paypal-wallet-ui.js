@@ -81,7 +81,7 @@ const intentJson = (o = {}) => JSON.stringify({
  * Dựng trang với fetch mock. routes: { 'METHOD /path': (opts, url) => json(...)|html(...)|HANG|Promise }.
  * options: user, hash, search (vd '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a'), storage, timeoutMs.
  */
-async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes = {}, storage = {}, timeoutMs = TIMEOUT_MS }) {
+async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes = {}, storage = {}, sessionStorage = {}, timeoutMs = TIMEOUT_MS }) {
   const html0 = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script\b[^>]*\bsrc=[^>]*><\/script>/g, '');
   const log = [];
   const bodies = {};
@@ -101,6 +101,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
       w.setTimeout = (fn, ms, ...a) => { const id = realSet((...x) => { pending.delete(id); fn(...x); }, ms, ...a); pending.set(id, ms); return id; };
       w.clearTimeout = (id) => { pending.delete(id); realClear(id); };
       for (const [k, v] of Object.entries(storage)) w.localStorage.setItem(k, v);
+      for (const [k, v] of Object.entries(sessionStorage)) w.sessionStorage.setItem(k, v);
       w.localStorage.setItem('cat_token', 'tok-' + user.id);
       w.localStorage.setItem('cat_user', JSON.stringify(user));
       w.location.hash = hash;
@@ -162,14 +163,14 @@ const baseRoutes = (user = BUYER, cfg = CFG(true, false)) => ({
 });
 
 /** Trang ví PayPal. `create(body, n)` trả phản hồi POST /payments/paypal/topup lần n. */
-async function wallet({ create, extra = {}, user = BUYER, cfg, storage = {}, amount = String(AMOUNT), timeoutMs, search, hash } = {}) {
+async function wallet({ create, extra = {}, user = BUYER, cfg, storage = {}, sessionStorage = {}, amount = String(AMOUNT), timeoutMs, search, hash } = {}) {
   const bodies = [];
   const routes = {
     ...baseRoutes(user, cfg),
     'POST /api/payments/paypal/topup': (opts) => { const b = JSON.parse(opts.body); bodies.push(b); return create ? create(b, bodies.length) : HANG; },
     ...extra,
   };
-  const p = await openPage({ user, routes, storage, timeoutMs, search, hash });
+  const p = await openPage({ user, routes, storage, sessionStorage, timeoutMs, search, hash });
   p.topupBodies = bodies;
   if (p.amountInput() && !p.amountInput().disabled) p.amountInput().value = amount;
   return p;
