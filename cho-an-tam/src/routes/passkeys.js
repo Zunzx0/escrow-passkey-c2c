@@ -349,8 +349,22 @@ router.post(
           now
         );
 
-        // Quản trị viên không phải một bên của giao dịch nên không giữ ví.
-        if (user.role !== 'ADMIN') {
+        // Tài khoản nhập từ Sandbox đã có ví/sổ cái: chỉ giữ lại ví khi có
+        // biên nhận do thao tác nhập được duyệt ghi, không tin body hay role client.
+        // Kiểm trong transaction: từ chối cũng rollback credential và kích hoạt.
+        const existingWallet = await db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(user.id);
+        if (existingWallet) {
+          const receipt = await db.prepare(
+            `SELECT 1 AS ok FROM security_events
+             WHERE event_type = 'ACCOUNT_SANDBOX_IMPORTED' AND outcome = 'ALLOWED' AND actor_id = ? LIMIT 1`
+          ).get(user.id);
+          if (!['BUYER', 'SELLER'].includes(user.role) || existingWallet.wallet_type !== 'USER' || !receipt) {
+            throw new AppError(409, 'ACCOUNT_WALLET_CONFLICT', 'Ví hiện có không có biên nhận nhập tài khoản hợp lệ.');
+          }
+        }
+
+        // Quản trị viên không giữ ví; đăng ký thường vẫn mở đúng một ví mới.
+        if (user.role !== 'ADMIN' && !existingWallet) {
           const walletId = uuid();
           await db.prepare(
             `INSERT INTO wallets (id, user_id, wallet_type, available_balance, locked_balance, version, created_at, updated_at)
