@@ -12,7 +12,7 @@
  *   Q   Tạo yêu cầu: requestId/số tiền qua retry, reload, 5xx, timeout, 429; từ chối dứt khoát; dừng khi cần đối soát
  *   B   Báo giá của máy chủ (không tự tính) và báo giá sai dạng
  *   U   URL phê duyệt: chỉ origin Sandbox đúng, từ máy chủ, không từ query
- *   R   Return / cancel: xác minh bằng GET; cancel không capture/không FAILED; return cần người dùng bấm xác nhận
+ *   R   Return / cancel: xác minh bằng GET; cancel không capture/không FAILED; return tự hoàn tất sau xác minh
  *   X   Capture: timeout/5xx/429/outcome không thành công; GET sau capture là chứng cứ duy nhất
  *   S   Đủ 9 giai đoạn (stage) và lịch sử phân biệt provider
  *   N   Phiên: phản hồi muộn sau đăng xuất / đổi tài khoản không tác động phiên mới
@@ -270,7 +270,7 @@ async function main() {
   await press(p, 500);
   ok(p.topupBodies.length === 2 && p.topupBodies[1].requestId === k1 && p.topupBodies[1].amount === AMOUNT, 'Thử lại sau timeout: CÙNG requestId, CÙNG số tiền');
   ok(/Chờ bạn phê duyệt ở PayPal Sandbox/.test(p.notice()) && !!p.noticeBtn('paypal-approve'), 'AWAITING_APPROVAL: hiện nút "Mở PayPal Sandbox" (chưa tự chuyển trang)');
-  ok(p.navs.length === 0, 'Tạo yêu cầu KHÔNG tự điều hướng sang PayPal (người dùng phải bấm)');
+  ok(p.navs.length === 0, 'Không có URL checkout hợp lệ: không tự dựng đường dẫn PayPal');
   ok(p.intent() && p.intent().paymentId === '5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', 'Giữ ý định (kèm id yêu cầu) để còn quay lại từ PayPal');
   ok(noMockCalls(p), 'Luồng PayPal không gọi mock topup hay mock-provider');
   const snap = p.store();
@@ -449,19 +449,19 @@ async function main() {
   p.close();
 
   // =========================================================================================
-  section('R: return / cancel — xác minh bằng GET; cancel không capture/không FAILED; return cần người dùng bấm xác nhận');
+  section('R: return / cancel — xác minh bằng GET; cancel không capture/không FAILED; return tự hoàn tất sau xác minh');
   srv = fakeServer();
+  srv.captureResult = () => { srv.row = { ...srv.row, stage: 'CAPTURING' }; return json(200, { outcome: 'BUSY' }); };
   p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a&token=T1&PayerID=P1' });
   ok(p.w.location.search === '' && p.w.location.hash === '#/wallet', 'Query ?paypal=… được dọn khỏi URL (giữ #/wallet) — tải lại không xử lý lại, token/PayerID không nằm lại');
   ok(p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') >= 1, 'Return: GET /payments/:id để xác minh');
-  ok(/Bạn đã quay lại từ PayPal/.test(p.notice()) && !!p.noticeBtn('paypal-capture'), 'Return khớp ý định: hiện nút "Xác nhận và hoàn tất thanh toán"');
-  ok(srv.captures === 0 && p.count('POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture') === 0, 'Return KHÔNG tự capture');
+  ok(/Đang xác nhận thanh toán/.test(p.notice()) && !p.noticeBtn('paypal-capture'), 'Return khớp ý định: tự hoàn tất, không có nút xác nhận lần hai');
+  ok(srv.captures === 1 && p.count('POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture') === 1, 'Return tự capture đúng một lần');
   ok(p.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(p.viewText()), 'Return KHÔNG tự báo thành công, ví chưa đổi');
   ok(p.count('POST /api/payments/paypal/topup') === 0, 'Return KHÔNG tạo yêu cầu mới');
   const capBtn = p.noticeBtn('paypal-capture');
   srv.row = { ...srv.row, stage: 'CAPTURING' };
-  p.click(capBtn);
-  p.click(capBtn);
+  // Capture đã tự phát khi return; không còn bước bấm thêm.
   await sleep(500);
   ok(srv.captures === 1, 'Bấm xác nhận (kể cả bấm đúp): đúng MỘT POST capture');
   ok(Object.keys(p.bodies['POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture'][0] || {}).length === 0 || p.bodies['POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture'][0] === null,
@@ -528,10 +528,10 @@ async function main() {
   section('X: capture — timeout/lỗi không gửi lại POST; GET sau capture là chứng cứ duy nhất');
   const capScenario = async (label, captureResult, rowAfter, expect) => {
     const sv = fakeServer();
-    sv.captureResult = captureResult;
+    sv.captureResult = () => { if (rowAfter) sv.row = { ...sv.row, ...rowAfter }; return captureResult(); };
     const pg = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: sv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 300 });
     sv.row = rowAfter ? { ...sv.row, ...rowAfter } : sv.row;
-    pg.click(pg.noticeBtn('paypal-capture'));
+    // Tự capture từ return.
     await sleep(700);
     pg.routes.__sv = sv;
     expect(pg, sv);
@@ -576,9 +576,11 @@ async function main() {
     ['GET status SUCCEEDED nhưng stage khác', () => json(200, ppRow({ status: 'SUCCEEDED', stage: 'CAPTURING' }))],
   ]) {
     const sv = fakeServer();
-    const pg = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: sv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 300 });
-    pg.routes['GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a'] = getResp;
-    pg.click(pg.noticeBtn('paypal-capture'));
+    const routes = sv.routes();
+    routes['GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a'] = () => sv.captures ? getResp() : json(200, sv.row);
+    const pg = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: routes, search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 300 });
+    ok(sv.captures === 1, `Capture đã phát trước khi kiểm ${label}`);
+    // Tự capture từ return.
     await sleep(900);
     ok(pg.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(pg.viewText()) && !!pg.intent(),
       `Capture 200 nhưng ${label}: KHÔNG báo thành công, giữ ý định`);
@@ -695,9 +697,9 @@ async function main() {
   p.close();
 
   srv = fakeServer();
-  srv.captureResult = () => delay(700, json(200, { ...srv.row, outcome: 'APPLIED' }));
+  srv.captureResult = () => delay(2500, json(200, { ...srv.row, outcome: 'APPLIED' }));
   p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 5000 });
-  p.click(p.noticeBtn('paypal-capture'));
+  // Tự capture từ return.
   await sleep(30);
   srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() });
   await logoutUi(p);
@@ -724,7 +726,7 @@ async function main() {
   const stateOf = (promise) => Promise.race([promise.then(() => 'resolved'), sleep(0).then(() => 'pending')]);
   p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', timeoutMs: 5000 });
   try {
-    p.click(p.noticeBtn('paypal-capture'));
+    // Tự capture từ return.
     const emitDeadline = Date.now() + 1000;
     while (p.count(capturePath) < 1 && Date.now() < emitDeadline) await sleep(10);
     await sleep(50); // thêm một nhịp để bắt cả lần phát thứ hai nếu có
@@ -836,4 +838,5 @@ async function main() {
   process.exit(fails ? 1 : 0);
 }
 
-main().catch((e) => { console.error('[paypal-wallet-ui] lỗi:', e); process.exit(1); });
+module.exports = { wallet, fakeServer, json, ppRow, intentJson, BUYER, KEY, AMOUNT, INTENT_PREFIX, sleep, HANG, logoutUi, loginUi };
+if (require.main === module) main().catch((e) => { console.error('[paypal-wallet-ui] lỗi:', e); process.exit(1); });

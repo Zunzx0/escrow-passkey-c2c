@@ -2376,7 +2376,7 @@ const App = (() => {
           </tbody>
         </table>`;
     renderChrome();
-    // Vừa được PayPal đưa quay lại (?paypal=return|cancel): xác minh rồi mới hiển thị, không tự thu tiền.
+    // Vừa được PayPal đưa quay lại (?paypal=return|cancel): xác minh rồi tự hoàn tất khi return hợp lệ.
     Promise.resolve(processPaypalCallback()).catch(() => { /* lỗi đã được báo ở nơi xử lý */ });
   }
 
@@ -2937,7 +2937,7 @@ const App = (() => {
   //
   // Luồng: tạo yêu cầu (POST /payments/paypal/topup, giữ requestId như P1) -> người dùng bấm "Mở PayPal Sandbox" (mở lại URL bằng
   // GET .../checkout) -> PayPal đưa về ?paypal=return|cancel&paymentRequestId=<id> -> giao diện GET /payments/:id để xác minh chủ
-  // sở hữu / id / số tiền / requestId / provider -> người dùng bấm xác nhận thì POST .../capture -> luôn GET lại làm chứng cứ.
+  // sở hữu / id / số tiền / requestId / provider -> tự hoàn tất bằng POST .../capture sau return hợp lệ -> luôn GET lại làm chứng cứ.
   // Query của PayPal (token, PayerID) KHÔNG phải chứng cứ thành công và không dùng làm danh tính hay quyền sở hữu.
 
   const PAYPAL_APPROVAL_ORIGIN = 'https://www.sandbox.paypal.com';
@@ -3094,7 +3094,6 @@ const App = (() => {
     const id = esc(r.id);
     const ref = shortId(r.id);
     const ui = PAYPAL_STAGE_UI[r.stage];
-    const matched = paypalMatchesIntent(r, intent);
     const quote = `
       <span class="price-row"><span>Ghi vào ví (VND)</span><span class="val">${money(r.amount)}</span></span>
       <span class="price-row"><span>PayPal Sandbox thu (USD)</span><span class="val">${esc(q.usdValue)} USD</span></span>
@@ -3114,17 +3113,15 @@ const App = (() => {
           `<b>Đang tạo yêu cầu PayPal Sandbox cho khoản nạp ${money(r.amount)}…</b> Chưa có order. Có thể kiểm tra lại, hoặc thử lại cùng yêu cầu (cùng mã, không tạo trùng).`,
           check + '<button class="btn btn-sm btn-primary" data-act="topup-retry">Thử lại cùng yêu cầu</button>');
       case 'AWAITING_APPROVAL': {
-        const canCapture = !!notice.returned && !notice.unverified && matched;
         const note = notice.unverified
           ? '<b>Yêu cầu này không khớp với ý định nạp lưu trên thiết bị này</b> nên không cho xác nhận thu tiền ở đây; chỉ hiển thị trạng thái.'
           : notice.returned
-            ? '<b>Bạn đã quay lại từ PayPal.</b> Bấm xác nhận để hoàn tất; số dư chỉ tăng khi máy chủ xác nhận đã thu tiền.'
+            ? '<b>Đang kiểm tra kết quả thanh toán PayPal.</b> Số dư chỉ tăng khi máy chủ xác nhận đã thu tiền.'
             : notice.cancelled
               ? '<b>Bạn đã quay lại mà chưa hoàn tất phê duyệt.</b> Huỷ hay đóng cửa sổ không làm yêu cầu thất bại; yêu cầu vẫn mở và chưa thu tiền.'
               : '<b>Chờ bạn phê duyệt ở PayPal Sandbox.</b> Số dư chỉ tăng sau khi bạn phê duyệt và máy chủ xác nhận.';
         return wrap('', 'shield-check', `${note}${quote}`,
-          `<button class="btn btn-sm ${canCapture ? '' : 'btn-primary'}" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
-          + (canCapture ? `<button class="btn btn-sm btn-primary" data-act="paypal-capture" data-id="${id}">Xác nhận và hoàn tất thanh toán</button>` : '')
+          `<button class="btn btn-sm btn-primary" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
           + check + paypalAbandonButton(r));
       }
       case 'CAPTURING':
@@ -3250,6 +3247,9 @@ const App = (() => {
     await loadTopupHistory().catch(() => {});
     if (!ctxAlive(ctx)) return;
     await settlePaypalRow(row, { ctx, fromGet: false });
+    if (ctxAlive(ctx) && row.stage === 'AWAITING_APPROVAL') {
+      await openPaypalApproval({ dataset: { id: row.id } });
+    }
   }
 
   /** "Mở PayPal Sandbox": lấy URL mới bằng GET .../checkout, kiểm chặt rồi mới điều hướng. Không bao giờ tự dựng URL. */
@@ -3359,12 +3359,13 @@ const App = (() => {
     await loadTopupHistory().catch(() => {});
   }
 
-  /** Người dùng chủ động bấm xác nhận sau khi quay lại từ PayPal. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
-  async function capturePaypal(btn) {
+  /** Tự hoàn tất một lần sau return đã xác minh. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
+  async function capturePaypal(btn, expectedCtx) {
     const intent = loadIntent();
     const id = (btn && btn.dataset && btn.dataset.id) || (intent && intent.paymentId) || null;
     if (!intent || intent.provider !== PAYPAL_PROVIDER || !id) return;
-    const ctx = topupCtx(intent.requestId);
+    const ctx = expectedCtx || topupCtx(intent.requestId);
+    if (!ctxAlive(ctx) || intent.paymentId !== id) return;
     let body;
     try {
       body = await guard('paypal-capture', btn, async () => {
@@ -3438,7 +3439,7 @@ const App = (() => {
 
   /**
    * Xử lý lần quay lại từ PayPal (một lần). Return/cancel đều chỉ GET trạng thái để xác minh chủ sở hữu / id / số tiền / requestId /
-   * provider; cancel không capture, không đánh FAILED, không tạo yêu cầu mới. Return cho phép NGƯỜI DÙNG bấm xác nhận (capture) chỉ
+   * provider; cancel không capture, không đánh FAILED, không tạo yêu cầu mới. Return tự hoàn tất (capture) chỉ
    * khi dữ liệu khớp ý định lưu trên thiết bị này.
    */
   async function processPaypalCallback() {
@@ -3465,6 +3466,14 @@ const App = (() => {
     await loadTopupHistory().catch(() => {});
     if (!ctxAlive(ctx)) return;
     const matched = paypalMatchesIntent(row, mine);
+    // Query chỉ chọn yêu cầu; quyền, trạng thái phê duyệt và số tiền vẫn do server xác minh.
+    // Cancel, ý định không khớp và kết quả đã kết thúc tuyệt đối không phát capture.
+    if (cb.kind === 'return' && matched && row.status === 'PENDING' && row.stage === 'AWAITING_APPROVAL') {
+      if (!mine.paymentId) saveIntent({ ...mine, paymentId: row.id });
+      setTopupNotice({ kind: 'paypal', row: { ...row, stage: 'CAPTURING' } });
+      await capturePaypal({ dataset: { id: row.id } }, ctx);
+      return;
+    }
     await settlePaypalRow(row, {
       ctx, fromGet: true, returned: cb.kind === 'return', cancelled: cb.kind === 'cancel', unverified: !matched,
     });
