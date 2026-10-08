@@ -11,7 +11,7 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
-const PORT = 3181;
+const PORT = Number(process.env.TEST_CHILD_PORT_BASE || '3180') + 1;
 const BASE = `http://127.0.0.1:${PORT}`;
 const DB_RELATIVE = path.join('data', 'test', `username-enumeration-${process.pid}.db`);
 const DB_ABSOLUTE = path.join(ROOT, DB_RELATIVE);
@@ -103,14 +103,14 @@ async function main() {
   delete env.FAULT_INJECT;
   delete env.FAULT_INJECT_MODE;
 
-  const child = spawn(process.execPath, ['src/server.js'], {
-    cwd: ROOT,
-    env,
-    stdio: ['ignore', 'pipe', 'pipe'],
-  });
   let serverOutput = '';
-  child.stdout.on('data', (chunk) => { serverOutput += chunk; });
-  child.stderr.on('data', (chunk) => { serverOutput += chunk; });
+  const launch = () => {
+    const server = spawn(process.execPath, ['src/server.js'], { cwd: ROOT, env, stdio: ['ignore','pipe','pipe'] });
+    server.stdout.on('data', chunk => { serverOutput += chunk; });
+    server.stderr.on('data', chunk => { serverOutput += chunk; });
+    return server;
+  };
+  let child = launch();
 
   try {
     await waitForHealth(child);
@@ -118,13 +118,15 @@ async function main() {
     const known = `known_${suffix}`;
     const knownTwo = `known2_${suffix}`;
     const knownThree = `known3_${suffix}`;
+    const knownFour = `known4_${suffix}`;
 
     const created = await postRegistration(known);
     assert(created.status === 201 && !!created.data.token,
       `Tên mới tạo được tài khoản chờ Passkey (nhận ${created.status})`);
     const createdTwo = await postRegistration(knownTwo);
     const createdThree = await postRegistration(knownThree);
-    assert(createdTwo.status === 201 && createdThree.status === 201,
+    const createdFour = await postRegistration(knownFour);
+    assert(createdTwo.status === 201 && createdThree.status === 201 && createdFour.status === 201,
       'Nhiều tên mới hợp lệ từ cùng IP không bị tính là hành vi dò tài khoản');
 
     const duplicate = await postRegistration(known);
@@ -141,6 +143,21 @@ async function main() {
     assert(sameThird.status === 409 && sameFourth.status === 429 && Number(sameFourth.retryAfter) > 0,
       'Thử lặp cùng một username bị giới hạn theo cặp IP–username và có Retry-After');
 
+    const secondKnown = await postRegistration(knownTwo);
+    assert(secondKnown.status === 409, 'Username khác thứ hai vẫn trong hạn mức');
+    const thirdKnown = await postRegistration(knownThree);
+    const fourthKnown = await postRegistration(knownFour);
+    assert(thirdKnown.status === 409 && thirdKnown.data.error === 'REGISTRATION_UNAVAILABLE',
+      `Username đã có thứ ba vẫn nhận phản hồi chung trong hạn mức (nhận ${thirdKnown.status})`);
+    assert(fourthKnown.status === 429 && fourthKnown.data.error === 'USERNAME_PROBE_LIMITED',
+      `Lần dò trúng username đã có tiếp theo bị chặn (nhận ${fourthKnown.status} ${fourthKnown.data.error})`);
+    assert(Number(fourthKnown.retryAfter) > 0, 'Phản hồi chặn dò username có Retry-After');
+
+    // The loser may hit either SELECT-existing or UNIQUE-conflict. Isolate the race
+    // from quota assertions instead of assuming it consumes no probe.
+    await stopChild(child);
+    child = launch();
+    await waitForHealth(child);
     const raceName = `race_${suffix}`;
     const race = await Promise.all([postRegistration(raceName), postRegistration(raceName)]);
     const raceStatuses = race.map((result) => result.status).sort((a, b) => a - b);
@@ -150,13 +167,7 @@ async function main() {
     assert(raceRejected && raceRejected.data.error === 'REGISTRATION_UNAVAILABLE',
       'Yêu cầu thua cuộc đua cũng nhận mã lỗi chung');
 
-    const thirdKnown = await postRegistration(knownTwo);
-    const fourthKnown = await postRegistration(knownThree);
-    assert(thirdKnown.status === 409 && thirdKnown.data.error === 'REGISTRATION_UNAVAILABLE',
-      `Username đã có thứ ba vẫn nhận phản hồi chung trong hạn mức (nhận ${thirdKnown.status})`);
-    assert(fourthKnown.status === 429 && fourthKnown.data.error === 'USERNAME_PROBE_LIMITED',
-      `Lần dò trúng username đã có tiếp theo bị chặn (nhận ${fourthKnown.status} ${fourthKnown.data.error})`);
-    assert(Number(fourthKnown.retryAfter) > 0, 'Phản hồi chặn dò username có Retry-After');
+
   } finally {
     await stopChild(child);
     removeTestDb();

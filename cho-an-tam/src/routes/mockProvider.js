@@ -44,7 +44,7 @@ async function findOwnPayment(req, res) {
     res.status(404).json(UNKNOWN);
     return null;
   }
-  const owner = await db.prepare('SELECT user_id FROM payment_requests WHERE id = ?').get(row.merchant_ref);
+  const owner = await db.prepare("SELECT user_id FROM payment_requests WHERE id = ? AND provider = 'MOCK'").get(row.merchant_ref);
   if (!owner || owner.user_id !== req.user.id) {
     await logSecurityEvent(req, {
       type: EVENTS.MOCK_CHECKOUT_DENIED, outcome: 'DENIED', statusCode: 404,

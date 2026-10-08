@@ -117,7 +117,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_single_system_escrow_wallet
 -- ví không đổi). Không có trạng thái thứ tư: hết hạn/không thấy callback KHÔNG đồng nghĩa
 -- FAILED — yêu cầu cứ giữ nguyên PENDING (xem routes/payments.js), việc dọn/đối soát các
 -- yêu cầu PENDING quá lâu thuộc về Background Worker làm ở bước kế tiếp, không phải việc
--- tự ý đổi trạng thái ở đây.
+-- tự ý đổi trạng thái ở đây. Ngoại lệ DUY NHẤT: yêu cầu mà provider chưa từng nhận được
+-- (submission_status khác SUBMITTED) sau TOPUP_SUBMIT_MAX_ATTEMPTS lần gửi — provider không có
+-- bản ghi nào để thanh toán, nên worker đối soát đưa nó sang FAILED (lib/paymentService.js).
+--
+-- submission_status là trạng thái của bước GỬI yêu cầu sang provider, độc lập với status:
+--   SUBMITTING     đã ghi yêu cầu, đang gửi (hoặc process chết giữa chừng)
+--   SUBMITTED      provider đã ghi nhận
+--   SUBMIT_FAILED  gửi hỏng; client gửi lại cùng requestId hoặc worker đối soát sẽ gửi lại
+-- submit_claim / submit_claimed_at là QUYỀN GỬI (lease): chỉ tiến trình giữ claim còn hạn mới được
+-- gửi yêu cầu lên provider. Hết hạn (tiến trình chết giữa chừng) thì tiến trình khác giành lại.
+-- client_request_id là khoá chống lặp do client gửi (requestId), duy nhất theo từng người dùng —
+-- chỉ mục duy nhất được tạo trong db.js (migrate) vì cột có thể được thêm sau bằng ALTER TABLE.
 --
 -- provider_ref là mã do PHÍA PROVIDER cấp (ở đây do chính ta sinh ra vì đang mô phỏng), dùng
 -- để webhook callback tự nhận diện đúng yêu cầu — độc lập với id nội bộ của ta, giống cách
@@ -137,12 +148,20 @@ CREATE TABLE IF NOT EXISTS payment_requests (
   amount INTEGER NOT NULL CHECK (amount > 0),
   status TEXT NOT NULL DEFAULT 'PENDING' CHECK (status IN ('PENDING','SUCCEEDED','FAILED')),
   provider_ref TEXT NOT NULL UNIQUE,
+  provider TEXT NOT NULL DEFAULT 'MOCK' CHECK (provider IN ('MOCK','PAYPAL_SANDBOX')),
   version INTEGER NOT NULL DEFAULT 0,
   resolved_at TEXT,
   resolved_by TEXT CHECK (resolved_by IS NULL OR resolved_by IN ('WEBHOOK','RECONCILER')),
   reconcile_attempts INTEGER NOT NULL DEFAULT 0,
   last_reconciled_at TEXT,
   last_reconcile_error TEXT,
+  client_request_id TEXT,
+  submission_status TEXT NOT NULL DEFAULT 'SUBMITTED'
+    CHECK (submission_status IN ('SUBMITTING','SUBMITTED','SUBMIT_FAILED')),
+  submit_attempts INTEGER NOT NULL DEFAULT 0,
+  last_submit_error TEXT,
+  submit_claim TEXT,
+  submit_claimed_at TEXT,
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );

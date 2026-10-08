@@ -117,10 +117,12 @@ async function main() {
 
   // ---- TC07: Buyer không đủ số dư ----
   console.log('\nTC07: Buyer không đủ số dư bị rollback');
+  // 100.000.000đ là mức tối đa của một giao dịch (lib/money.js), vẫn vượt xa số dư 5.000.000đ.
   const bigTxn = await api('/api/transactions', {
     method: 'POST', token: buyer.token,
-    body: { sellerId: seller.user.id, itemName: 'Xe hơi', amount: 999999999 },
+    body: { sellerId: seller.user.id, itemName: 'Xe hơi', amount: 100000000 },
   });
+  assert(bigTxn.status === 201, 'Tạo được giao dịch ở mức tối đa cho phép');
   const failLock = await api(`/api/transactions/${bigTxn.data.id}/secure`, {
     method: 'POST', token: buyer.token, body: { requestId: 'req-insufficient-' + rand },
   });

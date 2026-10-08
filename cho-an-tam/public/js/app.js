@@ -32,13 +32,19 @@ const App = (() => {
     homeLimit: HOME_PAGE_SIZE,  // số tin đang hiện ở trang chủ
     homeListings: [],           // kết quả tìm gần nhất, để "Xem thêm" không phải gọi lại API
     orderTab: null,             // 'sell' | 'buy' — chỉ người bán có hai tab
-    topupMethod: 'CARD',        // phương thức nạp tiền (mô phỏng) đang chọn
     adminTab: 'disputes',       // 'disputes' | 'seller-requests' | 'users' | 'invariants' | 'security-events'
     secEventsType: '',          // bộ lọc loại sự kiện của tab "Sự kiện bảo mật"
     orderFilter: 'active',      // 'active' | 'all' | 'done'
     busy: new Set(),            // id các nút đang chạy, để khoá double-click
     unread: 0,                  // số thông báo chưa đọc — hỏi lại định kỳ (polling), không WebSocket
     topupPoll: null,            // hẹn giờ đang chờ kết quả một yêu cầu nạp tiền
+    topupPollGen: 0,            // tăng mỗi lần bắt đầu/dừng theo dõi; vòng theo dõi cũ thấy số khác thì tự thoát
+    topupPollWake: null,        // hàm đánh thức lượt chờ đang treo, để huỷ theo dõi cũng kết thúc Promise đang đợi
+    sessionEpoch: 0,            // tăng mỗi khi PHIÊN đổi (đăng xuất, đăng nhập mới, đổi tài khoản); không tăng khi chỉ làm mới token
+    topupIntent: null,          // bản nhớ trong bộ nhớ của ý định nạp tiền chưa rõ kết quả (bản lưu nằm ở localStorage)
+    topupNotice: null,          // thông báo trạng thái nạp tiền đang hiện trên trang ví
+    payConfig: null,            // cấu hình công khai của cổng nạp tiền do máy chủ trả (PayPal Sandbox / mô phỏng)
+    paypalCallback: null,       // {kind:'return'|'cancel', id} đọc từ URL khi PayPal đưa người dùng quay lại; dùng một lần
   };
 
   const ROLE_LABEL = { BUYER: 'Người mua', SELLER: 'Người bán', ADMIN: 'Quản trị viên' };
@@ -108,6 +114,23 @@ const App = (() => {
   };
   const RESOLVED_BY_LABEL = { WEBHOOK: 'qua webhook', RECONCILER: 'qua đối soát tự động' };
 
+  // Giai đoạn (stage) của một yêu cầu nạp PayPal Sandbox do MÁY CHỦ quyết định (HOP-DONG-API-PAYPAL-P2-M2.md §5).
+  // Chỉ SUCCEEDED (được GET xác nhận) mới là nạp thành công; mọi giai đoạn khác — kể cả HTTP 200, DUPLICATE, BUSY —
+  // KHÔNG phải thành công.
+  const PAYPAL_PROVIDER = 'PAYPAL_SANDBOX';
+  const PAYPAL_STAGE_UI = {
+    CREATING:                 { label: 'Đang tạo yêu cầu',            tone: 'tag-warning', hint: 'Chưa có order PayPal' },
+    AWAITING_APPROVAL:        { label: 'Chờ phê duyệt PayPal',        tone: 'tag-warning', hint: 'Chờ bạn phê duyệt ở PayPal Sandbox' },
+    CAPTURING:                { label: 'Đang xác nhận thanh toán',    tone: 'tag-warning', hint: 'Đang xác nhận với PayPal' },
+    RECONCILING:              { label: 'Đang đối soát',               tone: 'tag-warning', hint: 'Chưa rõ kết quả — hệ thống đang đối soát' },
+    CREATE_RECOVERY_REQUIRED: { label: 'Cần đối soát',                tone: 'tag-danger',  hint: 'Chưa tạo được order; không tự tạo order mới' },
+    RECOVERY_REQUIRED:        { label: 'Cần xử lý thủ công',          tone: 'tag-danger',  hint: 'Có bằng chứng thu tiền nhưng yêu cầu đã đóng' },
+    NOT_CAPTURED:             { label: 'Không tiếp tục thu tiền',     tone: '',            hint: 'Ví không đổi' },
+    SUCCEEDED:                { label: 'Thành công',                  tone: 'tag-success', hint: '' },
+    FAILED:                   { label: 'Thất bại',                    tone: 'tag-danger',  hint: 'Yêu cầu đã đóng; ví không đổi' },
+  };
+  const PAYPAL_STAGES = Object.keys(PAYPAL_STAGE_UI);
+
   // =====================================================================
   // Tiện ích
   // =====================================================================
@@ -162,44 +185,188 @@ const App = (() => {
   // credentials: 'include' vì cookie làm mới thuộc về origin của API, có thể khác origin của trang.
   let refreshing = null;
   function refreshSession() {
-    if (!refreshing) {
-      refreshing = (async () => {
+    const epoch = state.sessionEpoch;
+    const userId = state.user && state.user.id;
+    if (!refreshing || refreshing.epoch !== epoch) {
+      const job = { epoch, promise: null };
+      job.promise = (async () => {
         try {
           const res = await fetch(API_BASE + '/api/passkeys/session/refresh', { method: 'POST', credentials: 'include' });
-          if (!res.ok) return false;
+          if (state.sessionEpoch !== epoch || !res.ok) return false;
           const data = await res.json();
-          if (!data.token) return false;
+          if (state.sessionEpoch !== epoch || !data.token || !userId || !data.user || data.user.id !== userId) return false;
           setSession(data.token, { ...(state.user || {}), ...data.user });
           return true;
-        } catch (_) {
-          return false;
-        }
+        } catch (_) { return false; }
       })();
-      refreshing.finally(() => { refreshing = null; });
+      refreshing = job;
+      job.promise.finally(() => { if (refreshing === job) refreshing = null; });
     }
-    return refreshing;
+    return refreshing.promise;
   }
 
-  async function api(path, { method = 'GET', body } = {}, retried = false) {
+  // ---------------------------------------------------------------------
+  // Thông báo lỗi API
+  //
+  // Người dùng chỉ được thấy câu tiếng Việt do giao diện hoặc máy chủ chủ động viết. Không bao
+  // giờ hiện mã lỗi thô, stack trace hay nội dung phản hồi của lớp trung gian (Vercel, Railway,
+  // proxy): các lớp đó có thể trả HTML hoặc JSON không theo định dạng của sàn.
+  // ---------------------------------------------------------------------
+
+  const UNKNOWN_OUTCOME_MSG =
+    'Chưa nhận được phản hồi từ máy chủ nên chưa rõ thao tác đã được thực hiện hay chưa. ' +
+    'Đừng thử lại ngay: hãy kiểm tra lại trạng thái (đơn hàng, ví, lịch sử nạp tiền) rồi mới quyết định.';
+
+  const API_ERROR_MESSAGES = {
+    INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
+    // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
+    // của máy chủ ("… từ X đến Y") thay vì ghi cứng một con số ở đây.
+    AMOUNT_OUT_OF_RANGE: (data) => {
+      const m = /từ\s+(.+?)\s+đến\s+(.+?)\s*$/.exec(String((data && data.message) || ''));
+      return m ? `Số tiền ngoài phạm vi cho phép: phải từ ${m[1]} đến ${m[2]}.` : 'Số tiền ngoài phạm vi cho phép.';
+    },
+    LISTING_STATE_CONFLICT: () =>
+      'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.',
+    // 401 này KHÔNG phải hết phiên: phiếu uỷ quyền Passkey sai, hết hạn hoặc đã dùng. Người dùng vẫn
+    // đang đăng nhập và chỉ cần xác thực lại.
+    REAUTH_REQUIRED: () =>
+      'Thao tác này cần xác thực lại bằng Passkey. Phiếu xác thực đã hết hạn hoặc đã được dùng; bạn vẫn đang đăng nhập — ' +
+      'hãy bắt đầu lại thao tác và xác thực Passkey khi được yêu cầu.',
+    // 503 của POST /payments/topup: yêu cầu ĐÃ được lưu ở máy chủ, chỉ chưa gửi được sang cổng. Gửi lại bằng cùng
+    // requestId là an toàn (không tạo trùng).
+    PAYPAL_DISABLED: () =>
+      'Nạp tiền bằng PayPal Sandbox hiện chưa được bật hoặc chưa đủ cấu hình. Không có yêu cầu nào được tạo và giao diện không tự chuyển sang cổng khác.',
+    PAYPAL_CREATE_RECOVERY_REQUIRED: () =>
+      'Yêu cầu này đã không tạo được order PayPal trong 5 phút đầu và hệ thống KHÔNG tự tạo order mới. Cần hỗ trợ đối soát — ' +
+      'hãy giữ mã tham chiếu của yêu cầu.',
+    PAYPAL_ORDER_MISMATCH: () =>
+      'Dữ liệu order PayPal không khớp với yêu cầu đã lưu. Dừng mọi thao tác tự động; cần đối soát thủ công.',
+    PAYPAL_CAPTURE_CONFLICT: () =>
+      'Bằng chứng thu tiền của yêu cầu này cần được đối soát thủ công. Dừng mọi thao tác tự động; ví không bị giao diện thay đổi.',
+    PAYPAL_CAPTURE_CLAIM_LOST: () =>
+      'Một thao tác xác nhận khác đang giữ quyền thu tiền cho yêu cầu này. Không gửi thêm lệnh nào — hãy bấm "Kiểm tra lại" để xem trạng thái.',
+    PAYMENT_PROVIDER_MISMATCH: () =>
+      'Yêu cầu này thuộc một cổng thanh toán khác với cổng bạn đang dùng. Hãy kiểm tra lại trong Lịch sử nạp tiền.',
+    PROVIDER_UNAVAILABLE: () =>
+      'Cổng thanh toán tạm thời không nhận yêu cầu. Yêu cầu nạp tiền của bạn đã được lưu, chưa bị mất — hãy bấm "Thử lại cùng yêu cầu" ' +
+      'sau ít phút (hệ thống cũng sẽ tự gửi lại).',
+    DISPUTE_NOT_OPEN: () =>
+      'Tranh chấp này không còn ở trạng thái chờ xử lý — có thể đã được xử lý ở nơi khác. Không có khoản tiền nào được chuyển thêm; ' +
+      'danh sách sẽ được tải lại.',
+  };
+
+  /** Câu của máy chủ chỉ được dùng khi đúng định dạng lỗi của sàn và trông như một câu người đọc được. */
+  function safeServerMessage(data) {
+    const code = data && data.error;
+    const msg = data && data.message;
+    if (typeof code !== 'string' || !/^[A-Z][A-Z0-9_]{2,60}$/.test(code)) return null;
+    if (typeof msg !== 'string' || !msg.trim() || msg.length > 300) return null;
+    if (/[<>]/.test(msg) || /\bat\s+\S+\s*\(.*:\d+/.test(msg)) return null; // HTML hoặc dấu vết stack
+    return msg.trim();
+  }
+
+  function apiErrorMessage(status, data) {
+    const body = data && typeof data === 'object' ? data : {};
+    const known = API_ERROR_MESSAGES[body.error];
+    if (known) return known(body);
+
+    if (status >= 500) {
+      const ref = typeof body.requestId === 'string' && /^[0-9a-f-]{8,40}$/i.test(body.requestId)
+        ? ` Mã tham chiếu: ${body.requestId.slice(0, 8)}.` : '';
+      return ([502, 503, 504].includes(status)
+        ? 'Máy chủ tạm thời không phản hồi. Hãy thử lại sau ít phút.'
+        : 'Hệ thống gặp lỗi khi xử lý yêu cầu. Hãy thử lại sau ít phút.')
+        + ' Nếu bạn vừa gửi một thao tác liên quan đến tiền hoặc đơn hàng, hãy kiểm tra lại trạng thái trước khi làm lại.' + ref;
+    }
+
+    const own = safeServerMessage(body);
+    if (own) return own;
+    switch (status) {
+      case 400: return 'Yêu cầu không hợp lệ. Hãy kiểm tra lại thông tin đã nhập.';
+      case 401: return 'Bạn cần đăng nhập để thực hiện thao tác này.';
+      case 403: return 'Bạn không có quyền thực hiện thao tác này.';
+      case 404: return 'Không tìm thấy nội dung được yêu cầu.';
+      case 409: return 'Trạng thái đã thay đổi so với lúc bạn xem. Hãy tải lại trang rồi thử lại.';
+      case 429: return 'Bạn thao tác quá nhanh. Hãy chờ một lúc rồi thử lại.';
+      default: return `Yêu cầu không thực hiện được (mã HTTP ${status}). Hãy thử lại sau.`;
+    }
+  }
+
+  /**
+   * Lỗi mất kết nối hoặc quá thời gian chờ. Với thao tác ghi, yêu cầu có thể đã tới máy chủ và đã
+   * được xử lý: KHÔNG được nói "thất bại" và KHÔNG được tự coi là thành công — chỉ báo chưa rõ
+   * và yêu cầu kiểm tra lại trạng thái. `unknownOutcome` để nơi gọi tự kiểm tra lại giúp.
+   */
+  function connectionError(method, timedOut) {
+    const writes = method !== 'GET';
+    const err = new Error(writes
+      ? UNKNOWN_OUTCOME_MSG
+      : (timedOut ? 'Máy chủ phản hồi quá lâu. Hãy kiểm tra kết nối rồi tải lại.' : 'Không kết nối được tới máy chủ. Hãy kiểm tra mạng rồi thử lại.'));
+    err.code = timedOut ? 'TIMEOUT' : 'NETWORK_ERROR';
+    err.unknownOutcome = writes;
+    return err;
+  }
+
+  // Quá thời gian chờ coi như mất kết nối. Mặc định 30 giây; window.ENCLAVE_API_TIMEOUT_MS cho phép
+  // bộ kiểm thử UI rút ngắn.
+  function apiTimeoutMs() {
+    const v = Number(window.ENCLAVE_API_TIMEOUT_MS);
+    return v > 0 ? v : 30000;
+  }
+
+  /** fetch có hạn chờ; đọc cả phần thân trong cùng hạn đó để một thân bị cắt dở không thành "thành công rỗng". */
+  async function fetchJson(url, options) {
+    const method = (options && options.method) || 'GET';
+    const ctl = typeof AbortController === 'function' ? new AbortController() : null;
+    let timedOut = false;
+    const timer = ctl ? setTimeout(() => { timedOut = true; ctl.abort(); }, apiTimeoutMs()) : null;
+    try {
+      const res = await fetch(url, ctl ? { ...options, signal: ctl.signal } : options);
+      const data = await res.json().catch(() => null);
+      if (timedOut) throw new Error('timeout');
+      if (res.ok && (!data || typeof data !== 'object' || Array.isArray(data))) {
+        throw new Error('Invalid JSON response');
+      }
+      return { res, data: data && typeof data === 'object' ? data : {} };
+    } catch (e) {
+      throw connectionError(method, timedOut);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  async function api(path, { method = 'GET', body, allowAuthRetry = true } = {}, retried = false) {
     const headers = {};
     if (body !== undefined) headers['Content-Type'] = 'application/json';
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
 
-    const res = await fetch(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined });
-    const data = await res.json().catch(() => ({}));
+    // Request này có thể được phát đi dưới một phiên đã kết thúc (đăng xuất, đăng nhập lại, đổi tài khoản) trong lúc chờ.
+    // Khi đó bỏ cả phản hồi lẫn lỗi: không làm mới phiên, không thử lại bằng token của người dùng MỚI, không báo lỗi cho họ.
+    const epoch = state.sessionEpoch;
+    const oldSession = () => Object.assign(new Error('Phản hồi của phiên cũ'), { silent: true, stale: true });
+    let res;
+    let data;
+    try {
+      ({ res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined }));
+    } catch (e) {
+      throw state.sessionEpoch !== epoch ? oldSession() : e;
+    }
+    if (state.sessionEpoch !== epoch) throw oldSession();
 
-    if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token) {
-      if (!retried && await refreshSession()) return api(path, { method, body }, true);
+    if (res.status === 401 && data.error === 'UNAUTHENTICATED' && state.token && allowAuthRetry) {
+      const refreshed = !retried && await refreshSession();
+      if (state.sessionEpoch !== epoch) throw oldSession();
+      if (refreshed) return api(path, { method, body, allowAuthRetry }, true);
       clearSession();
       renderChrome();
       route();
-      throw new Error('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại');
+      const expired = new Error('Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại');
+      expired.code = 'UNAUTHENTICATED';
+      expired.status = 401;
+      throw expired;
     }
     if (!res.ok) {
-      const message = data.error === 'LISTING_STATE_CONFLICT'
-        ? 'Trạng thái sản phẩm chưa khớp với đơn hàng. Tiền chưa được chuyển; hãy báo quản trị viên kèm mã giao dịch để kiểm tra.'
-        : (data.message || data.error || `Lỗi HTTP ${res.status}`);
-      const err = new Error(message);
+      const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
       err.status = res.status;
       throw err;
@@ -228,7 +395,14 @@ const App = (() => {
       if (successMsg) toast(successMsg, 'ok');
       return result;
     } catch (e) {
-      toast(e.message, 'err');
+      // Lỗi của một phản hồi cũ (phiên đã đổi) mang cờ silent: không được hiện thông báo cho người đang dùng phiên mới.
+      if (!(e && e.silent)) toast(e.message, 'err');
+      // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
+      // một thao tác sẽ lại bị từ chối.
+      if (e && e.code === 'DISPUTE_NOT_OPEN') {
+        closeModal();
+        Promise.resolve(route()).catch(() => { /* lỗi tải lại đã được báo ở nơi khác */ });
+      }
       throw e;
     } finally {
       state.busy.delete(key);
@@ -319,8 +493,11 @@ const App = (() => {
   // dismissible=false dùng cho màn hình hoàn tất thiết lập tài khoản: bỏ nút đóng và bỏ
   // việc bấm ra ngoài để tắt, vì phiên lúc đó chưa gọi được chức năng nào — đóng modal chỉ
   // dẫn người dùng tới một màn hình trống rồi lỗi 403.
+  let modalDismissible = true;
+
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
     closeModal();
+    modalDismissible = dismissible;
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
@@ -338,17 +515,28 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() { $('#modalRoot').innerHTML = ''; }
+  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; state.paypalAbandonConfirmation = null; }
+
+  // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
+  // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
+  function dismissModal() { if (modalDismissible) closeModal(); }
 
   // =====================================================================
   // Phiên đăng nhập
   // =====================================================================
 
   function setSession(token, user) {
+    // Phiên MỚI = chưa có phiên, hoặc đổi sang tài khoản khác. Làm mới token của cùng một phiên (refreshSession)
+    // thì KHÔNG phải phiên mới, nếu không mọi thao tác đang chạy sẽ bị coi là "cũ" oan mỗi lần token được gia hạn.
+    const fresh = !state.token || !state.user || !user || state.user.id !== user.id;
     state.token = token;
     state.user = user;
     localStorage.setItem(STORAGE_TOKEN, token);
     localStorage.setItem(STORAGE_USER, JSON.stringify(user));
+    if (fresh) {
+      state.sessionEpoch++;
+      resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
+    }
   }
 
   function clearSession() {
@@ -359,14 +547,21 @@ const App = (() => {
     state.unread = 0;
     localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_USER);
+    // Mọi phản hồi còn đang bay của phiên này trở thành "cũ" ngay (kể cả khi đăng nhập lại cùng tài khoản).
+    state.sessionEpoch++;
+    // Dừng theo dõi và bỏ trạng thái trong bộ nhớ. Bản lưu theo từng người dùng vẫn còn để chính người đó
+    // phục hồi một lần nạp chưa rõ khi quay lại.
+    resetTopupFlow();
   }
 
   async function refreshWallet() {
+    const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role === 'ADMIN') { state.wallet = null; return; }
     try {
-      state.wallet = await api('/wallets/me');
+      const wallet = await api('/wallets/me');
+      if (state.sessionEpoch === epoch) state.wallet = wallet;
     } catch (_) {
-      state.wallet = null;
+      if (state.sessionEpoch === epoch) state.wallet = null;
     }
   }
 
@@ -384,12 +579,13 @@ const App = (() => {
 
   /** Chỉ Người mua mới có khái niệm "yêu cầu mở cửa hàng". */
   async function refreshSellerRequest() {
+    const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role !== 'BUYER') { state.sellerRequest = null; return; }
     try {
       const { request } = await api('/users/me/seller-request');
-      state.sellerRequest = request;
+      if (state.sessionEpoch === epoch) state.sellerRequest = request;
     } catch (_) {
-      state.sellerRequest = null;
+      if (state.sessionEpoch === epoch) state.sellerRequest = null;
     }
   }
 
@@ -1117,6 +1313,7 @@ const App = (() => {
     }
 
     const head = parts[0] || '';
+    if (head !== 'wallet') stopTopupPoll(); // rời trang ví: không còn gì để theo dõi
     try {
       if (head === '') return await viewHome();
       if (head === 'listing') return await viewListing(parts[1]);
@@ -1394,7 +1591,6 @@ const App = (() => {
           <b>${esc(name)}</b>
           <div class="small muted">${publicId ? accountLabel(publicId) : ''}
             ${seller ? `${publicId ? ' · ' : ''}Tham gia ${fmtDay(seller.joinedAt)}` : ''}</div>
-          <div class="small text-trust mt-2px">${ico('badge-check', 14)} Tài khoản đã xác minh danh tính</div>
         </div>
       </div>
       ${seller ? `
@@ -2086,6 +2282,7 @@ const App = (() => {
 
   async function doDeleteListing(id, btn) {
     const r = await guard('del:' + id, btn, () => api('/listings/' + encodeURIComponent(id), { method: 'DELETE' }));
+    if (!r) return; // lần bấm lặp khi yêu cầu đầu còn chạy: không báo thành công thay cho nó
     closeModal();
     toast(r && r.hidden ? 'Đã ẩn tin vì tin đã có lịch sử giao dịch.' : 'Đã gỡ tin.', 'ok');
     route();
@@ -2098,7 +2295,7 @@ const App = (() => {
 
   const ENTRY_LABEL = {
     DEMO_TOPUP: 'Số dư khởi tạo (demo)',
-    TOPUP_CREDIT: 'Nạp tiền qua cổng thanh toán',
+    TOPUP_CREDIT: 'Nạp tiền qua cổng mô phỏng',
     ESCROW_LOCK_DEBIT: 'Thanh toán đơn — chuyển vào ký quỹ',
     ESCROW_LOCK_CREDIT: 'Ký quỹ nhận tiền',
     ESCROW_RELEASE_DEBIT: 'Ký quỹ giải ngân',
@@ -2107,23 +2304,21 @@ const App = (() => {
     ESCROW_REFUND_CREDIT: 'Nhận hoàn tiền',
   };
 
-  const PAY_METHODS = [
-    { key: 'CARD', icon: 'credit-card', label: 'Thẻ ATM nội địa', note: 'Mô phỏng' },
-    { key: 'EWALLET', icon: 'smartphone', label: 'Ví điện tử', note: 'Mô phỏng' },
-    { key: 'BANK', icon: 'landmark', label: 'Chuyển khoản ngân hàng', note: 'Mô phỏng' },
-  ];
-
   async function viewWallet() {
     if (!state.user) return requireLogin('Đăng nhập để xem ví của bạn.');
     if (state.user.role === 'ADMIN') {
       return wrongRole('Quản trị viên không phải một bên của giao dịch nên không có ví.');
     }
 
+    // Cổng nạp tiền nào đang bật là do MÁY CHỦ nói (GET /api/payments/paypal/config); không đoán từ hostname.
+    const cfg = await loadPayConfig();
+    if (currentHead() !== 'wallet' || !state.user) return; // người dùng đã đi nơi khác / đăng xuất trong lúc chờ
+
     view().innerHTML = `
       <div class="page">
         ${banner('Ví & nạp tiền', 'Mọi biến động số dư được ghi thành bút toán và có khoá chống ghi trùng')}
         <div class="stat-grid" id="walletStats"></div>
-        ${topupCard()}
+        ${walletTopupCard(cfg)}
         <div class="card">
           <div class="card-head"><h2>Lịch sử nạp tiền</h2></div>
           <div class="table-scroll" id="topupHistory"></div>
@@ -2133,6 +2328,8 @@ const App = (() => {
           <div class="table-scroll" id="walletLedger"></div>
         </div>
       </div>`;
+
+    renderTopupIntent();
 
     const [wallet, buying, selling] = await Promise.all([
       api('/wallets/me'),
@@ -2179,6 +2376,9 @@ const App = (() => {
           </tbody>
         </table>`;
     renderChrome();
+    // Vừa được PayPal đưa quay lại (?paypal=return|cancel): xác minh rồi tự hoàn tất khi return hợp lệ.
+    if (state.paypalCallback) Promise.resolve(processPaypalCallback()).catch(() => {});
+    else Promise.resolve(resumePaypalAfterBack()).catch(() => {});
   }
 
   // ---------- Nạp tiền qua Mock Payment Provider ----------
@@ -2190,7 +2390,6 @@ const App = (() => {
   const TOPUP_PRESETS = [100000, 200000, 500000, 1000000, 2000000];
 
   function topupCard() {
-    const method = state.topupMethod || 'CARD';
     return `
       <div class="card">
         <div class="card-head"><h2>Nạp tiền vào ví</h2><span class="tag tag-navy">${ico('shield-check', 12)} Cổng thanh toán mô phỏng</span></div>
@@ -2201,17 +2400,11 @@ const App = (() => {
               `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
             <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
           </div>
-          <div class="field">
-            <label>Phương thức thanh toán</label>
-            <div class="radio-cards">
-              ${PAY_METHODS.map((m) => `
-                <label class="radio-card">
-                  <input type="radio" name="payMethod" value="${m.key}" ${method === m.key ? 'checked' : ''}>
-                  ${ico(m.icon, 20)}
-                  <span>${esc(m.label)}<small>${esc(m.note)}</small></span>
-                </label>`).join('')}
-            </div>
-            <span class="hint">Cả ba phương thức đều đi qua cùng một cổng thanh toán mô phỏng — đồ án không nối cổng thật.</span>
+          <div id="topupIntent" aria-live="polite"></div>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Đây là <b>thanh toán mô phỏng</b>: không dùng thẻ, ví điện tử hay tài khoản ngân hàng thật và không chuyển
+              tiền thật. Hệ thống chưa nối PayPal hay cổng thanh toán thật nào.</span>
           </div>
           <div class="note">
             ${ico('info', 18)}
@@ -2221,6 +2414,24 @@ const App = (() => {
           <div><button class="btn btn-primary btn-lg" data-act="topup-create">${ico('wallet', 18)} Tiếp tục thanh toán</button></div>
         </div>
       </div>`;
+  }
+
+  /**
+   * Nút ở dòng lịch sử. Chỉ SUBMITTED (cổng đã nhận yêu cầu) mới mở được cổng thanh toán. Dòng không có
+   * trường submissionStatus (dữ liệu cũ) được coi là đã gửi, đúng như máy chủ quy ước.
+   */
+  function historyAction(p) {
+    if (p.provider === PAYPAL_PROVIDER) return paypalHistoryAction(p);
+    if (p.status !== 'PENDING') return '';
+    const sub = p.submissionStatus || 'SUBMITTED';
+    if (sub === 'SUBMITTING') return '<span class="muted small">Đang gửi sang cổng thanh toán…</span>';
+    if (sub === 'SUBMIT_FAILED') {
+      const intent = loadIntent();
+      return intent && p.requestId && intent.requestId === p.requestId
+        ? '<button class="btn btn-sm" data-act="topup-retry">Thử lại cùng yêu cầu</button>'
+        : '<span class="muted small">Chưa gửi được sang cổng — hệ thống sẽ tự gửi lại</span>';
+    }
+    return `<button class="btn btn-sm" data-act="checkout-open" data-id="${esc(p.id)}" data-ref="${esc(p.providerRef)}">Mở lại cổng thanh toán</button>`;
   }
 
   async function loadTopupHistory() {
@@ -2235,18 +2446,21 @@ const App = (() => {
       <table class="data">
         <thead><tr><th>Thời điểm</th><th class="num">Số tiền</th><th>Trạng thái</th><th>Kết quả</th><th></th></tr></thead>
         <tbody>${paymentRequests.map((p) => {
-          const ui = PAYMENT_UI[p.status] || { label: p.status, tone: '' };
+          const pp = p.provider === PAYPAL_PROVIDER && PAYPAL_STAGES.includes(p.stage);
+          const ui = pp ? PAYPAL_STAGE_UI[p.stage] : (PAYMENT_UI[p.status] || { label: p.status, tone: '' });
+          const tag = p.provider === PAYPAL_PROVIDER ? '<div><span class="tag tag-info">PayPal Sandbox</span></div>'
+            : p.provider === 'MOCK' ? '<div><span class="tag">Mô phỏng</span></div>' : '';
+          const usd = pp && validQuote(p.quote, p.amount) ? `<div class="muted small">${esc(p.quote.usdValue)} USD · Sandbox</div>` : '';
+          const result = p.resolvedAt
+            ? `${fmtDateTime(p.resolvedAt)} · ${esc(RESOLVED_BY_LABEL[p.resolvedBy] || '')}`
+            : (pp ? esc(ui.hint || '') : 'Chờ cổng thanh toán trả kết quả');
           return `
             <tr>
-              <td class="nowrap">${fmtDateTime(p.createdAt)}</td>
-              <td class="num">${money(p.amount)}</td>
+              <td class="nowrap">${fmtDateTime(p.createdAt)}${tag}</td>
+              <td class="num">${money(p.amount)}${usd}</td>
               <td><span class="tag ${ui.tone}">${esc(ui.label)}</span></td>
-              <td class="muted small">${p.resolvedAt
-                ? `${fmtDateTime(p.resolvedAt)} · ${esc(RESOLVED_BY_LABEL[p.resolvedBy] || '')}`
-                : 'Chờ cổng thanh toán trả kết quả'}</td>
-              <td>${p.status === 'PENDING'
-                ? `<button class="btn btn-sm" data-act="checkout-open" data-id="${esc(p.id)}" data-ref="${esc(p.providerRef)}">Mở lại cổng thanh toán</button>`
-                : ''}</td>
+              <td class="muted small">${result}</td>
+              <td>${historyAction(p)}</td>
             </tr>`;
         }).join('')}
         </tbody>
@@ -2258,40 +2472,1054 @@ const App = (() => {
     // Cổng giả lập chỉ cho đúng người tạo yêu cầu nạp tiền thao tác, nên phải kèm phiên.
     const headers = body !== undefined ? { 'Content-Type': 'application/json' } : {};
     if (state.token) headers['Authorization'] = 'Bearer ' + state.token;
-    const res = await fetch(API_BASE + '/mock-provider' + path, {
+    const epoch = state.sessionEpoch;
+    let res, data;
+    try { ({ res, data } = await fetchJson(API_BASE + '/mock-provider' + path, {
       method,
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
-    });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401 && !retried && await refreshSession()) return providerApi(path, { method, body }, true);
+     }));
+    } catch (e) { throw state.sessionEpoch !== epoch ? staleError() : e; }
+    if (state.sessionEpoch !== epoch) throw staleError();
+    if (res.status === 401 && !retried) {
+      const refreshed = await refreshSession();
+      if (state.sessionEpoch !== epoch) throw staleError();
+      if (refreshed) return providerApi(path, { method, body }, true);
+    }
     if (!res.ok) {
-      const err = new Error(data.message || data.error || `Lỗi HTTP ${res.status}`);
+      const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
+      err.status = res.status;
       throw err;
     }
     return data;
   }
 
-  async function createTopup(btn) {
-    const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-    if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
-    const picked = document.querySelector('input[name="payMethod"]:checked');
-    state.topupMethod = picked ? picked.value : 'CARD';
-    const pr = await guard('topup-create', btn, () => api('/payments/topup', { method: 'POST', body: { amount } }));
-    await loadTopupHistory();
-    await openCheckout(pr.id, pr.providerRef);
+  // ---------- Ý định nạp tiền và requestId ----------
+  //
+  // Một lần bấm "nạp" = MỘT ý định = MỘT requestId, sinh một lần rồi giữ nguyên cho mọi lần gửi lại. Nhờ vậy
+  // bấm đúp, thử lại sau timeout/mất kết nối/503 hay tải lại trang đều dẫn tới cùng một yêu cầu ở máy chủ,
+  // không bao giờ tạo thêm một khoản nạp thứ hai. Máy chủ bảo đảm điều đó (POST /api/payments/topup).
+  //
+  // Ý định chỉ sống trong lúc kết quả CHƯA RÕ (chưa nhận được một yêu cầu đã SUBMITTED hay đã kết thúc). Lưu theo
+  // id người dùng; chỉ chứa mã yêu cầu và số tiền, KHÔNG chứa token hay bí mật. Khi chưa rõ, số tiền bị khoá: đổi
+  // số tiền mà giữ cùng khoá sẽ bị máy chủ từ chối (409) và là một ý định khác về bản chất — người dùng phải chủ
+  // động bắt đầu lần nạp mới.
+  //
+  // Chính sách tài khoản: khoá localStorage theo id người dùng CHỈ để giao diện không dùng chéo ý định giữa các
+  // tài khoản — nó không phải cơ chế bảo mật (mã JS nào cùng origin cũng đọc được localStorage). Vì thế ý định của
+  // một tài khoản KHÔNG bị tự xoá khi tài khoản khác đăng nhập: chủ của nó quay lại vẫn phục hồi được, và tài khoản
+  // khác không bao giờ đọc hay dùng nó (loadIntent kiểm userId). Nội dung chỉ là mã yêu cầu ngẫu nhiên và số tiền.
+  //
+  // Phản hồi đến muộn: mọi thao tác nạp tiền mang một "ngữ cảnh" (phiên, người dùng, ý định) lấy lúc bắt đầu và kiểm
+  // lại sau MỖI await. Phản hồi của phiên đã đăng xuất / đổi tài khoản / bị thay bằng ý định khác không được mở cổng,
+  // báo thông báo, đọc ví hay sửa ý định của phiên đang dùng.
+
+  const INTENT_PREFIX = 'cat_topup_intent:';
+  const REQUEST_ID_RE = /^[A-Za-z0-9._:-]{8,100}$/;
+  const PAYMENT_STATUSES = ['PENDING', 'SUCCEEDED', 'FAILED'];
+  const SUBMISSION_STATUSES = ['SUBMITTING', 'SUBMITTED', 'SUBMIT_FAILED'];
+  // Theo dõi có hạn, giãn dần: tổng ~8 giây rồi dừng và đưa nút "Kiểm tra lại" cho người dùng.
+  const POLL_DELAYS_MS = [1000, 1500, 2250, 3400];
+
+  function validIntent(v, userId) {
+    return !!v && typeof v === 'object' && v.userId === userId && REQUEST_ID_RE.test(String(v.requestId))
+      && Number.isSafeInteger(v.amount) && v.amount > 0;
   }
 
-  async function openCheckout(paymentRequestId, providerRef) {
+  function loadIntent() {
+    const user = state.user;
+    if (!user || !user.id) return null;
+    if (validIntent(state.topupIntent, user.id)) return state.topupIntent;
+    try {
+      const v = JSON.parse(localStorage.getItem(INTENT_PREFIX + user.id) || 'null');
+      if (validIntent(v, user.id)) { state.topupIntent = v; return v; }
+    } catch (_) { /* không đọc được: coi như không có ý định nào */ }
+    return null;
+  }
+
+  function saveIntent(intent) {
+    state.topupIntent = intent;
+    try { localStorage.setItem(INTENT_PREFIX + intent.userId, JSON.stringify(intent)); } catch (_) { /* vẫn giữ trong bộ nhớ */ }
+  }
+
+  function clearIntent() {
+    const user = state.user;
+    state.topupIntent = null;
+    if (!user || !user.id) return;
+    try { localStorage.removeItem(INTENT_PREFIX + user.id); } catch (_) { /* không có gì để xoá */ }
+  }
+
+  /**
+   * Ngữ cảnh của một thao tác nạp tiền: dấu phiên + người dùng + ý định lúc bắt đầu. `requestId` null với thao tác
+   * không gắn ý định (ví dụ theo dõi sau khi thanh toán ở cổng, hoặc mở lại cổng từ lịch sử).
+   */
+  function topupCtx(requestId) {
+    return { epoch: state.sessionEpoch, userId: state.user ? state.user.id : null, requestId: requestId || null, released: false };
+  }
+
+  /** Thao tác này còn thuộc phiên và ý định đang dùng không? So cả epoch (đăng xuất rồi đăng nhập lại cùng tài khoản), không chỉ userId. */
+  function ctxAlive(ctx) {
+    if (!ctx || state.sessionEpoch !== ctx.epoch || !state.token || !state.user || state.user.id !== ctx.userId) return false;
+    if (ctx.requestId && !ctx.released) {
+      const cur = loadIntent();
+      if (!cur || cur.requestId !== ctx.requestId) return false;
+    }
+    return true;
+  }
+
+  /** Chính thao tác này kết thúc ý định của mình: xoá bản lưu và đánh dấu để các bước sau chỉ còn kiểm phiên. */
+  function releaseIntent(ctx) {
+    clearIntent();
+    ctx.released = true;
+  }
+
+  const staleError = () => Object.assign(new Error('Phản hồi của phiên cũ'), { silent: true, stale: true });
+
+  function stopTopupPoll() {
+    state.topupPollGen++;
+    if (state.topupPoll) { clearTimeout(state.topupPoll); state.topupPoll = null; }
+    // Đánh thức lượt chờ đang treo để vòng theo dõi cũ thoát ngay (thấy số thế hệ đã đổi) thay vì treo mãi.
+    const wake = state.topupPollWake;
+    state.topupPollWake = null;
+    if (wake) wake();
+  }
+
+  function resetTopupFlow() {
+    stopTopupPoll();
+    state.topupIntent = null;
+    state.topupNotice = null;
+    state.paypalAbandonConfirmation = null;
+  }
+
+  function startIntent(amount, provider) {
+    const intent = { userId: state.user.id, requestId: 'topup-' + newRequestId(), amount, provider: provider || 'MOCK', createdAt: new Date().toISOString() };
+    saveIntent(intent);
+    return intent;
+  }
+
+  /** Một dòng yêu cầu nạp từ máy chủ có đủ và đúng dữ liệu để dựa vào không? Thiếu/sai thì KHÔNG coi là thành công. */
+  function validPaymentRow(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return false;
+    if (typeof r.id !== 'string' || !r.id) return false;
+    if (!PAYMENT_STATUSES.includes(r.status) || !SUBMISSION_STATUSES.includes(r.submissionStatus)) return false;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0) return false;
+    if (typeof r.providerRef !== 'string' || !r.providerRef) return false;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return false;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return false;
+    return true;
+  }
+
+  /**
+   * Mức kiểm nhẹ hơn cho dòng đọc lại bằng GET (theo dõi, kiểm tra trạng thái): cần id, trạng thái và số tiền hợp lệ;
+   * thiếu submissionStatus thì coi là SUBMITTED, đúng quy ước của máy chủ. Khi biết trước id / số tiền / requestId của
+   * yêu cầu đang theo dõi thì dòng đọc về phải KHỚP — sai id, sai số tiền hay requestId khác (kể cả null) đều bị từ chối.
+   * Trả về dòng đã chuẩn hoá hoặc null. Phản hồi TẠO yêu cầu (POST) bị kiểm đủ mọi trường bằng validPaymentRow.
+   */
+  function readPaymentState(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    if (typeof r.id !== 'string' || !r.id || !PAYMENT_STATUSES.includes(r.status)) return null;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0) return null;
+    if (r.submissionStatus !== undefined && !SUBMISSION_STATUSES.includes(r.submissionStatus)) return null;
+    if (expect && expect.id !== undefined && r.id !== expect.id) return null;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return null;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return null;
+    return { ...r, submissionStatus: r.submissionStatus || 'SUBMITTED' };
+  }
+
+  /** Từ chối dứt khoát của máy chủ (trước khi ghi gì): bỏ ý định để lần sau nhập số tiền khác được. */
+  function isDefiniteRejection(e) {
+    const st = e && e.status;
+    if (!st || st < 400 || st >= 500) return false;
+    return st !== 401 && st !== 408 && (e && e.code) !== 'IDEMPOTENCY_KEY_REUSED';
+  }
+
+  function setTopupNotice(notice) {
+    state.topupNotice = notice;
+    renderTopupIntent();
+  }
+
+  function renderTopupIntent() {
+    const intent = loadIntent();
+    // Còn ý định mà chưa có thông báo cụ thể (ví dụ vừa tải lại trang): coi là chưa rõ kết quả.
+    const notice = state.topupNotice || (intent ? { kind: 'unknown' } : null);
+    const input = $('#topupAmount');
+    if (input) {
+      input.disabled = !!intent;
+      if (intent) input.value = String(intent.amount);
+    }
+    document.querySelectorAll('[data-act="topup-preset"]').forEach((c) => { c.disabled = !!intent; });
+    const box = $('#topupIntent');
+    if (!box) return;
+    if (!notice) { box.innerHTML = ''; return; }
+
+    const amountText = intent ? money(intent.amount) : '';
+    const retry = '<button class="btn btn-sm btn-primary" data-act="topup-retry">Thử lại cùng yêu cầu</button>';
+    const check = '<button class="btn btn-sm" data-act="topup-check">Kiểm tra trạng thái</button>';
+    const fresh = '<button class="btn btn-sm btn-ghost" data-act="topup-new">Bắt đầu lần nạp mới</button>';
+    const idAttr = notice.paymentId ? ` data-id="${esc(notice.paymentId)}"` : '';
+    const box2 = (tone, icon, text, buttons) =>
+      `<div class="note ${tone}">${ico(icon, 18)}<span>${text}${buttons ? `<span class="row mt-2px">${buttons}</span>` : ''}</span></div>`;
+
+    switch (notice.kind) {
+      case 'submitting':
+        box.innerHTML = box2('', 'loader-circle',
+          `<b>Đang gửi yêu cầu nạp ${amountText} sang cổng thanh toán…</b> Đây không phải lỗi: hệ thống đang theo dõi và sẽ mở cổng thanh toán khi cổng đã nhận. Số dư chưa đổi.`, '');
+        break;
+      case 'retryable':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Yêu cầu nạp ${amountText} đã được lưu nhưng chưa gửi được sang cổng thanh toán.</b> Số dư chưa đổi. Bấm thử lại: hệ thống dùng cùng mã yêu cầu nên không tạo khoản nạp thứ hai.`,
+          retry + fresh);
+        break;
+      case 'notfound':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa thấy yêu cầu nạp nào với mã này</b>, nên có thể nó chưa được tạo. Gửi lại cùng yêu cầu là an toàn — không tạo khoản nạp thứ hai.`,
+          retry + fresh);
+        break;
+      case 'unconfirmed':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa xác nhận được kết quả nạp ${amountText} từ máy chủ.</b> Giao diện chưa xác minh được trạng thái cuối cùng của yêu cầu này nên không báo thành công và không cập nhật số dư. Hãy kiểm tra lại.`,
+          `<button class="btn btn-sm btn-primary" data-act="topup-check"${idAttr}>Kiểm tra lại</button>`);
+        break;
+      case 'poll-timeout':
+        box.innerHTML = box2('note-warning', 'clock',
+          '<b>Chưa có kết quả mới từ cổng thanh toán.</b> Hệ thống vẫn tự đối soát; số dư chỉ đổi khi máy chủ xác nhận. Bạn có thể kiểm tra lại bất cứ lúc nào.',
+          `<button class="btn btn-sm" data-act="topup-check"${idAttr}>Kiểm tra lại</button>`);
+        break;
+      case 'paypal':
+        box.innerHTML = paypalNoticeHtml(notice, intent);
+        break;
+      case 'paypal-stop':
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Dừng mọi thao tác tự động.</b> ${esc((API_ERROR_MESSAGES[notice.code] || (() => ''))())} Không có khoản nào bị giao diện tự cộng hay tự tạo lại.`,
+          check + (intent ? fresh : ''));
+        break;
+      default: // 'unknown'
+        box.innerHTML = box2('note-warning', 'triangle-alert',
+          `<b>Chưa rõ yêu cầu nạp ${amountText} đã được tạo hay chưa.</b> Số tiền được khoá để tránh nạp trùng. Hãy kiểm tra trạng thái trước; gửi lại cùng yêu cầu thì an toàn.`,
+          check + retry + fresh);
+    }
+  }
+
+  async function createTopup(btn) {
+    // Ý định đã có thì đi tiếp đúng đường của nó (không đổi cổng giữa chừng); chưa có thì theo cấu hình máy chủ.
+    const existing = loadIntent();
+    if ((existing && existing.provider === PAYPAL_PROVIDER) || (!existing && state.payConfig && state.payConfig.paypal)) {
+      return createPaypalTopup(btn);
+    }
+    // Còn ý định chưa rõ thì GỬI LẠI chính nó (cùng khoá, cùng số tiền), bỏ qua ô nhập.
+    let intent = loadIntent();
+    if (!intent) {
+      const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
+      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      intent = startIntent(amount); // lưu TRƯỚC khi gửi: tải lại giữa chừng vẫn phục hồi được
+    }
+    const ctx = topupCtx(intent.requestId); // lấy dấu phiên + ý định lúc bắt đầu; không có await nào trước guard
+    let pr;
+    try {
+      pr = await guard('topup-create', btn, async () => {
+        try {
+          return await api('/payments/topup', { method: 'POST', body: { amount: intent.amount, requestId: intent.requestId } });
+        } catch (e) {
+          // Lỗi của phiên/ý định cũ: không báo cho phiên mới. Riêng "hết phiên" của CHÍNH request này vẫn phải hiện.
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return; // phiên đã kết thúc: không đụng vào ý định/thông báo nào nữa
+      if (isDefiniteRejection(e)) {
+        releaseIntent(ctx);
+        setTopupNotice(null);
+      } else if (e && e.code === 'PROVIDER_UNAVAILABLE') {
+        setTopupNotice({ kind: 'retryable' });
+      } else {
+        setTopupNotice({ kind: 'unknown' });
+        // Không rõ yêu cầu đã được tạo hay chưa: nạp lại danh sách để người dùng thấy sự thật thay vì nạp trùng.
+        if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      }
+      return;
+    }
+    if (!pr) return; // lần bấm lặp khi yêu cầu đầu còn chạy
+    if (!ctxAlive(ctx)) return; // phản hồi đến sau khi đăng xuất / đổi tài khoản / bỏ ý định
+    if (!validPaymentRow(pr, { amount: intent.amount, requestId: intent.requestId })) {
+      // 200 nhưng thân thiếu/sai: không phải bằng chứng thành công. Giữ ý định, bảo người dùng kiểm tra.
+      setTopupNotice({ kind: 'unknown' });
+      toast('Máy chủ trả về dữ liệu không đầy đủ nên chưa rõ yêu cầu nạp đã được tạo hay chưa. Hãy bấm "Kiểm tra trạng thái".', 'err');
+      await loadTopupHistory().catch(() => {});
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settleRow(pr, { ctx, openOnSubmitted: true, fromGet: false });
+  }
+
+  /**
+   * Xác nhận một kết quả KẾT THÚC bằng GET /payments/:id. Chỉ trả về dòng khi GET thành công, hợp lệ, cùng id / số tiền /
+   * requestId với yêu cầu đang theo dõi và nói đúng trạng thái kết thúc đó. Lỗi, timeout, thân hỏng, không khớp, hay trạng
+   * thái khác (ví dụ POST nói SUCCEEDED mà GET nói PENDING) đều trả null — KHÔNG quay lại dùng dòng POST để báo thành công.
+   */
+  async function confirmTerminal(row, ctx) {
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(row.id)); } catch (_) { return null; }
+    if (!ctxAlive(ctx)) return null;
+    const fresh = readPaymentState(raw, { id: row.id, amount: row.amount, requestId: ctx.requestId || undefined });
+    return fresh && fresh.status === row.status ? fresh : null;
+  }
+
+  /**
+   * Xử lý một dòng yêu cầu nạp. `fromGet`: dòng đã được đọc bằng GET (theo dõi / kiểm tra) hay là phản hồi POST tạo yêu cầu.
+   *   kết thúc            -> (POST) phải được GET xác nhận trước; xác nhận được mới bỏ ý định và báo; không thì "chưa xác nhận"
+   *   PENDING + SUBMITTED -> cổng đã nhận: bỏ ý định, mở cổng thanh toán (nếu được phép)
+   *   PENDING + SUBMITTING-> đang gửi: giữ ý định, theo dõi có hạn, KHÔNG mở cổng, KHÔNG báo lỗi
+   *   PENDING + SUBMIT_FAILED -> giữ ý định, cho thử lại cùng khoá
+   * Sau mỗi await kiểm ctxAlive: phản hồi của phiên/ý định cũ không được làm gì cả.
+   */
+  async function settleRow(row, { ctx, openOnSubmitted, fromGet }) {
+    if (!ctxAlive(ctx)) return;
+    const intent = ctx.requestId && !ctx.released ? loadIntent() : null;
+    if (intent && row.id && intent.paymentId !== row.id) saveIntent({ ...intent, paymentId: row.id });
+
+    if (row.status !== 'PENDING') {
+      const confirmed = fromGet ? row : await confirmTerminal(row, ctx);
+      if (!ctxAlive(ctx)) return;
+      if (!confirmed) {
+        // Giữ ý định: kết quả chưa được máy chủ xác nhận, người dùng có thể kiểm tra lại. Không báo thành công.
+        setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+        toast('Chưa xác nhận được kết quả nạp tiền từ máy chủ. Hãy bấm "Kiểm tra lại".');
+        return;
+      }
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      setTopupNotice(null);
+      await announceTerminal(confirmed, ctx);
+      return;
+    }
+    if (row.submissionStatus === 'SUBMITTED') {
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      if (!openOnSubmitted) return; // đang theo dõi sau khi thanh toán: vẫn chờ, không mở lại cổng
+      setTopupNotice(null);
+      await openCheckout(row.id, row.providerRef, ctx);
+      return;
+    }
+    if (row.submissionStatus === 'SUBMITTING') {
+      setTopupNotice({ kind: 'submitting', paymentId: row.id });
+      const result = await pollPayment(row.id, (r) => r.status !== 'PENDING' || r.submissionStatus !== 'SUBMITTING', ctx);
+      if (result.cancelled || !ctxAlive(ctx)) return;
+      if (result.done) return settleRow(result.row, { ctx, openOnSubmitted, fromGet: true });
+      setTopupNotice({ kind: 'poll-timeout', paymentId: row.id });
+      return;
+    }
+    // SUBMIT_FAILED
+    setTopupNotice({ kind: 'retryable', paymentId: row.id });
+  }
+
+  /** Báo kết quả KẾT THÚC đã được máy chủ xác nhận. Không tự cộng tiền ở giao diện: chỉ đọc lại ví từ máy chủ. */
+  async function announceTerminal(row, ctx) {
+    if (!ctxAlive(ctx)) return;
+    if (row.status === 'SUCCEEDED') {
+      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[row.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[row.resolvedBy] : ''}: ${money(row.amount)} đã vào ví.`, 'ok');
+      await refreshWallet();
+    } else if (row.status === 'FAILED') {
+      toast('Yêu cầu nạp này đã thất bại. Ví của bạn không thay đổi.', 'err');
+    }
+    if (!ctxAlive(ctx)) return;
+    if (currentHead() === 'wallet') route(); else renderChrome();
+  }
+
+  /**
+   * Hỏi máy chủ trạng thái một yêu cầu nạp, có hạn và giãn dần. Dừng khi: đạt điều kiện, hết lượt, người dùng rời
+   * trang ví, đăng xuất / đổi tài khoản, hoặc có vòng theo dõi mới/bị dừng — nên không bao giờ thành vòng lặp vô hạn
+   * hay spam API. Huỷ cũng đánh thức lượt chờ đang treo (stopTopupPoll), nên Promise luôn kết thúc.
+   */
+  async function pollPayment(paymentId, until, ctx) {
+    const owner = ctx || topupCtx(null);
+    stopTopupPoll(); // vòng cũ (nếu có) thoát; sau đó lấy số thế hệ của vòng này
+    const gen = state.topupPollGen;
+    const stale = () => gen !== state.topupPollGen || !ctxAlive(owner) || currentHead() !== 'wallet';
+    let last = null;
+    for (const delay of POLL_DELAYS_MS) {
+      await new Promise((resolve) => {
+        state.topupPollWake = resolve;
+        state.topupPoll = setTimeout(() => { state.topupPoll = null; state.topupPollWake = null; resolve(); }, delay);
+      });
+      if (stale()) return { cancelled: true, row: last };
+      try {
+        const row = readPaymentState(await api('/payments/' + encodeURIComponent(paymentId)), { id: paymentId });
+        if (stale()) return { cancelled: true, row: last };
+        if (row) {
+          last = row;
+          if (until(row)) return { done: true, row };
+        }
+      } catch (_) { /* thử lại ở lượt sau */ }
+    }
+    return { done: false, row: last };
+  }
+
+  /** Nút "Kiểm tra trạng thái / Kiểm tra lại". */
+  async function checkTopupStatus(btn) {
+    const intent = loadIntent();
+    const knownId = (btn && btn.dataset && btn.dataset.id) || (intent && intent.paymentId) || null;
+    if (!intent && !knownId) return;
+    const ctx = topupCtx(intent ? intent.requestId : null);
+    const lookup = async () => {
+      try {
+        if (knownId) return await api('/payments/' + encodeURIComponent(knownId));
+        // Chưa biết id (yêu cầu có thể chưa/đã được tạo): tìm theo mã yêu cầu trong danh sách của chính mình.
+        const { paymentRequests } = await api('/payments/me');
+        return (Array.isArray(paymentRequests) ? paymentRequests : []).find((r) => r && r.requestId === intent.requestId) || null;
+      } catch (e) {
+        if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+        throw e;
+      }
+    };
+    let raw;
+    try {
+      raw = await guard('topup-check', btn, lookup);
+    } catch (_) {
+      return; // lỗi đã được báo (hoặc là của phiên cũ, im lặng); giữ nguyên thông báo hiện tại
+    }
+    if (raw === undefined) return; // bấm lặp
+    if (!ctxAlive(ctx)) return;
+    if (raw !== null && (raw.provider === PAYPAL_PROVIDER || (intent && intent.provider === PAYPAL_PROVIDER))) {
+      return finishPaypalCheck(raw, { intent, knownId, ctx });
+    }
+    if (raw === null) {
+      setTopupNotice({ kind: 'notfound' });
+      return;
+    }
+    const row = readPaymentState(raw, {
+      id: knownId || undefined,
+      requestId: intent ? intent.requestId : undefined,
+      amount: intent ? intent.amount : undefined,
+    });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không đầy đủ hoặc không khớp. Hãy thử kiểm tra lại sau ít phút.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    if (row.status === 'PENDING' && row.submissionStatus === 'SUBMITTED' && !intent) {
+      toast('Yêu cầu nạp vẫn đang chờ cổng thanh toán xác nhận. Số dư chưa đổi.');
+      return;
+    }
+    await settleRow(row, { ctx, openOnSubmitted: !!intent, fromGet: true });
+  }
+
+  /** Bắt đầu lần nạp mới: bỏ ý định cũ chưa rõ kết quả. Phải xác nhận vì khoản cũ có thể đã được tạo. */
+  function askNewTopup() {
+    openModal({
+      title: 'Bắt đầu lần nạp mới?',
+      body: `
+        <div class="stack">
+          <div class="note note-warning">${ico('triangle-alert', 18)}<span>Lần nạp trước <b>chưa rõ kết quả</b> và có thể đã được tạo.
+            Nếu bạn bắt đầu lần mới, giao diện sẽ không còn theo dõi lần cũ; nếu cả hai đều được thanh toán ở cổng, ví có thể được nạp hai lần.
+            Hãy bấm "Kiểm tra trạng thái" trước nếu chưa chắc.</span></div>
+        </div>`,
+      footer: `<button class="btn" data-act="modal-close">Giữ lần nạp cũ</button>
+        <button class="btn btn-danger" data-act="topup-new-confirm">Bắt đầu lần nạp mới</button>`,
+    });
+  }
+
+  function confirmNewTopup() {
+    stopTopupPoll();
+    clearIntent();
+    state.topupNotice = null;
+    closeModal();
+    renderTopupIntent();
+    const input = $('#topupAmount');
+    if (input) { input.value = ''; input.focus(); }
+    toast('Đã bỏ lần nạp cũ. Nhập số tiền để bắt đầu lần nạp mới.');
+  }
+
+  // ---------- PayPal Sandbox ----------
+  //
+  // Hợp đồng: HOP-DONG-API-PAYPAL-P2-M2.md. Mọi con số tiền, báo giá, giai đoạn và URL phê duyệt đều do MÁY CHỦ quyết định; giao
+  // diện chỉ hiển thị và KIỂM dữ liệu, không tự tính tỷ giá hay số USD, không tự dựng URL, không tự cộng ví.
+  //
+  // Luồng: tạo yêu cầu (POST /payments/paypal/topup, giữ requestId như P1) -> người dùng bấm "Mở PayPal Sandbox" (mở lại URL bằng
+  // GET .../checkout) -> PayPal đưa về ?paypal=return|cancel&paymentRequestId=<id> -> giao diện GET /payments/:id để xác minh chủ
+  // sở hữu / id / số tiền / requestId / provider -> tự hoàn tất bằng POST .../capture sau return hợp lệ -> luôn GET lại làm chứng cứ.
+  // Query của PayPal (token, PayerID) KHÔNG phải chứng cứ thành công và không dùng làm danh tính hay quyền sở hữu.
+
+  const PAYPAL_APPROVAL_ORIGIN = 'https://www.sandbox.paypal.com';
+  // Từ chối dứt khoát của máy chủ TRƯỚC khi tạo gì: bỏ ý định. Lỗi còn lại (mạng, timeout, 5xx, 429, ...) có thể đã tạo -> giữ ý định.
+  const PAYPAL_DEFINITE_CODES = ['INVALID_AMOUNT', 'AMOUNT_OUT_OF_RANGE', 'VALIDATION_ERROR', 'TOPUP_LIMIT_EXCEEDED',
+    'WALLET_NOT_FOUND', 'FORBIDDEN', 'PAYPAL_DISABLED'];
+  const PAYPAL_STOP_CODES = ['PAYPAL_CREATE_RECOVERY_REQUIRED', 'PAYPAL_ORDER_MISMATCH', 'PAYPAL_CAPTURE_CONFLICT'];
+  const PAYPAL_OUTCOME_HINT = {
+    APPLIED: 'Máy chủ báo đã áp dụng — đang xác minh lại trạng thái.',
+    DUPLICATE: 'Yêu cầu này đã được xử lý trước đó — đang xác minh lại trạng thái.',
+    BUSY: 'Máy chủ đang xử lý một xác nhận khác cho yêu cầu này. Hãy chờ rồi kiểm tra lại.',
+    NOT_READY: 'PayPal chưa ghi nhận phê duyệt. Hãy hoàn tất phê duyệt ở PayPal Sandbox rồi quay lại.',
+    CLOSED: 'Yêu cầu này đã đóng.',
+    NOT_CAPTURED: 'Không thu tiền cho yêu cầu này.',
+    RECOVERY_REQUIRED: 'Cần xử lý thủ công; giao diện không tự cộng ví.',
+    RECONCILING: 'Chưa rõ kết quả; hệ thống đang đối soát.',
+    AWAITING_APPROVAL: 'Vẫn chờ phê duyệt ở PayPal Sandbox.',
+  };
+
+  /** Điều hướng sang URL đã kiểm. window.ENCLAVE_NAVIGATE chỉ để bộ kiểm thử UI chặn điều hướng thật. */
+  function goTo(url) {
+    if (typeof window.ENCLAVE_NAVIGATE === 'function') return window.ENCLAVE_NAVIGATE(url);
+    window.location.assign(url);
+  }
+
+  /** Chỉ chấp nhận URL https, ĐÚNG origin Sandbox, không username/password. Không domain gần giống, không javascript:. */
+  function validApprovalUrl(raw) {
+    if (typeof raw !== 'string' || !raw || raw.length > 2000 || /[\s\\]/.test(raw)) return null;
+    let u;
+    try { u = new URL(raw); } catch (_) { return null; }
+    if (u.protocol !== 'https:' || u.origin !== PAYPAL_APPROVAL_ORIGIN) return null;
+    if (u.username || u.password || u.port) return null;
+    return u.href;
+  }
+
+  /** Cấu hình công khai. Thiếu/lỗi/sai dạng thì TẮT PayPal; chỉ mở mô phỏng khi máy chủ nói mockPayments.enabled=true. */
+  function readPayConfig(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+    const pp = raw.paypalSandbox;
+    const mk = raw.mockPayments;
+    if (!pp || typeof pp !== 'object' || typeof pp.enabled !== 'boolean') return null;
+    if (!mk || typeof mk !== 'object' || typeof mk.enabled !== 'boolean') return null;
+    return { paypal: pp.enabled === true && pp.mode === 'sandbox', mock: mk.enabled === true, state: 'ok' };
+  }
+
+  async function loadPayConfig() {
+    try {
+      const cfg = readPayConfig(await api('/payments/paypal/config'));
+      state.payConfig = cfg || { paypal: false, mock: false, state: 'invalid' };
+    } catch (e) {
+      if (e && e.stale) return state.payConfig || { paypal: false, mock: false, state: 'error' };
+      // Không có cấu hình xác nhận: giữ cả hai cổng tắt, kể cả HTTP 404.
+      state.payConfig = { paypal: false, mock: false, state: 'error' };
+    }
+    return state.payConfig;
+  }
+
+  function walletTopupCard(cfg) {
+    if (cfg.paypal) return paypalTopupCard();
+    if (cfg.mock) return topupCard();
+    const msg = cfg.state === 'ok'
+      ? 'Hiện chưa có cổng nạp tiền nào được bật. Giao diện không tự chuyển sang cổng khác.'
+      : 'Chưa tải được cấu hình nạp tiền từ máy chủ nên chưa mở cổng nào. Giao diện không đoán cổng nào đang bật.';
+    return `
+      <div class="card">
+        <div class="card-head"><h2>Nạp tiền vào ví</h2></div>
+        <div class="card-body stack">
+          <div class="note note-warning">${ico('triangle-alert', 18)}<span><b>Nạp tiền chưa sẵn sàng.</b> ${msg}</span></div>
+          <div id="topupIntent" aria-live="polite"></div>
+          ${cfg.state === 'ok' ? '' : '<div><button class="btn" data-act="paypal-config-retry">Tải lại cấu hình</button></div>'}
+        </div>
+      </div>`;
+  }
+
+  function paypalTopupCard() {
+    return `
+      <div class="card">
+        <div class="card-head"><h2>Nạp tiền vào ví</h2><span class="tag tag-info">${ico('shield-check', 12)} PayPal Sandbox</span></div>
+        <div class="card-body stack">
+          <div class="field">
+            <label for="topupAmount">Số tiền ghi vào ví (VND)</label>
+            <div class="chips">${TOPUP_PRESETS.map((v) =>
+              `<button class="chip" data-act="topup-preset" data-v="${v}">${money(v)}</button>`).join('')}</div>
+            <input id="topupAmount" type="number" min="1000" step="1000" placeholder="Hoặc nhập số tiền khác...">
+          </div>
+          <div id="topupIntent" aria-live="polite"></div>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Đây là <b>PayPal Sandbox</b> (môi trường thử): dùng tài khoản Sandbox, không chuyển tiền thật. Sau khi tạo yêu cầu,
+              <b>máy chủ</b> chốt số VND ghi vào ví và số USD Sandbox phải trả theo tỷ giá mô phỏng; giao diện không tự tính.</span>
+          </div>
+          <div class="note">
+            ${ico('info', 18)}
+            <span>Số dư chỉ tăng khi <b>máy chủ xác nhận</b> đã thu tiền. Quay lại từ PayPal, đóng cửa sổ hay huỷ không làm tăng số dư và
+              cũng không làm yêu cầu thất bại. Ví, ký quỹ, hoàn tiền và giải ngân tranh chấp vẫn tính bằng VND trong ví nội bộ; hệ thống
+              không hoàn tiền hay chi tiền qua PayPal.</span>
+          </div>
+          <div><button class="btn btn-primary btn-lg" data-act="topup-create">${ico('wallet', 18)} Tạo yêu cầu nạp PayPal</button></div>
+        </div>
+      </div>`;
+  }
+
+  /** Báo giá do máy chủ chốt. Chỉ KIỂM nhất quán (không dùng để tính số hiển thị): usdValue là chuỗi của máy chủ. */
+  function validQuote(q, amount) {
+    if (!q || typeof q !== 'object' || Array.isArray(q)) return false;
+    if (q.currency !== 'USD' || q.amountVnd !== amount) return false;
+    if (!Number.isSafeInteger(q.usdCents) || q.usdCents <= 0) return false;
+    if (typeof q.usdValue !== 'string' || !/^\d{1,9}\.\d{2}$/.test(q.usdValue)) return false;
+    if (q.usdValue.replace('.', '').replace(/^0+(?=\d)/, '') !== String(q.usdCents)) return false;
+    if (!Number.isSafeInteger(q.rateVndPerUsd) || q.rateVndPerUsd <= 0 || q.rateKind !== 'DEMO_FIXED') return false;
+    return typeof q.rateLabel === 'string' && !!q.rateLabel.trim() && q.rateLabel.length <= 200;
+  }
+
+  /**
+   * Một dòng yêu cầu PayPal Sandbox đọc từ máy chủ có đủ và đúng dữ liệu để dựa vào không? Kiểm id / số tiền / requestId / provider
+   * khớp yêu cầu đang theo dõi (khi biết), báo giá hợp lệ, giai đoạn thuộc bộ đã biết, và status SUCCEEDED <=> stage SUCCEEDED.
+   * Trả về dòng hoặc null.
+   */
+  function readPaypalRow(r, expect) {
+    if (!r || typeof r !== 'object' || Array.isArray(r)) return null;
+    if (typeof r.id !== 'string' || !r.id || r.provider !== PAYPAL_PROVIDER || r.sandbox !== true) return null;
+    if (!PAYMENT_STATUSES.includes(r.status) || !PAYPAL_STAGES.includes(r.stage)) return null;
+    if (!Number.isSafeInteger(r.amount) || r.amount <= 0 || typeof r.requestId !== 'string' || !REQUEST_ID_RE.test(r.requestId)) return null;
+    if (!SUBMISSION_STATUSES.includes(r.submissionStatus) || !validQuote(r.quote, r.amount)) return null;
+    if ((r.status === 'SUCCEEDED') !== (r.stage === 'SUCCEEDED')) return null;
+    if (expect && expect.id !== undefined && r.id !== expect.id) return null;
+    if (expect && expect.amount !== undefined && r.amount !== expect.amount) return null;
+    if (expect && expect.requestId !== undefined && r.requestId !== expect.requestId) return null;
+    return r;
+  }
+
+  function paypalMatchesIntent(row, intent) {
+    return !!intent && intent.provider === PAYPAL_PROVIDER && row.requestId === intent.requestId && row.amount === intent.amount
+      && (!intent.paymentId || intent.paymentId === row.id);
+  }
+
+  function paypalHistoryAction(p) {
+    if (!PAYPAL_STAGES.includes(p.stage)) return '';
+    const id = esc(p.id);
+    switch (p.stage) {
+      case 'AWAITING_APPROVAL': return `<button class="btn btn-sm" data-act="paypal-approve" data-id="${id}">Mở PayPal Sandbox</button>` + paypalAbandonButton(p);
+      case 'CREATING': case 'CAPTURING': case 'RECONCILING':
+        return `<button class="btn btn-sm" data-act="topup-check" data-id="${id}">Kiểm tra</button>`;
+      case 'CREATE_RECOVERY_REQUIRED': case 'RECOVERY_REQUIRED':
+        return `<span class="muted small">Cần hỗ trợ — mã tham chiếu ${esc(shortId(p.id))}</span>`;
+      default: return '';
+    }
+  }
+
+  /** Khung thông báo PayPal theo giai đoạn. Chỉ có nút ĐÚNG với giai đoạn đó (ví dụ chỉ AWAITING_APPROVAL mới có nút xác nhận). */
+  function paypalNoticeHtml(notice, intent) {
+    const r = notice.row;
+    const q = r.quote;
+    const id = esc(r.id);
+    const ref = shortId(r.id);
+    const ui = PAYPAL_STAGE_UI[r.stage];
+    const quote = `
+      <span class="price-row"><span>Ghi vào ví (VND)</span><span class="val">${money(r.amount)}</span></span>
+      <span class="price-row"><span>PayPal Sandbox thu (USD)</span><span class="val">${esc(q.usdValue)} USD</span></span>
+      <span class="muted small">${esc(q.rateLabel)} — ${Number(q.rateVndPerUsd).toLocaleString('vi-VN')} VND/USD, do máy chủ chốt; giao diện không tính lại.</span>`;
+    const hint = notice.extra && notice.extra.outcome && PAYPAL_OUTCOME_HINT[notice.extra.outcome]
+      ? `<br><span class="small">${esc(PAYPAL_OUTCOME_HINT[notice.extra.outcome])}</span>` : '';
+    const timed = notice.timedOut ? '<br><span class="small">Chưa có kết quả mới sau thời gian theo dõi — bấm "Kiểm tra lại".</span>' : '';
+    const check = `<button class="btn btn-sm" data-act="topup-check" data-id="${id}">Kiểm tra lại</button>`;
+    const dismiss = '<button class="btn btn-sm btn-ghost" data-act="topup-dismiss">Đã hiểu</button>';
+    const fresh = '<button class="btn btn-sm btn-ghost" data-act="topup-new">Bắt đầu lần nạp mới</button>';
+    const wrap = (tone, icon, text, buttons) =>
+      `<div class="note ${tone}">${ico(icon, 18)}<span>${text}${hint}${timed}${buttons ? `<span class="row mt-2px">${buttons}</span>` : ''}</span></div>`;
+
+    switch (r.stage) {
+      case 'CREATING':
+        return wrap('note-warning', 'loader-circle',
+          `<b>Đang tạo yêu cầu PayPal Sandbox cho khoản nạp ${money(r.amount)}…</b> Chưa có order. Có thể kiểm tra lại, hoặc thử lại cùng yêu cầu (cùng mã, không tạo trùng).`,
+          check + '<button class="btn btn-sm btn-primary" data-act="topup-retry">Thử lại cùng yêu cầu</button>');
+      case 'AWAITING_APPROVAL': {
+        const note = notice.unverified
+          ? '<b>Yêu cầu này không khớp với ý định nạp lưu trên thiết bị này</b> nên không cho xác nhận thu tiền ở đây; chỉ hiển thị trạng thái.'
+          : notice.returned
+            ? '<b>Đang kiểm tra kết quả thanh toán PayPal.</b> Số dư chỉ tăng khi máy chủ xác nhận đã thu tiền.'
+            : notice.cancelled
+              ? '<b>Bạn đã quay lại mà chưa hoàn tất phê duyệt.</b> Huỷ hay đóng cửa sổ không làm yêu cầu thất bại; yêu cầu vẫn mở và chưa thu tiền.'
+              : '<b>Chờ bạn phê duyệt ở PayPal Sandbox.</b> Số dư chỉ tăng sau khi bạn phê duyệt và máy chủ xác nhận.';
+        return wrap('', 'shield-check', `${note}${quote}`,
+          `<button class="btn btn-sm btn-primary" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
+          + check + paypalAbandonButton(r));
+      }
+      case 'CAPTURING':
+        return wrap('note-warning', 'loader-circle',
+          `<b>Đang xác nhận thanh toán với PayPal…</b> Đừng thao tác lặp; chưa phải thành công cũng chưa phải thất bại.${quote}`, check);
+      case 'RECONCILING':
+        return wrap('note-warning', 'clock',
+          `<b>Chưa rõ kết quả thanh toán; hệ thống đang đối soát.</b> Đây không phải thất bại và cũng chưa phải thành công; số dư chưa đổi.${quote}`, check);
+      case 'CREATE_RECOVERY_REQUIRED':
+        return wrap('note-warning', 'triangle-alert',
+          `<b>Chưa tạo được order PayPal và hệ thống KHÔNG tự tạo order mới.</b> Cần hỗ trợ đối soát — hãy gửi mã tham chiếu <b>${esc(ref)}</b>.`,
+          (intent ? fresh : '') + dismiss);
+      case 'RECOVERY_REQUIRED':
+        return wrap('note-warning', 'triangle-alert',
+          `<b>Có bằng chứng thu tiền nhưng yêu cầu đã đóng — cần xử lý thủ công.</b> Giao diện không tự cộng ví. Mã tham chiếu <b>${esc(ref)}</b>.`, dismiss);
+      case 'NOT_CAPTURED':
+        return wrap('', 'info', '<b>Không tiếp tục thu tiền cho yêu cầu này.</b> Ví không đổi. (Đóng hay huỷ cửa sổ PayPal không tự là trạng thái này.)', dismiss);
+      default: // FAILED
+        return wrap('note-warning', 'triangle-alert', `<b>${esc(ui.label)}:</b> yêu cầu nạp đã đóng; ví không đổi.`, dismiss);
+    }
+  }
+
+  /** Xác nhận SUCCEEDED bằng GET /payments/:id khớp id / số tiền / requestId / provider. Lỗi hay không khớp -> null. */
+  async function confirmPaypalByGet(row, ctx) {
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(row.id)); } catch (_) { return null; }
+    if (!ctxAlive(ctx)) return null;
+    return readPaypalRow(raw, { id: row.id, amount: row.amount, requestId: row.requestId });
+  }
+
+  /**
+   * Xử lý một dòng PayPal. `fromGet`: dòng đã được đọc bằng GET (theo dõi / kiểm tra / return) hay là phản hồi POST tạo yêu cầu.
+   * SUCCEEDED chỉ được báo khi GET khớp nói SUCCEEDED. Mọi giai đoạn khác hiển thị đúng như máy chủ nói; không giả thành công/thất bại.
+   */
+  async function settlePaypalRow(row, { ctx, fromGet, returned, cancelled, unverified, extra }) {
+    if (!ctxAlive(ctx)) return;
+    const intent = ctx.requestId && !ctx.released ? loadIntent() : null;
+    // Chỉ GHI NHỚ id yêu cầu khi ý định chưa có id và dòng đúng là của ý định này. Không bao giờ ghi đè id đã có:
+    // một lần quay lại mang id lạ không được tự biến thành "khớp ý định".
+    if (intent && !intent.paymentId && row.id && row.requestId === intent.requestId && row.amount === intent.amount) {
+      saveIntent({ ...intent, paymentId: row.id });
+    }
+
+    if (row.stage === 'SUCCEEDED') {
+      const confirmed = fromGet ? row : await confirmPaypalByGet(row, ctx);
+      if (!ctxAlive(ctx)) return;
+      if (!confirmed || confirmed.stage !== 'SUCCEEDED') {
+        setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+        toast('Chưa xác nhận được kết quả nạp tiền từ máy chủ. Hãy bấm "Kiểm tra lại".');
+        return;
+      }
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      setTopupNotice(null);
+      toast(`Nạp tiền thành công: ${money(confirmed.amount)} đã vào ví (PayPal Sandbox ${confirmed.quote.usdValue} USD).`, 'ok');
+      await refreshWallet();
+      if (!ctxAlive(ctx)) return;
+      if (currentHead() === 'wallet') route(); else renderChrome();
+      return;
+    }
+
+    setTopupNotice({ kind: 'paypal', row, returned, cancelled, unverified, extra });
+    // Yêu cầu đã đóng ở máy chủ: mở khoá số tiền để người dùng nạp tiếp (thông báo vẫn còn). Giai đoạn còn mở thì giữ ý định.
+    if (['FAILED', 'NOT_CAPTURED', 'RECOVERY_REQUIRED'].includes(row.stage)) {
+      if (ctx.requestId && !ctx.released) { releaseIntent(ctx); renderTopupIntent(); }
+      if (row.stage === 'FAILED') toast('Yêu cầu nạp PayPal đã đóng. Ví của bạn không thay đổi.', 'err');
+      return;
+    }
+    if (['CREATING', 'CAPTURING', 'RECONCILING'].includes(row.stage)) {
+      const res = await pollPayment(row.id, (r) => !['CREATING', 'CAPTURING', 'RECONCILING'].includes(r.stage), ctx);
+      if (res.cancelled || !ctxAlive(ctx)) return;
+      const fresh = res.row ? readPaypalRow(res.row, { id: row.id, amount: row.amount, requestId: row.requestId }) : null;
+      if (res.done && fresh) return settlePaypalRow(fresh, { ctx, fromGet: true });
+      setTopupNotice({ kind: 'paypal', row: fresh || row, timedOut: true });
+    }
+  }
+
+  /** Tạo yêu cầu nạp PayPal Sandbox. requestId/số tiền của ý định được giữ qua retry, tải lại, 5xx, timeout. */
+  async function createPaypalTopup(btn) {
+    let intent = loadIntent();
+    if (!intent) {
+      const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
+      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      intent = startIntent(amount, PAYPAL_PROVIDER); // lưu TRƯỚC khi gửi
+    }
+    const ctx = topupCtx(intent.requestId);
+    let raw;
+    try {
+      raw = await guard('topup-create', btn, async () => {
+        try {
+          return await api('/payments/paypal/topup', { method: 'POST', body: { amount: intent.amount, requestId: intent.requestId } });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
+      const code = e && e.code;
+      if (PAYPAL_DEFINITE_CODES.includes(code)) {
+        releaseIntent(ctx);
+        setTopupNotice(null);
+        if (code === 'PAYPAL_DISABLED') { // cấu hình đã đổi: không tự chuyển sang cổng khác, vẽ lại theo cấu hình mới
+          state.payConfig = { paypal: false, mock: false, state: 'ok' };
+          if (currentHead() === 'wallet') route();
+        }
+      } else if (PAYPAL_STOP_CODES.includes(code)) {
+        setTopupNotice({ kind: 'paypal-stop', code }); // dừng tự động; giữ ý định để kiểm tra
+      } else {
+        setTopupNotice({ kind: 'unknown' }); // mạng/timeout/5xx/429/...: có thể đã tạo -> giữ ý định, cùng khoá
+        if (e && e.unknownOutcome) await loadTopupHistory().catch(() => {});
+      }
+      return;
+    }
+    if (raw === undefined) return; // bấm lặp
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { amount: intent.amount, requestId: intent.requestId });
+    if (!row) {
+      setTopupNotice({ kind: 'unknown' });
+      toast('Máy chủ trả về dữ liệu PayPal không đầy đủ hoặc không khớp nên chưa rõ yêu cầu nạp đã được tạo hay chưa. Hãy bấm "Kiểm tra trạng thái".', 'err');
+      await loadTopupHistory().catch(() => {});
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: false });
+    if (ctxAlive(ctx) && row.stage === 'AWAITING_APPROVAL') {
+      await openPaypalApproval({ dataset: { id: row.id } });
+    }
+  }
+
+  /** "Mở PayPal Sandbox": lấy URL mới bằng GET .../checkout, kiểm chặt rồi mới điều hướng. Không bao giờ tự dựng URL. */
+  async function openPaypalApproval(btn) {
+    const intent = loadIntent();
+    const mine = intent && intent.provider === PAYPAL_PROVIDER ? intent : null;
+    const id = (btn && btn.dataset && btn.dataset.id) || (mine && mine.paymentId) || null;
+    if (!id) return;
+    const ctx = topupCtx(mine ? mine.requestId : null);
+    let raw;
+    try {
+      raw = await guard('paypal-approve', btn, async () => {
+        try {
+          return await api('/payments/paypal/' + encodeURIComponent(id) + '/checkout');
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (_) {
+      return; // lỗi đã được báo (hoặc của phiên cũ, im lặng)
+    }
+    if (raw === undefined || !ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id, requestId: mine ? mine.requestId : undefined, amount: mine ? mine.amount : undefined });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không hợp lệ nên chưa mở PayPal. Hãy bấm "Kiểm tra lại".', 'err');
+      return;
+    }
+    if (row.stage !== 'AWAITING_APPROVAL') {
+      await settlePaypalRow(row, { ctx, fromGet: true });
+      return;
+    }
+    const url = validApprovalUrl(row.approvalUrl);
+    if (!url) {
+      toast('PayPal trả về địa chỉ phê duyệt không hợp lệ nên chưa mở. Hãy thử lại sau hoặc liên hệ hỗ trợ.', 'err');
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    try { sessionStorage.setItem('cat_paypal_departure', JSON.stringify({ userId: state.user.id, id: row.id, requestId: row.requestId, amount: row.amount })); } catch (_) {}
+    goTo(url);
+  }
+
+  // Browser Back không phải return phê duyệt: chỉ đọc trạng thái và cho tiếp tục/huỷ.
+  async function resumePaypalAfterBack() {
+    let saved;
+    try { saved = JSON.parse(sessionStorage.getItem('cat_paypal_departure') || 'null'); } catch (_) { return; }
+    const intent = loadIntent();
+    if (!saved || !state.user || saved.userId !== state.user.id || !intent || intent.provider !== PAYPAL_PROVIDER
+      || saved.id !== intent.paymentId || saved.requestId !== intent.requestId || saved.amount !== intent.amount) return;
+    const ctx = topupCtx(intent.requestId);
+    try { sessionStorage.removeItem('cat_paypal_departure'); } catch (_) {}
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(saved.id)); } catch (_) {
+      if (ctxAlive(ctx)) setTopupNotice({ kind: 'unconfirmed', paymentId: saved.id });
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id: saved.id, requestId: intent.requestId, amount: intent.amount });
+    if (!row) return setTopupNotice({ kind: 'unconfirmed', paymentId: saved.id });
+    await settlePaypalRow(row, { ctx, fromGet: true, cancelled: true });
+  }
+
+  function paypalAbandonButton(row) {
+    if (row.status !== 'PENDING' || row.stage !== 'AWAITING_APPROVAL' || !row.orderId) return '';
+    return `<button class="btn btn-sm btn-ghost" data-act="paypal-abandon" data-id="${esc(row.id)}" data-request-id="${esc(row.requestId)}" data-amount="${esc(row.amount)}">Huỷ yêu cầu nạp</button>`;
+  }
+
+  async function openPaypalAbandon(btn) {
+    const id = btn && btn.dataset.id;
+    const expected = { id, requestId: btn && btn.dataset.requestId, amount: Number(btn && btn.dataset.amount) };
+    if (!id || !expected.requestId || !Number.isSafeInteger(expected.amount)) return;
+    const intent = loadIntent();
+    const matched = intent && intent.provider === PAYPAL_PROVIDER && intent.paymentId === id
+      && intent.requestId === expected.requestId && intent.amount === expected.amount;
+    const ctx = topupCtx(matched ? intent.requestId : null);
+    let raw;
+    try { raw = await guard('paypal-abandon-open', btn, () => api('/payments/' + encodeURIComponent(id))); }
+    catch (_) { return; }
+    if (raw === undefined || !ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, expected);
+    if (!row) { toast('Chưa xác nhận được yêu cầu nạp. Hãy kiểm tra lại trạng thái.', 'err'); return; }
+    if (row.status !== 'PENDING' || row.stage !== 'AWAITING_APPROVAL' || !row.orderId) {
+      setTopupNotice({ kind: 'paypal', row });
+      toast('Trạng thái đã thay đổi; chưa thể bỏ yêu cầu này.');
+      return;
+    }
+    stopTopupPoll();
+    openModal({ title: 'Bỏ yêu cầu nạp PayPal?', body: `<p>Bạn muốn bỏ yêu cầu nạp <b>${money(row.amount)}</b> này?</p>
+      <p>Máy chủ chỉ đóng khi xác nhận chưa gửi lệnh thu tiền. Đây không phải hoàn tiền và không huỷ order tại PayPal.</p>
+      <p>Nếu đã thu tiền hoặc chưa rõ kết quả, yêu cầu sẽ được giữ để đối soát. Đóng cửa sổ PayPal không tự bỏ yêu cầu.</p>`,
+      footer: '<button class="btn" data-act="modal-close">Giữ yêu cầu</button><button class="btn btn-primary" data-act="paypal-abandon-confirm">Xác nhận bỏ yêu cầu</button>' });
+    state.paypalAbandonConfirmation = { ctx, row };
+  }
+
+  async function confirmPaypalAbandon(btn) {
+    const pending = state.paypalAbandonConfirmation;
+    if (!pending || !ctxAlive(pending.ctx) || state.busy.has('paypal-abandon')) return;
+    const { ctx, row } = pending;
+    closeModal();
+    let body = null;
+    try {
+      body = await guard('paypal-abandon', btn, () => api('/payments/paypal/' + encodeURIComponent(row.id) + '/abandon',
+        { method: 'POST', body: {}, allowAuthRetry: false }));
+    } catch (e) { if ((e && e.stale) || !ctxAlive(ctx)) return; }
+    if (!ctxAlive(ctx)) return;
+    // POST (including 409/timeout) is never proof of the final state. Do not retry it automatically.
+    const fresh = await confirmPaypalByGet(row, ctx);
+    if (!ctxAlive(ctx)) return;
+    if (!fresh) {
+      setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
+      toast('Chưa xác nhận được kết quả bỏ yêu cầu. Hãy kiểm tra lại trạng thái.');
+      return;
+    }
+    if (fresh.stage === 'SUCCEEDED') {
+      await settlePaypalRow(fresh, { ctx, fromGet: true });
+      return;
+    }
+    // Recovery evidence wins over FAILED. Keep the intent and never report an abandoned outcome for it.
+    setTopupNotice({ kind: 'paypal', row: fresh });
+    if (fresh.status === 'FAILED' && fresh.stage === 'FAILED') {
+      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
+      renderTopupIntent();
+      const confirmed = readPaypalRow(body, { id: row.id, requestId: row.requestId, amount: row.amount });
+      const abandoned = confirmed && confirmed.status === 'FAILED' && confirmed.stage === 'FAILED'
+        && ['ABANDONED', 'ALREADY_ABANDONED'].includes(body.outcome);
+      toast(abandoned ? 'Đã bỏ yêu cầu nạp. Ví không đổi; lần nạp mới sẽ dùng mã mới.' : 'Yêu cầu nạp đã đóng theo trạng thái máy chủ.');
+    }
+    await loadTopupHistory().catch(() => {});
+  }
+
+  /** Tự hoàn tất một lần sau return đã xác minh. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
+  async function capturePaypal(btn, expectedCtx) {
+    const intent = loadIntent();
+    const id = (btn && btn.dataset && btn.dataset.id) || (intent && intent.paymentId) || null;
+    if (!intent || intent.provider !== PAYPAL_PROVIDER || !id) return;
+    const ctx = expectedCtx || topupCtx(intent.requestId);
+    if (!ctxAlive(ctx) || intent.paymentId !== id) return;
+    let body;
+    try {
+      body = await guard('paypal-capture', btn, async () => {
+        try {
+          return await api('/payments/paypal/' + encodeURIComponent(id) + '/capture', { method: 'POST' });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
+      // Timeout / mất kết nối / 429 / 5xx / CLAIM_LOST / CONFLICT: kết quả có thể chưa rõ. KHÔNG gửi lại POST; hỏi trạng thái.
+      await refreshPaypalState(id, ctx, { stop: PAYPAL_STOP_CODES.includes(e && e.code) ? e.code : null });
+      return;
+    }
+    if (body === undefined || !ctxAlive(ctx)) return; // bấm lặp
+    const outcome = body && typeof body === 'object' && typeof body.outcome === 'string' ? body.outcome : null;
+    await refreshPaypalState(id, ctx, { outcome });
+  }
+
+  /** GET /payments/:id (chứng cứ) rồi hiển thị đúng giai đoạn. GET lỗi/không khớp -> "chưa xác nhận", không suy ra thành công/thất bại. */
+  async function refreshPaypalState(id, ctx, { outcome, stop } = {}) {
+    const intent = loadIntent();
+    let raw;
+    try { raw = await api('/payments/' + encodeURIComponent(id)); } catch (_) { raw = null; }
+    if (!ctxAlive(ctx)) return;
+    const row = raw ? readPaypalRow(raw, { id, requestId: intent ? intent.requestId : undefined, amount: intent ? intent.amount : undefined }) : null;
+    if (!row) {
+      if (stop) setTopupNotice({ kind: 'paypal-stop', code: stop });
+      else setTopupNotice({ kind: 'unconfirmed', paymentId: id });
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: true, extra: outcome ? { outcome } : null });
+  }
+
+  /** "Kiểm tra trạng thái / Kiểm tra lại" cho dòng PayPal (đã lấy bằng GET /payments/:id hoặc từ danh sách). */
+  async function finishPaypalCheck(raw, { intent, knownId, ctx }) {
+    const row = readPaypalRow(raw, {
+      id: knownId || undefined,
+      requestId: intent ? intent.requestId : undefined,
+      amount: intent ? intent.amount : undefined,
+    });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu PayPal không đầy đủ hoặc không khớp. Hãy thử kiểm tra lại sau ít phút.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    await settlePaypalRow(row, { ctx, fromGet: true });
+  }
+
+  /** URL ?paypal=return|cancel&paymentRequestId=<id>: chỉ lấy loại và id, rồi dọn query. token/PayerID không phải chứng cứ. */
+  function readPaypalCallbackFromUrl() {
+    let kind;
+    let id;
+    try {
+      const q = new URLSearchParams(window.location.search || '');
+      kind = q.get('paypal');
+      id = q.get('paymentRequestId');
+      if (q.has('paypal') || q.has('paymentRequestId')) {
+        // Dọn query khỏi thanh địa chỉ: tải lại trang không xử lý lại, và token/PayerID không nằm lại trong lịch sử.
+        window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+      }
+    } catch (_) { return null; }
+    if ((kind !== 'return' && kind !== 'cancel') || !/^[A-Za-z0-9-]{8,64}$/.test(id || '')) return null;
+    return { kind, id };
+  }
+
+  /**
+   * Xử lý lần quay lại từ PayPal (một lần). Return/cancel đều chỉ GET trạng thái để xác minh chủ sở hữu / id / số tiền / requestId /
+   * provider; cancel không capture, không đánh FAILED, không tạo yêu cầu mới. Return tự hoàn tất (capture) chỉ
+   * khi dữ liệu khớp ý định lưu trên thiết bị này.
+   */
+  async function processPaypalCallback() {
+    const cb = state.paypalCallback;
+    if (!cb || !state.user || !state.token) return;
+    state.paypalCallback = null; // dùng một lần
+    try { sessionStorage.removeItem('cat_paypal_departure'); } catch (_) {}
+    const intent = loadIntent();
+    const mine = intent && intent.provider === PAYPAL_PROVIDER ? intent : null;
+    const ctx = topupCtx(mine ? mine.requestId : null);
+    let raw;
+    try {
+      raw = await api('/payments/' + encodeURIComponent(cb.id));
+    } catch (e) {
+      if (e && e.stale) return;
+      if (ctxAlive(ctx)) toast(e && e.message ? e.message : 'Không kiểm tra được yêu cầu nạp vừa quay lại từ PayPal.', 'err');
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
+    const row = readPaypalRow(raw, { id: cb.id });
+    if (!row) {
+      toast('Máy chủ trả về dữ liệu không khớp với lần quay lại từ PayPal nên không xử lý. Hãy xem Lịch sử nạp tiền.', 'err');
+      return;
+    }
+    await loadTopupHistory().catch(() => {});
+    if (!ctxAlive(ctx)) return;
+    const matched = paypalMatchesIntent(row, mine);
+    // Query chỉ chọn yêu cầu; quyền, trạng thái phê duyệt và số tiền vẫn do server xác minh.
+    // Cancel, ý định không khớp và kết quả đã kết thúc tuyệt đối không phát capture.
+    if (cb.kind === 'return' && matched && row.status === 'PENDING' && row.stage === 'AWAITING_APPROVAL') {
+      if (!mine.paymentId) saveIntent({ ...mine, paymentId: row.id });
+      setTopupNotice({ kind: 'paypal', row: { ...row, stage: 'CAPTURING' } });
+      await capturePaypal({ dataset: { id: row.id } }, ctx);
+      return;
+    }
+    await settlePaypalRow(row, {
+      ctx, fromGet: true, returned: cb.kind === 'return', cancelled: cb.kind === 'cancel', unverified: !matched,
+    });
+  }
+
+  async function openCheckout(paymentRequestId, providerRef, ctx) {
+    const owner = ctx || topupCtx(null); // mở từ lịch sử: chỉ ràng buộc phiên
+    if (!ctxAlive(owner)) return;
+    if (typeof paymentRequestId !== 'string' || !paymentRequestId || typeof providerRef !== 'string' || !providerRef) {
+      return toast('Thiếu mã yêu cầu hoặc mã giao dịch tại cổng nên chưa mở cổng thanh toán.', 'err');
+    }
     let page;
     try {
       page = await providerApi('/checkout/' + encodeURIComponent(providerRef));
     } catch (e) {
+      if (!ctxAlive(owner)) return;
       return toast(e.code === 'NOT_FOUND' ? 'Cổng thanh toán mô phỏng đang tắt (MOCK_PROVIDER_CHECKOUT=0).' : e.message, 'err');
     }
+    if (!ctxAlive(owner)) return; // đăng xuất / đổi tài khoản trong lúc chờ cổng trả lời: không mở modal cho phiên mới
+    if (!page || typeof page.providerRef !== 'string' || !Number.isSafeInteger(page.amount) || typeof page.status !== 'string') {
+      return toast('Cổng thanh toán trả về dữ liệu không hợp lệ nên chưa mở cổng. Hãy kiểm tra lại trạng thái.', 'err');
+    }
     const settled = page.status !== 'PENDING';
-    const m = PAY_METHODS.find((x) => x.key === (state.topupMethod || 'CARD')) || PAY_METHODS[0];
     openModal({
       title: 'Cổng thanh toán (mô phỏng)',
       body: `
@@ -2300,7 +3528,7 @@ const App = (() => {
           <span>Đây là trang của <b>cổng thanh toán</b>, không phải của sàn. Trong demo, bạn chọn kết quả thanh toán;
             cổng sẽ gửi webhook đã ký về máy chủ của sàn.</span>
         </div>
-        <div class="price-row"><span>Phương thức</span><span>${ico(m.icon, 16)} ${esc(m.label)}</span></div>
+        <div class="price-row"><span>Phương thức</span><span>${ico('shield-check', 16)} Thanh toán mô phỏng</span></div>
         <div class="price-row"><span>Mã giao dịch tại cổng</span><span class="mono">${esc(shortId(page.providerRef))}</span></div>
         <div class="price-row total"><span>Số tiền thanh toán</span><span class="val">${money(page.amount)}</span></div>
         ${settled ? `<div class="note note-success mt-4">${ico('circle-check', 18)}<span>Cổng thanh toán
@@ -2322,29 +3550,50 @@ const App = (() => {
   async function payCheckout(el) {
     const { id, ref, outcome } = el.dataset;
     const deliverWebhook = el.dataset.deliver === '1';
-    await guard('checkout:' + ref, el, () => providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, {
-      method: 'POST', body: { outcome, deliverWebhook },
-    }));
+    const ctx = topupCtx(null);
+    try {
+      await guard('checkout:' + ref, el, async () => {
+        try {
+          return await providerApi(`/checkout/${encodeURIComponent(ref)}/pay`, { method: 'POST', body: { outcome, deliverWebhook } });
+        } catch (e) {
+          if (!ctxAlive(ctx) && !(e && e.code === 'UNAUTHENTICATED')) throw staleError();
+          throw e;
+        }
+      });
+    } catch (e) {
+      if ((e && e.stale) || !ctxAlive(ctx)) return;
+      // Mất kết nối giữa chừng: cổng có thể đã ghi nhận. Hỏi lại máy chủ — không coi là thất bại, không coi là thành công.
+      if (e && e.unknownOutcome) {
+        closeModal();
+        await waitForTopupResult(id);
+      }
+      return;
+    }
+    if (!ctxAlive(ctx)) return;
     closeModal();
     await waitForTopupResult(id);
   }
 
-  /** Hỏi máy chủ trạng thái yêu cầu nạp tiền trong vài giây. Không tự đoán kết quả. */
+  /** Hỏi máy chủ trạng thái yêu cầu nạp tiền sau khi thanh toán ở cổng. Có hạn, giãn dần; không tự đoán kết quả. */
   async function waitForTopupResult(paymentRequestId) {
+    const ctx = topupCtx(null);
     toast('Đang xử lý — chờ cổng thanh toán xác nhận…');
-    let p = null;
-    for (let i = 0; i < 8; i++) {
-      await new Promise((r) => setTimeout(r, 1000));
-      try { p = await api('/payments/' + encodeURIComponent(paymentRequestId)); } catch (_) { continue; }
-      if (p.status !== 'PENDING') break;
-    }
+    const result = await pollPayment(paymentRequestId, (r) => r.status !== 'PENDING', ctx);
+    if (result.cancelled || !ctxAlive(ctx)) return; // đã rời trang ví / đăng xuất / đổi tài khoản: không báo gì thay họ
+    const p = result.row;
     if (p && p.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công ${RESOLVED_BY_LABEL[p.resolvedBy] || ''}: ${money(p.amount)} đã vào ví.`, 'ok');
+      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[p.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[p.resolvedBy] : ''}: ${money(p.amount)} đã vào ví.`, 'ok');
       await refreshWallet();
+      if (!ctxAlive(ctx)) return;
+      setTopupNotice(null);
     } else if (p && p.status === 'FAILED') {
       toast('Cổng thanh toán báo thất bại. Ví của bạn không thay đổi.', 'err');
+      setTopupNotice(null);
     } else {
-      toast('Chưa có xác nhận từ cổng thanh toán. Hệ thống sẽ tự đối soát; số dư chỉ thay đổi khi có kết quả.');
+      toast(!p
+        ? 'Chưa kiểm tra được trạng thái do lỗi kết nối. Hãy mở lại Lịch sử nạp tiền sau ít phút; số dư chỉ thay đổi khi có xác nhận.'
+        : 'Chưa có xác nhận từ cổng thanh toán. Hệ thống sẽ tự đối soát; số dư chỉ thay đổi khi có kết quả.');
+      state.topupNotice = { kind: 'poll-timeout', paymentId: paymentRequestId };
     }
     if (currentHead() === 'wallet') route(); else renderChrome();
   }
@@ -2800,10 +4049,16 @@ const App = (() => {
     route();
   }
 
+  // Tranh chấp của lần tải gần nhất, để bước xem lại đọc đúng dữ liệu máy chủ đã trả thay vì
+  // tin vào chữ trên nút.
+  const disputeCache = new Map();
+
   async function loadDisputes() {
     const { disputes } = await api('/admin/disputes');
     const list = $('#adminPanel');
     if (!list) return;
+    disputeCache.clear();
+    disputes.forEach((d) => disputeCache.set(d.id, d));
 
     if (disputes.length === 0) {
       list.innerHTML = empty('shield-check', 'Không có tranh chấp nào', 'Mọi đơn hàng đang diễn ra suôn sẻ.');
@@ -2861,6 +4116,39 @@ const App = (() => {
    * không dùng được cho "giải ngân". Nếu thiếu ràng buộc này thì lần xác thực lại chỉ chứng
    * minh quản trị viên có mặt, chứ không chứng minh đã chấp thuận điều gì.
    */
+  /**
+   * Bước xem lại TRƯỚC khi xác thực Passkey: nói rõ hành động, người nhận tiền và số tiền để
+   * quản trị viên không bấm nhầm hai nút liền kề. Xác nhận ở đây chỉ mở đường tới bước
+   * Passkey; phiếu uỷ quyền và quyền của máy chủ không đổi.
+   */
+  function openDisputeConfirm(kind, disputeId) {
+    const d = disputeCache.get(disputeId);
+    if (!d) return toast('Không tìm thấy tranh chấp — hãy tải lại trang.', 'err');
+    const t = d.transaction || {};
+    const refund = kind === 'refund';
+    const recipient = refund ? 'Người mua' : 'Người bán';
+    const recipientName = refund ? t.buyerName : t.sellerName;
+    openModal({
+      title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: giải ngân cho người bán',
+      body: `
+        <div class="stack">
+          <div class="note note-warning">
+            ${ico('triangle-alert', 18)}
+            <span>Quyết định này <b>không thể hoàn tác</b>: tiền rời ví ký quỹ và được ghi vĩnh viễn vào nhật ký của đơn.</span>
+          </div>
+          <div class="price-row"><span>Đơn hàng</span><span>${esc(t.itemName || 'Đơn hàng')}</span></div>
+          <div class="price-row"><span>Hành động</span><span><b>${refund ? 'Hoàn toàn bộ tiền' : 'Chuyển toàn bộ tiền'}</b></span></div>
+          <div class="price-row"><span>${recipient} nhận tiền</span><span><b>${esc(recipientName || '—')}</b></span></div>
+          <div class="price-row total"><span>Số tiền</span><span class="val">${money(t.amount || 0)}</span></div>
+          <p class="small muted m-0">Sau khi bấm xác nhận, bạn sẽ được yêu cầu xác thực lại bằng Passkey.</p>
+        </div>`,
+      footer: `
+        <button class="btn" data-act="modal-close">Huỷ</button>
+        <button class="btn btn-primary" data-act="admin-confirm" data-kind="${refund ? 'refund' : 'release'}"
+          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận giải ngân'} và dùng Passkey</button>`,
+    });
+  }
+
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
     await guard('adm:' + disputeId, btn, async () => {
@@ -2876,6 +4164,7 @@ const App = (() => {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
       });
     }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
+    closeModal();
     route();
   }
 
@@ -3105,7 +4394,7 @@ const App = (() => {
     'add-device': (el) => addDevice(el),
     'del-device': (el) => deleteDevice(el.dataset.id, el),
     'logout': () => logout(),
-    'modal-close': () => closeModal(),
+    'modal-close': () => dismissModal(),
     'reload': () => route(),
     'open-sell': () => openSell(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
@@ -3138,14 +4427,25 @@ const App = (() => {
     'do-delete-listing': (el) => doDeleteListing(el.dataset.id, el),
     'seed-demo': (el) => seedDemo(el),
 
-    'admin-refund': (el) => adminResolve('refund', el.dataset.id, el),
-    'admin-release': (el) => adminResolve('release', el.dataset.id, el),
+    'admin-refund': (el) => openDisputeConfirm('refund', el.dataset.id),
+    'admin-release': (el) => openDisputeConfirm('release', el.dataset.id),
+    'admin-confirm': (el) => adminResolve(el.dataset.kind, el.dataset.id, el),
 
     'audit-load': () => loadAudit($('#auditTxId').value.trim()),
     'audit-verify': (el) => verifyAudit(el),
 
-    'topup-preset': (el) => { const input = $('#topupAmount'); if (input) input.value = el.dataset.v; },
+    'topup-preset': (el) => { const input = $('#topupAmount'); if (input && !input.disabled) input.value = el.dataset.v; },
     'topup-create': (el) => createTopup(el),
+    'topup-retry': (el) => createTopup(el),
+    'topup-check': (el) => checkTopupStatus(el),
+    'topup-new': () => askNewTopup(),
+    'topup-new-confirm': () => confirmNewTopup(),
+    'topup-dismiss': () => { state.topupNotice = null; renderTopupIntent(); },
+    'paypal-approve': (el) => openPaypalApproval(el),
+    'paypal-capture': (el) => capturePaypal(el),
+    'paypal-abandon': (el) => openPaypalAbandon(el),
+    'paypal-abandon-confirm': (el) => confirmPaypalAbandon(el),
+    'paypal-config-retry': () => route(),
     'checkout-open': (el) => openCheckout(el.dataset.id, el.dataset.ref),
     'checkout-pay': (el) => payCheckout(el),
     'notif-open': (el) => openNotification(el),
@@ -3159,7 +4459,7 @@ const App = (() => {
     const act = el.dataset.act;
 
     if (act === 'modal-backdrop') {
-      if (e.target === el) closeModal();
+      if (e.target === el) dismissModal();
       return;
     }
     const handler = HANDLERS[act];
@@ -3174,14 +4474,22 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
-    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closeModal(); });
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
     window.addEventListener('hashchange', route);
+    window.addEventListener('pageshow', (event) => {
+      if (event.persisted && currentHead() === 'wallet' && !state.paypalCallback) {
+        Promise.resolve(resumePaypalAfterBack()).catch(() => {});
+      }
+    });
     const topSearch = $('#topSearch');
     if (topSearch) topSearch.addEventListener('submit', (e) => {
       e.preventDefault();
       state.filters.q = ($('#topSearchInput').value || '').trim();
       goHome();
     });
+
+    // Có thể vừa được PayPal đưa quay lại (?paypal=return|cancel): đọc và dọn query TRƯỚC khi làm gì khác.
+    state.paypalCallback = readPaypalCallbackFromUrl();
 
     // Khôi phục phiên: xác nhận lại token với server thay vì tin localStorage.
     if (state.token) {

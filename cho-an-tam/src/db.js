@@ -191,13 +191,29 @@ function openSqlite() {
     const paymentCols = new Set(db.prepare('PRAGMA table_info(payment_requests)').all().map((c) => c.name));
     if (paymentCols.size > 0) {
       const add = [
+        ['provider', "TEXT NOT NULL DEFAULT 'MOCK' CHECK (provider IN ('MOCK','PAYPAL_SANDBOX'))"],
         ['resolved_by', 'TEXT'],
         ['reconcile_attempts', 'INTEGER NOT NULL DEFAULT 0'],
         ['last_reconciled_at', 'TEXT'],
         ['last_reconcile_error', 'TEXT'],
+        // Khoá chống lặp và trạng thái bước gửi sang provider (xem schema.sql). Yêu cầu cũ mặc định
+        // SUBMITTED; nếu thật ra provider không có bản ghi, worker đối soát tự phát hiện và gửi lại.
+        ['client_request_id', 'TEXT'],
+        ['submission_status', "TEXT NOT NULL DEFAULT 'SUBMITTED' CHECK (submission_status IN ('SUBMITTING','SUBMITTED','SUBMIT_FAILED'))"],
+        ['submit_attempts', 'INTEGER NOT NULL DEFAULT 0'],
+        ['last_submit_error', 'TEXT'],
+        ['submit_claim', 'TEXT'],
+        ['submit_claimed_at', 'TEXT'],
       ].filter(([name]) => !paymentCols.has(name));
       for (const [name, type] of add) db.exec(`ALTER TABLE payment_requests ADD COLUMN ${name} ${type}`);
+      db.exec(`CREATE TRIGGER IF NOT EXISTS payment_provider_immutable
+        BEFORE UPDATE OF provider ON payment_requests
+        WHEN NEW.provider <> OLD.provider BEGIN SELECT RAISE(ABORT, 'PAYMENT_PROVIDER_IMMUTABLE'); END`);
       if (add.length) console.log(`[migrate] payment_requests: đã thêm cột ${add.map(([n]) => n).join(', ')}.`);
+      db.exec(
+        `CREATE UNIQUE INDEX IF NOT EXISTS ux_payment_requests_client_request
+         ON payment_requests(user_id, client_request_id) WHERE client_request_id IS NOT NULL`
+      );
     }
 
     // Phiếu uỷ quyền gắn với phiên đã xác thực lại; cột cho phép NULL nên thêm bằng ALTER TABLE.
@@ -317,6 +333,11 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
+  if (db.prepare("SELECT 1 FROM paypal_payment_bindings WHERE not_captured_evidence IS NOT NULL AND not_captured_evidence <> 'ORDER_VOIDED' LIMIT 1").get()) {
+    throw new Error('PAYPAL_TERMINAL_EVIDENCE_INVALID: manual reconciliation required before startup');
+  }
+  db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.006-paypal-terminal-evidence.sql'), 'utf8'));
   // Nguồn gốc quyền quản trị: bảng + backfill một lần, trigger ở mọi lần khởi động.
   // Đặt ở đây chứ không ở schema.sql để backfill chỉ chạy đúng lúc bảng được tạo lần đầu.
   require('./lib/adminProvenance').migrateSqlite(db);
@@ -343,7 +364,13 @@ function openSqlite() {
 // không bao giờ sửa phần tử đã chạy trên cơ sở dữ liệu thật.
 const PG_MIGRATIONS = [
   { version: 1, name: 'initial-schema', file: 'schema.pg.sql' },
+  // Số 2: admin-provenance (xem lib/adminProvenance.js). Số 3: yêu cầu nạp tiền chống lặp.
+  // Runner áp đúng số chưa có, theo thứ tự mảng; không đánh số lại migration đã áp.
   { version: 2, name: 'admin-provenance', file: 'schema.pg.002-admin-provenance.sql' },
+  { version: 3, name: 'topup-request-idempotency', file: 'schema.pg.003-topup-idempotency.sql' },
+  { version: 4, name: 'payment-provider-isolation', file: 'schema.pg.004-payment-provider.sql' },
+  { version: 5, name: 'paypal-durable-bindings', file: 'schema.pg.005-paypal-bindings.sql' },
+  { version: 6, name: 'paypal-terminal-evidence', file: 'schema.pg.006-paypal-terminal-evidence.sql' },
 ];
 
 function installPgTypeParsers(pg) {

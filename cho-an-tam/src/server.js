@@ -89,6 +89,8 @@ app.use('/api/users', usersRouter);
 app.use('/api/wallets', walletsRouter);
 app.use('/api/listings', listingsRouter);
 app.use('/api/transactions', transactionsRouter);
+// Specific PayPal routes must precede the payment request :id route. Disabled by default.
+app.use('/api/payments/paypal', require('./routes/paypal').createPayPalRouter());
 app.use('/api/payments', paymentsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/admin', adminRouter);

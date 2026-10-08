@@ -1,0 +1,17 @@
+﻿[migrate] PostgreSQL: đã áp migration 1 (initial-schema).
+[migrate] PostgreSQL: đã áp migration 2 (admin-provenance).
+[migrate] PostgreSQL: đã áp migration 3 (topup-request-idempotency).
+[migrate] PostgreSQL: đã áp migration 4 (payment-provider-isolation).
+[migrate] PostgreSQL: đã áp migration 5 (paypal-durable-bindings).
+[migrate] PostgreSQL: đã áp migration 6 (paypal-terminal-evidence).
+[seed] Đã tạo ví hệ thống SYSTEM_ESCROW.
+topup 1 200 AWAITING_APPROVAL feb62d54-8d8a-4c36-8e70-95fb593e88a8
+topup 2 200 AWAITING_APPROVAL d4b18729-ba47-4690-966e-4f0ac71e786b
+topup 3 200 AWAITING_APPROVAL b4d5b5b4-47a3-4849-b4db-2269488c205c
+topup 4 200 AWAITING_APPROVAL 6f0dddb1-e1ae-4531-b65a-12bac1170eeb
+topup 5 200 AWAITING_APPROVAL 319b4fc2-9041-4400-90bc-5cce3b5c57b1
+topup 6 409 TOPUP_LIMIT_EXCEEDED undefined
+capture chưa duyệt 200 AWAITING_APPROVAL
+abandon 404 null
+status sau tất cả: [{"status":"PENDING","c":5}]
+topup 7 sau thử đóng 409 TOPUP_LIMIT_EXCEEDED

@@ -15,6 +15,7 @@ const {
   onOrderSecured, onOrderAcknowledged, onOrderShipped, onOrderWaitConfirm, onOrderCompleted, onDisputeOpened,
 } = require('../lib/notifications');
 const { settleListing } = require('../lib/listingLifecycle');
+const { parseVndAmount } = require('../lib/money');
 
 // Mỗi lần xin challenge đều ghi một bản ghi vào cơ sở dữ liệu, nên đây là điểm gửi ồ ạt
 // rẻ tiền nếu không chặn. Mở tranh chấp cũng được giới hạn vì nó đóng băng tiền của
@@ -151,10 +152,14 @@ async function lockListingForOrder(listingId) {
 
 router.post('/', requireAuth, requireRole('BUYER'), async (req, res, next) => {
   try {
-    const { sellerId, itemName, itemDescription, amount } = req.body || {};
-    if (!sellerId || !itemName || !amount || amount <= 0) {
+    const { sellerId, itemName, itemDescription, amount: rawAmount } = req.body || {};
+    if (!sellerId || !itemName || rawAmount === undefined || rawAmount === null) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu sellerId/itemName/amount hợp lệ');
     }
+    // Số nguyên VND an toàn trong khoảng giá một món hàng (lib/money.js). Trước đây chỉ kiểm
+    // `amount <= 0`, nên số lẻ, chuỗi số, boolean và số vượt 2^53 lọt xuống CSDL — SQLite cất thành
+    // REAL/ép kiểu, PostgreSQL trả 500.
+    const amount = parseVndAmount(rawAmount);
     if (sellerId === req.user.id) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Buyer và Seller phải khác nhau');
     }

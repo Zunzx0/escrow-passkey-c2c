@@ -1,0 +1,224 @@
+{
+  "startedAt": "2026-10-07T13-21-08-674Z",
+  "startedAtIso": "2026-10-07T13:21:08.674Z",
+  "environment": "test",
+  "baseUrl": "http://localhost:3930",
+  "database": "data\\test\\pro-abandon-full-sqlite2.db",
+  "freshDatabase": true,
+  "node": "v26.4.0",
+  "platform": "win32 x64",
+  "ok": true,
+  "totalAssertionsPassed": 1006,
+  "totalAssertionsFailed": 0,
+  "suites": [
+    {
+      "suite": "count-marks-unit",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 14,
+      "fail": 0,
+      "seconds": 0
+    },
+    {
+      "suite": "invariants-unit",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 39,
+      "fail": 0,
+      "seconds": 0
+    },
+    {
+      "suite": "e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 39,
+      "fail": 0,
+      "seconds": 3
+    },
+    {
+      "suite": "market-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 63,
+      "fail": 0,
+      "seconds": 3
+    },
+    {
+      "suite": "security-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 38,
+      "fail": 0,
+      "seconds": 2
+    },
+    {
+      "suite": "hybrid-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 53,
+      "fail": 0,
+      "seconds": 3
+    },
+    {
+      "suite": "hardening-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 23,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "payment-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 40,
+      "fail": 0,
+      "seconds": 2
+    },
+    {
+      "suite": "reconcile-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 65,
+      "fail": 0,
+      "seconds": 6
+    },
+    {
+      "suite": "counter-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 30,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "cleanup-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 13,
+      "fail": 0,
+      "seconds": 0
+    },
+    {
+      "suite": "notification-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 44,
+      "fail": 0,
+      "seconds": 2
+    },
+    {
+      "suite": "checkout-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 19,
+      "fail": 0,
+      "seconds": 2
+    },
+    {
+      "suite": "dispute-race-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 29,
+      "fail": 0,
+      "seconds": 2
+    },
+    {
+      "suite": "security-report-regression-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 47,
+      "fail": 0,
+      "seconds": 4
+    },
+    {
+      "suite": "username-enumeration-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 12,
+      "fail": 0,
+      "seconds": 3
+    },
+    {
+      "suite": "listing-lifecycle-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 70,
+      "fail": 0,
+      "seconds": 6
+    },
+    {
+      "suite": "passkey-registration-race-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 41,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "topup-concurrency-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 43,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "manual-transaction-amount-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 46,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "topup-idempotency-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 82,
+      "fail": 0,
+      "seconds": 4
+    },
+    {
+      "suite": "payment-provider-isolation-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 16,
+      "fail": 0,
+      "seconds": 1
+    },
+    {
+      "suite": "paypal-integration-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 52,
+      "fail": 0,
+      "seconds": 4
+    },
+    {
+      "suite": "admin-provenance-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 69,
+      "fail": 0,
+      "seconds": 7
+    },
+    {
+      "suite": "rollback-e2e",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 10,
+      "fail": 0,
+      "seconds": 2,
+      "faultInject": "release:after-wallet-update"
+    },
+    {
+      "suite": "check-invariants",
+      "ok": true,
+      "exitCode": 0,
+      "pass": 9,
+      "fail": 0,
+      "seconds": 0
+    }
+  ]
+}
