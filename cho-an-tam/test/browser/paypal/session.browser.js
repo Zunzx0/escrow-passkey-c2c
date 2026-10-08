@@ -36,8 +36,6 @@ module.exports = {
       c.cleanup(() => s.close());
       c.cleanup(() => gate.release()); // chạy trước s.close (cleanup đảo ngược): không để response treo
       await s.open();
-      await s.page.waitForSelector('[data-act="paypal-capture"]', { timeout: 5000 });
-      await s.click('[data-act="paypal-capture"]');
       await s.until(() => s.fx.count(CAPTURE) >= 1, 4000, 'POST capture tới fixture');
       c.precondition(s.fx.count(CAPTURE) === 1 && srv.captures === 1, `POST capture đã tới fixture đúng 1 lần (fx=${s.fx.count(CAPTURE)}, server=${srv.captures})`);
       c.precondition(!gate.settled && s.fx.responded(CAPTURE) === 0, 'Phản hồi capture còn treo (deferred chưa giải quyết, fixture chưa trả lời) trước khi đăng xuất');
@@ -109,15 +107,13 @@ module.exports = {
     t.section('B4 — access token bị từ chối trong luồng return');
     await t.case('B4.1 GET trạng thái khi return bị 401 -> refresh -> retry GET đúng phiên, capture sau đó đúng 1 lần', async (c) => {
       const { s, srv, OLD, NEW } = await b4(c, { reject: 'status', refresh: 'ok' });
-      await s.page.waitForSelector('[data-act="paypal-capture"]', { timeout: 5000 });
+      await s.until(() => s.fx.responded(CAPTURE) >= 1, 4000, 'capture tự động đã trả lời');
       const gets = reqs(s, STATUS);
       c.precondition(gets.length >= 2 && bearer(gets[0]) === OLD && s.fx.count(REFRESH) === 1, `GET đầu bị từ chối bằng token cũ, đúng 1 refresh (GET=${gets.length}, refresh=${s.fx.count(REFRESH)})`);
       c.ok(gets.slice(1).every((g) => bearer(g) === NEW) && gets.filter((g) => bearer(g) === OLD).length === 1, 'GET retry dùng token mới; token cũ chỉ bị dùng 1 lần');
-      c.ok(s.fx.count(CAPTURE) === 0, 'Chưa capture khi người dùng chưa bấm xác nhận');
-      await s.click('[data-act="paypal-capture"]');
-      const getsBeforeCapture = s.fx.count(STATUS);
+      c.ok(s.fx.count(CAPTURE) === 1, 'Return tự capture sau GET xác minh');
       await s.until(() => s.fx.responded(CAPTURE) === 1, 4000, 'capture trả lời');
-      await s.until(() => s.fx.count(STATUS) > getsBeforeCapture, 4000, 'GET trạng thái sau capture');
+      await s.until(() => reqs(s, STATUS).some(r => s.fx.requests.indexOf(r) > s.fx.requests.indexOf(reqs(s, CAPTURE)[0])), 4000, 'GET sau capture');
       await s.page.waitForFunction(() => /Nạp tiền thành công/.test(document.querySelector('#toasts') ? document.querySelector('#toasts').textContent : ''), null, { timeout: 5000 });
       await settle(s);
       c.ok(s.fx.count(CAPTURE) === 1 && srv.captures === 1 && bearer(reqs(s, CAPTURE)[0]) === NEW, 'Đúng 1 POST capture, bằng token mới');
@@ -132,12 +128,10 @@ module.exports = {
 
     await t.case('B4.2 capture bị 401 -> refresh -> retry capture đúng 1 lần hợp lệ, kết quả đúng sau GET SUCCEEDED', async (c) => {
       const { s, srv, OLD, NEW } = await b4(c, { reject: 'capture', refresh: 'ok' });
-      await s.page.waitForSelector('[data-act="paypal-capture"]', { timeout: 5000 });
-      c.precondition(s.fx.count(CAPTURE) === 0 && s.fx.count(REFRESH) === 0, 'Dựng đúng: chưa capture, chưa refresh trước khi bấm');
-      const getsBeforeClick = s.fx.count(STATUS);
-      await s.click('[data-act="paypal-capture"]');
+      await s.until(() => s.fx.responded(CAPTURE) >= 1, 4000, 'capture tự động đã trả lời');
+      c.precondition(s.fx.count(CAPTURE) >= 1, 'Return đã phát capture');
       await s.until(() => s.fx.responded(CAPTURE) >= 2, 4000, 'capture bị từ chối rồi retry');
-      await s.until(() => s.fx.count(STATUS) > getsBeforeClick, 4000, 'GET trạng thái MỚI sau capture');
+      await s.until(() => reqs(s, STATUS).some(r => s.fx.requests.indexOf(r) > s.fx.requests.indexOf(reqs(s, CAPTURE)[1])), 4000, 'GET mới sau capture hợp lệ');
       await s.page.waitForFunction(() => /Nạp tiền thành công/.test(document.querySelector('#toasts') ? document.querySelector('#toasts').textContent : ''), null, { timeout: 5000 });
       await settle(s);
       const caps = reqs(s, CAPTURE);
@@ -146,8 +140,8 @@ module.exports = {
       c.ok(s.fx.count(REFRESH) === 1, 'Đúng 1 refresh');
       const idxOk = s.fx.requests.indexOf(caps[1]);
       const getAfter = s.fx.requests.filter((r, i) => i > idxOk && r.key === STATUS);
-      c.ok(getAfter.length >= 1 && getAfter.length === s.fx.count(STATUS) - getsBeforeClick && getAfter.every((g) => bearer(g) === NEW),
-        `Có GET trạng thái MỚI nằm SAU POST capture thành công, bằng token mới (số=${getAfter.length}; GET trước khi bấm=${getsBeforeClick})`);
+      c.ok(getAfter.length >= 1 && getAfter.every((g) => bearer(g) === NEW),
+        `Có GET trạng thái MỚI nằm SAU POST capture thành công, bằng token mới (số=${getAfter.length})`);
       c.ok((await successToasts(s)).length === 1, 'Thành công hiện đúng 1 toast, sau GET SUCCEEDED');
       c.ok(await s.has('[data-act="logout"]'), 'Vẫn đăng nhập');
       c.ok(s.leaked().length === 0, 'Không request ngoài lọt ra');
@@ -156,8 +150,7 @@ module.exports = {
     for (const status of [401, 500]) {
       await t.case(`B4.${status === 401 ? 3 : 4} capture bị 401, refresh trả ${status} -> không retry, không thành công giả, yêu cầu đăng nhập lại`, async (c) => {
         const { s, srv } = await b4(c, { reject: 'capture', refresh: { status } });
-        await s.page.waitForSelector('[data-act="paypal-capture"]', { timeout: 5000 });
-        await s.click('[data-act="paypal-capture"]');
+        await s.until(() => s.fx.responded(CAPTURE) >= 1, 4000, 'capture tự động đã trả lời');
         await s.until(() => s.fx.count(REFRESH) >= 1 && s.fx.responded(REFRESH) >= 1, 4000, 'refresh trả lỗi');
         c.precondition(s.fx.count(CAPTURE) === 1 && s.fx.responded(CAPTURE) === 1, 'Dựng đúng: capture đầu bị 401 đúng 1 lần');
         await s.page.waitForSelector('[data-act="open-auth"]', { timeout: 5000 });

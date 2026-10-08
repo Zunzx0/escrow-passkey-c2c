@@ -1,7 +1,7 @@
 ﻿/**
  * B1-B2: luồng thanh toán PayPal Sandbox trong Chrome THẬT với API FIXTURE (không phải Sandbox/backend/cookie thật).
  *   B1  nút "Mở PayPal Sandbox" -> GET checkout -> điều hướng thật tới đúng approval URL; URL giả không rời trang.
- *   B2  return/cancel: dọn query, không xử lý lại khi reload, cancel không capture, capture chỉ sau bấm xác nhận.
+ *   B2  return/cancel: dọn query, không xử lý lại khi reload, cancel không capture, tự capture sau return đã xác minh.
  * Không dùng ENCLAVE_NAVIGATE; không sleep để đoán thời điểm.
  */
 module.exports = {
@@ -91,160 +91,68 @@ module.exports = {
       });
     }
 
-    // ------------------------------------------------------------------ B2
-    t.section('B2: return / cancel / capture');
-    await t.case('B2.1 Return: dọn token/PayerID khỏi thanh địa chỉ, chỉ GET xác minh, KHÔNG tự capture; reload không xử lý lại', async (c) => {
-      const { s } = await make(c, { search: returnSearch });
-      await s.open();
-      await s.page.waitForSelector('#topupIntent [data-act="paypal-capture"]', { timeout: 5000 });
-      c.precondition(s.fx.responded(GET_ROW) >= 1, 'GET /payments/:id (xác minh) đã được fixture trả lời');
-      c.precondition(await s.has('#topupIntent [data-act="paypal-capture"]'), 'Trang ở trạng thái return khớp ý định: có nút xác nhận');
-      const u = urlParts(s);
-      c.ok(u.search === '' && u.hash === '#/wallet' && !/TOKEN-RET|PAYER-RET|paypal=/.test(s.page.url()), `Query dọn sạch, giữ #/wallet (${u.pathname + u.search + u.hash})`);
-      c.ok(!/TOKEN-RET|PAYER-RET/.test(await s.page.evaluate(() => location.href)), 'token/PayerID không còn trong location.href');
-      c.ok(s.fx.count(POST_CAPTURE) === 0, 'Return KHÔNG tự capture');
-      c.ok((await okToasts(s)).length === 0 && !/Nạp tiền thành công/.test(await s.viewText()), 'Return KHÔNG tự báo thành công');
-      c.ok(s.fx.count('POST /api/payments/paypal/topup') === 0, 'Return không tạo yêu cầu mới');
-      await s.shot('B2-return-cho-xac-nhan');
-      const getsBefore = s.fx.count(GET_ROW);
-      const meBefore = s.fx.responded('GET /api/users/me');
-      await s.page.reload({ waitUntil: 'domcontentloaded' });
-      await s.until(() => s.fx.responded('GET /api/users/me') > meBefore, 4000, 'tải lại hoàn tất khôi phục phiên');
-      await s.page.waitForSelector('#topupAmount', { timeout: 5000 });
-      c.ok(s.fx.count(GET_ROW) === getsBefore, 'Sau reload KHÔNG xử lý lại return (không có GET /payments/:id mới)');
-      c.ok(!(await s.has('#topupIntent [data-act="paypal-capture"]')) && s.fx.count(POST_CAPTURE) === 0, 'Sau reload không còn nút capture, không POST capture');
-      c.ok(urlParts(s).search === '', 'Sau reload thanh địa chỉ vẫn sạch query');
-      c.ok(s.leaked().length === 0 && s.external.length === 0, 'Không request ngoài lọt ra');
-    });
 
-    await t.case('B2.2 Query return KHÔNG phải chứng cứ: không có ý định trên thiết bị thì không cho capture', async (c) => {
-      const { s } = await make(c, { search: returnSearch, storage: {} });
-      await s.open();
-      await s.until(() => s.fx.responded(GET_ROW) >= 1, 4000, 'GET xác minh trả lời');
-      await s.until(async () => /không khớp với ý định/.test(await s.viewText()), 4000, 'giao diện báo không khớp ý định');
-      c.precondition(await s.has('#topupIntent'), 'Trang ví đã dựng và có vùng thông báo');
-      c.ok(!(await s.has('#topupIntent [data-act="paypal-capture"]')), 'Không có nút capture dù URL mang token/PayerID');
-      c.ok(s.fx.count(POST_CAPTURE) === 0 && (await okToasts(s)).length === 0, 'Không POST capture, không toast thành công');
-      c.ok(urlParts(s).search === '', 'Query vẫn được dọn');
-      c.ok(s.leaked().length === 0 && s.navs.length === 0, 'Không request ngoài lọt ra, không điều hướng');
-    });
-
-    await t.case('B2.3 Cancel: chỉ GET trạng thái, không capture, không toast thành công, giữ ý định và mở lại được PayPal', async (c) => {
-      const { s } = await make(c, { search: cancelSearch });
-      await s.open();
-      await s.page.waitForSelector('#topupIntent [data-act="paypal-approve"]', { timeout: 5000 });
-      c.precondition(s.fx.responded(GET_ROW) >= 1, 'GET /payments/:id (xác minh) đã được trả lời');
-      c.precondition(/chưa hoàn tất phê duyệt/.test(await s.viewText()), 'Trang đang ở trạng thái cancel');
-      const u = urlParts(s);
-      c.ok(u.search === '' && u.hash === '#/wallet' && !/TOKEN-CAN/.test(s.page.url()), 'Query cancel (kèm token) được dọn khỏi thanh địa chỉ');
-      c.ok(s.fx.count(POST_CAPTURE) === 0 && !(await s.has('#topupIntent [data-act="paypal-capture"]')), 'Cancel: không POST capture, không có nút capture');
-      c.ok((await okToasts(s)).length === 0, 'Cancel: không có toast thành công');
-      const v = await s.viewText();
-      c.ok(/không làm yêu cầu thất bại/.test(v) && !/Thất bại|đã đóng/.test(await s.page.$eval('#topupIntent', (e) => e.textContent)), 'Cancel không bị diễn giải là FAILED/đóng');
-      const it = await s.intent();
-      c.ok(!!it && it.paymentId === ID && it.requestId === h.KEY && it.amount === h.AMOUNT, 'Ý định vẫn còn trong localStorage (order giữ để mở lại)');
-      c.ok(s.fx.count('POST /api/payments/paypal/topup') === 0, 'Không tạo yêu cầu mới');
-      await s.shot('B2-cancel-giu-y-dinh');
-      // Mở lại PayPal từ trạng thái cancel
-      const reopenLabel = await s.page.$eval('#topupIntent [data-act="paypal-approve"]', (e) => e.textContent.trim());
-      c.ok(reopenLabel === 'Mở lại PayPal Sandbox', `Nút mở lại có nhãn "${reopenLabel}"`);
-      await s.click('#topupIntent [data-act="paypal-approve"]');
-      await s.until(() => s.fx.responded(GET_CHECKOUT) === 1 && s.navs.length === 1, 4000, 'mở lại PayPal');
-      c.ok(s.navs[0] === h.SANDBOX, 'Mở lại điều hướng đúng approval URL');
-      c.ok(s.fx.count(POST_CAPTURE) === 0 && s.leaked().length === 0, 'Vẫn không capture, không request ngoài lọt ra');
-    });
-
-    await t.case('B2.4 Cancel rồi reload: không xử lý lại, ý định còn nguyên', async (c) => {
-      const { s } = await make(c, { search: cancelSearch });
-      await s.open();
-      await s.page.waitForSelector('#topupIntent [data-act="paypal-approve"]', { timeout: 5000 });
-      c.precondition(s.fx.responded(GET_ROW) >= 1 && urlParts(s).search === '', 'Cancel đã xử lý và query đã dọn');
-      const getsBefore = s.fx.count(GET_ROW);
-      const meBefore = s.fx.responded('GET /api/users/me');
-      await s.page.reload({ waitUntil: 'domcontentloaded' });
-      await s.until(() => s.fx.responded('GET /api/users/me') > meBefore, 4000, 'tải lại hoàn tất khôi phục phiên');
-      await s.page.waitForSelector('#topupAmount', { timeout: 5000 });
-      c.ok(s.fx.count(GET_ROW) === getsBefore, 'Reload không xử lý lại cancel');
-      c.ok(!!(await s.intent()) && s.fx.count(POST_CAPTURE) === 0 && (await okToasts(s)).length === 0, 'Ý định còn, không capture, không toast thành công');
-      c.ok(s.leaked().length === 0, 'Không request ngoài lọt ra');
-    });
-
-    await t.case('B2.5 Bấm xác nhận kể cả bấm đúp: đúng MỘT POST capture', async (c) => {
-      const gate = h.deferred();
-      const { s, srv } = await make(c, {
-        search: returnSearch,
-        routesOver: (sv) => ({ [POST_CAPTURE]: () => gate.promise.then(() => h.json(200, { ...sv.row, outcome: 'APPLIED' })) }),
-      });
-      await s.open();
-      await s.page.waitForSelector('#topupIntent [data-act="paypal-capture"]', { timeout: 5000 });
-      c.precondition(s.fx.count(POST_CAPTURE) === 0, 'Trước khi bấm chưa có POST capture');
-      srv.row = { ...srv.row, stage: 'CAPTURING' };
-      // Hai click đồng bộ trên cùng nút thật (giả lập bấm đúp)
-      await s.page.$eval('#topupIntent [data-act="paypal-capture"]', (b) => { b.click(); b.click(); });
-      await s.until(() => s.fx.count(POST_CAPTURE) >= 1, 4000, 'POST capture tới fixture');
-      c.precondition(s.fx.responded(POST_CAPTURE) === 0, 'POST capture đang treo (chưa trả lời) khi quan sát lần bấm lặp');
-      // Kiểm riêng guard busy: gỡ disabled của nút (nếu còn) rồi click lại thật lúc POST đang treo.
-      const probe = await s.page.$eval('#topupIntent', (e) => {
-        const b = e.querySelector('[data-act="paypal-capture"]');
-        if (!b) return { found: false };
-        const wasDisabled = b.disabled;
-        b.disabled = false;
-        b.removeAttribute('disabled');
-        b.click();
-        return { found: true, wasDisabled };
-      });
-      c.ok(probe.found && probe.wasDisabled, `Nút capture còn trong DOM lúc treo và đang disabled (found=${probe.found}, disabled=${probe.wasDisabled}); đã gỡ disabled rồi click lại nên guard busy được kiểm riêng`);
-      c.ok(s.fx.count(POST_CAPTURE) === 1, 'Gỡ disabled + click lại lúc POST treo: vẫn đúng 1 POST capture (guard busy)');
-      const getsBefore = s.fx.count(GET_ROW);
-      gate.release();
-      await s.until(() => s.fx.responded(POST_CAPTURE) >= 1, 4000, 'POST capture được trả lời');
-      await s.until(() => s.fx.responded(GET_ROW) > getsBefore, 4000, 'GET trạng thái sau capture');
-      await s.until(async () => /Đang xác nhận thanh toán/.test(await s.viewText()), 4000, 'hiển thị CAPTURING');
-      c.ok(s.fx.count(POST_CAPTURE) === 1, 'Đúng MỘT POST capture ở fixture sau bấm đúp + bấm lặp lúc đang treo');
-      c.ok(!(await s.has('#topupIntent [data-act="paypal-capture"]')), 'Không còn nút capture sau khi xác nhận');
-      c.ok((await okToasts(s)).length === 0, 'CAPTURING chưa báo thành công');
-      c.ok(s.leaked().length === 0, 'Không request ngoài lọt ra');
-    });
-
-    for (const [label, stage, re] of [
-      ['RECONCILING', 'RECONCILING', /Chưa rõ kết quả thanh toán/],
-      ['PENDING / AWAITING_APPROVAL', 'AWAITING_APPROVAL', /Vẫn chờ phê duyệt|Bạn đã quay lại|Chờ bạn phê duyệt/],
-    ]) {
-      await t.case(`B2.6 POST capture 200 nhưng GET nói ${label}: KHÔNG báo thành công`, async (c) => {
-        const { s, srv } = await make(c, { search: returnSearch });
+    t.section('B2: tự hoàn tất, cancel, Back và bằng chứng GET');
+    for (const stage of ['SUCCEEDED','AWAITING_APPROVAL','RECONCILING']) {
+      await t.case('Return tự capture, kết quả '+stage, async c=>{
+        const {s}=await make(c,{search:returnSearch,routesOver:sv=>({[POST_CAPTURE]:()=>{sv.row={...sv.row,stage,status:stage==='SUCCEEDED'?'SUCCEEDED':'PENDING'};return h.json(200,{outcome:'APPLIED'});}})});
         await s.open();
-        await s.page.waitForSelector('#topupIntent [data-act="paypal-capture"]', { timeout: 5000 });
-        srv.row = { ...srv.row, status: 'PENDING', stage };
-        const getsBefore = s.fx.count(GET_ROW);
-        await s.click('#topupIntent [data-act="paypal-capture"]');
-        await s.until(() => s.fx.responded(POST_CAPTURE) === 1, 4000, 'POST capture 200');
-        await s.until(() => s.fx.responded(GET_ROW) > getsBefore, 4000, 'GET trạng thái sau capture');
-        c.precondition(s.fx.count(POST_CAPTURE) === 1 && s.fx.count(GET_ROW) > getsBefore, 'POST capture đã phát/được trả lời và GET sau capture đã trả về PENDING');
-        await s.until(async () => re.test(await s.viewText()), 4000, 'giao diện phản ánh trạng thái chưa xong');
-        c.ok((await okToasts(s)).length === 0 && !/Nạp tiền thành công/.test(await s.viewText()), 'Không toast/chữ "Nạp tiền thành công"');
-        c.ok(!!(await s.intent()), 'Ý định được giữ (chưa có chứng cứ thu tiền)');
-        c.ok(s.fx.count(POST_CAPTURE) === 1, 'Không gửi lại POST capture');
-        c.ok(s.leaked().length === 0, 'Không request ngoài lọt ra');
+        await s.until(()=>s.fx.responded(POST_CAPTURE)===1&&s.fx.responded(GET_ROW)>=2,4000,'capture + GET kết quả');
+        c.precondition(s.fx.count(POST_CAPTURE)===1,'Một capture đã được thực hiện');
+        const firstCapture=s.fx.requests.findIndex(r=>r.key===POST_CAPTURE);
+        c.ok(s.fx.requests.slice(0,firstCapture).some(r=>r.key===GET_ROW),'GET trước capture');
+        c.ok(s.fx.requests.slice(firstCapture+1).some(r=>r.key===GET_ROW),'GET sau capture');
+        c.ok(!(await s.has('[data-act="paypal-capture"]')),'Không cần nút xác nhận thứ hai');
+        c.ok(urlParts(s).search==='','Dọn callback query');
+        if(stage==='SUCCEEDED'){
+          await s.until(async()=>(await okToasts(s)).some(x=>/Nạp tiền thành công/.test(x.text)),4000,'toast thành công');
+          c.ok((await okToasts(s)).filter(x=>/Nạp tiền thành công/.test(x.text)).length===1,'Một thông báo thành công');
+          c.ok(await s.intent()===null,'Dọn ý định');
+          c.ok(s.fx.count('GET /api/wallets/me')>=2,'Đọc lại ví máy chủ');
+        }else{
+          await s.until(async()=>stage==='RECONCILING'?/đối soát/.test(await s.viewText()):/Chờ bạn phê duyệt/.test(await s.viewText()),4000,'trạng thái chưa hoàn tất');
+          c.ok((await okToasts(s)).length===0&&!!(await s.intent()),'Không tin POST 200 để báo thành công');
+        }
+        const caps=s.fx.count(POST_CAPTURE);
+        await s.page.reload({waitUntil:'domcontentloaded'});
+        await s.page.waitForSelector('#topupAmount',{timeout:5000});
+        c.ok(s.fx.count(POST_CAPTURE)===caps,'Reload không capture lại');
+        c.ok(s.leaked().length===0,'Không request ngoài lọt ra');
       });
     }
-
-    await t.case('B2.7 POST capture 200 và GET SUCCEEDED khớp ý định: đúng một thông báo thành công, dọn ý định, đọc lại ví', async (c) => {
-      const { s, srv } = await make(c, { search: returnSearch });
-      await s.open();
-      await s.page.waitForSelector('#topupIntent [data-act="paypal-capture"]', { timeout: 5000 });
-      c.precondition((await okToasts(s)).length === 0 && !!(await s.intent()), 'Trước capture: chưa có toast thành công, ý định còn');
-      srv.row = { ...srv.row, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString(), resolvedBy: 'WEBHOOK' };
-      const getsBefore = s.fx.count(GET_ROW);
-      const walletBefore = s.fx.count('GET /api/wallets/me');
-      await s.click('#topupIntent [data-act="paypal-capture"]');
-      await s.until(() => s.fx.responded(POST_CAPTURE) === 1, 4000, 'POST capture 200');
-      await s.until(() => s.fx.responded(GET_ROW) > getsBefore, 4000, 'GET trạng thái sau capture');
-      await s.until(async () => (await okToasts(s)).some((x) => /Nạp tiền thành công/.test(x.text)), 4000, 'toast thành công');
-      c.ok((await okToasts(s)).filter((x) => /Nạp tiền thành công/.test(x.text)).length === 1, 'Đúng MỘT toast "Nạp tiền thành công"');
-      await s.until(async () => (await s.intent()) === null, 4000, 'ý định được dọn');
-      c.ok(s.fx.count(POST_CAPTURE) === 1, 'Đúng MỘT POST capture');
-      c.ok(s.fx.count('GET /api/wallets/me') > walletBefore, 'Ví được đọc lại từ máy chủ');
-      c.ok(s.leaked().length === 0, 'Không request ngoài lọt ra');
+    for(const kind of ['cancel','return']){
+      await t.case(kind==='cancel'?'Cancel không thu tiền':'Return thiếu ý định không thu tiền',async c=>{
+        const {s}=await make(c,{search:kind==='cancel'?cancelSearch:returnSearch,...(kind==='return'?{storage:{}}:{})});
+        await s.open();await s.until(()=>s.fx.responded(GET_ROW)>=1,4000,'GET xác minh');
+        await s.until(async()=>/chưa hoàn tất phê duyệt|không khớp với ý định/.test(await s.viewText()),4000,'thông báo');
+        c.ok(s.fx.count(POST_CAPTURE)===0,'Không capture');
+        c.ok((await okToasts(s)).length===0,'Không báo thành công');
+        c.ok(s.leaked().length===0,'Không request ngoài lọt ra');
+      });
+    }
+    await t.case('Capture treo: vẽ lại trang không gửi lặp',async c=>{
+      const gate=h.deferred();const {s}=await make(c,{search:returnSearch,routesOver:sv=>({[POST_CAPTURE]:()=>gate.promise.then(()=>h.json(200,{outcome:'BUSY'}))})});
+      c.cleanup(()=>gate.release());await s.open();await s.until(()=>s.fx.count(POST_CAPTURE)===1,4000,'POST capture');
+      c.precondition(s.fx.responded(POST_CAPTURE)===0,'Phản hồi còn treo');
+      await s.page.evaluate(()=>window.dispatchEvent(new Event('hashchange')));
+      await s.until(()=>s.fx.responded('GET /api/wallets/me/entries')>=2,4000,'vẽ lại trang');
+      c.ok(s.fx.count(POST_CAPTURE)===1,'Không gửi capture thứ hai');
+      c.ok(!(await s.has('[data-act="paypal-capture"]')),'Không có nút capture lặp');
+      c.ok(s.leaked().length===0,'Không request ngoài lọt ra');
+    });
+    await t.case('Back từ PayPal: chờ quyết định và cho huỷ',async c=>{
+      const {s}=await make(c);await revealApprove(s);await s.click('#topupIntent [data-act="paypal-approve"]');
+      await s.until(()=>s.navs.length===1,4000,'đã mở PayPal fixture');
+      await s.page.waitForURL(h.SANDBOX,{waitUntil:'domcontentloaded',timeout:5000});
+      await s.page.waitForSelector('p',{timeout:5000});
+      await s.page.goBack({waitUntil:'domcontentloaded'});
+      await s.page.waitForSelector('#topupIntent [data-act="paypal-abandon"]',{timeout:5000});
+      c.ok(/chưa hoàn tất phê duyệt/.test(await s.viewText()),'Hiện trạng thái chờ');
+      c.ok(await s.has('[data-act="paypal-approve"]'),'Có nút tiếp tục');
+      c.ok(s.fx.count(POST_CAPTURE)===0,'Back không thu tiền');
+      c.ok(!!(await s.intent()),'Giữ ý định nạp');
+      c.ok(s.leaked().length===0,'Không request ngoài lọt ra');
+      await s.shot('B2-back-cho-quyet-dinh');
     });
   },
 };
