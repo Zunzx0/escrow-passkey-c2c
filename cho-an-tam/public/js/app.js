@@ -347,7 +347,7 @@ const App = (() => {
     let res;
     let data;
     try {
-      ({ res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, body: body !== undefined ? JSON.stringify(body) : undefined }));
+      ({ res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, credentials: 'include', body: body !== undefined ? JSON.stringify(body) : undefined }));
     } catch (e) {
       throw state.sessionEpoch !== epoch ? oldSession() : e;
     }
@@ -545,6 +545,7 @@ const App = (() => {
     state.wallet = null;
     state.sellerRequest = null;
     state.unread = 0;
+    closeModal(); // Hộp thoại thiết lập không được tồn tại sau khi phiên kết thúc.
     localStorage.removeItem(STORAGE_TOKEN);
     localStorage.removeItem(STORAGE_USER);
     // Mọi phản hồi còn đang bay của phiên này trở thành "cũ" ngay (kể cả khi đăng nhập lại cùng tài khoản).
@@ -767,6 +768,11 @@ const App = (() => {
 
   /** Bước 2 của đăng ký, dùng chung cho cả người dùng thường lẫn quản trị viên bootstrap. */
   async function doEnrollPasskey(btn) {
+    if (!state.token || !state.user) {
+      openAuthModal('login');
+      toast('Phiên thiết lập đã hết hạn. Hãy đăng nhập lại để tiếp tục gắn Passkey.', 'info');
+      return;
+    }
     await guard('enroll', btn, async () => {
       const { registrationSessionId, options } = await api('/passkeys/register/passkey/options', {
         method: 'POST', body: {},
@@ -4493,19 +4499,27 @@ const App = (() => {
 
     // Khôi phục phiên: xác nhận lại token với server thay vì tin localStorage.
     if (state.token) {
+      const epoch = state.sessionEpoch;
       try {
         const me = await api('/users/me');
-        state.user = me.user;
-        state.wallet = me.wallet;
-        localStorage.setItem(STORAGE_USER, JSON.stringify(me.user));
-      } catch (_) {
-        clearSession();
+        if (state.sessionEpoch === epoch) {
+          state.user = me.user;
+          state.wallet = me.wallet;
+          localStorage.setItem(STORAGE_USER, JSON.stringify(me.user));
+        }
+      } catch (e) {
+        // Phản hồi khởi động cũ không được xoá phiên vừa đăng ký/đăng nhập.
+        // Mất mạng cũng không phải bằng chứng phiên đã bị thu hồi.
+        if (state.sessionEpoch === epoch && (e.status === 401 || e.status === 403)) clearSession();
       }
     }
 
     await refreshSellerRequest();
     renderChrome();
     await route();
+    if (state.token && state.user && state.user.accountStatus && state.user.accountStatus !== 'ACTIVE') {
+      openSetupModal(state.user);
+    }
 
     // Polling thông báo: đủ cho phạm vi đồ án, không cần WebSocket. Chỉ vẽ lại khung khi số
     // chưa đọc thật sự đổi.
