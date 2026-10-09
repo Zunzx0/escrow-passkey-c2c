@@ -643,7 +643,7 @@ table.data th.num, table.data td.num { text-align: right; }
 
 /* ---------------------------------------------------------------- thông báo nổi */
 
-#toasts { position: fixed; right: var(--s-4); bottom: var(--s-4); z-index: 80; display: flex; flex-direction: column; gap: var(--s-2); max-width: min(420px, calc(100vw - 32px)); }
+#toasts { position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 80; display: flex; flex-direction: column; gap: var(--s-2); width: min(420px, calc(100vw - 32px)); }
 .toast { display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; border-radius: var(--radius); background: #323232; color: #fff; box-shadow: var(--shadow-lg); font-size: 13.5px; }
 .toast.ok .ico { color: #7BD88F; }
 .toast.err .ico { color: #FF8A80; }
