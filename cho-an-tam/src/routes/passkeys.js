@@ -229,7 +229,9 @@ router.post(
         userDisplayName: user.display_name,
         attestationType: 'none',
         authenticatorSelection: {
-          residentKey: 'preferred',
+          // Đăng nhập Enclave không yêu cầu nhập username trước, vì vậy credential đầu tiên
+          // phải là Passkey có thể được trình duyệt tự liệt kê trên mobile lẫn desktop.
+          residentKey: 'required',
           userVerification: 'required',
         },
       });
@@ -848,7 +850,7 @@ router.post('/credentials/options', requireAuth, authLimiter, async (req, res, n
         transports: JSON.parse(c.transports || '[]'),
       })),
       authenticatorSelection: {
-        residentKey: 'preferred',
+        residentKey: 'required',
         userVerification: 'required',
       },
     });

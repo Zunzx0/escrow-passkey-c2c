@@ -460,11 +460,116 @@ const App = (() => {
   const WEBAUTHN_COMMON = {
     SecurityError:
       'Địa chỉ trang không khớp với cấu hình Passkey của hệ thống. ' +
-      'Hãy mở đúng địa chỉ http://localhost:3000 (không dùng 127.0.0.1 hay địa chỉ IP).',
+      'Hãy mở lại đúng địa chỉ https://enclave.id.vn rồi thử lại.',
     NotSupportedError:
       'Trình duyệt hoặc thiết bị này không hỗ trợ Passkey. Hãy dùng Chrome, Edge hoặc Safari bản mới.',
     AbortError: 'Thao tác đã bị dừng giữa chừng. Hãy thử lại.',
   };
+
+  const WEBAUTHN_CODE_HINTS = {
+    ERROR_AUTHENTICATOR_GENERAL_ERROR:
+      'Trình quản lý Passkey của điện thoại không tạo được khóa. Trên Android, hãy mở Enclave ' +
+      'trực tiếp bằng Chrome và bật Google Password Manager; trên iPhone, dùng Safari và bật ' +
+      'Mật khẩu & Chuỗi khóa iCloud, rồi thử lại.',
+    ERROR_AUTHENTICATOR_MISSING_USER_VERIFICATION_SUPPORT:
+      'Thiết bị chưa có phương thức xác minh phù hợp. Hãy bật khóa màn hình bằng vân tay, ' +
+      'khuôn mặt hoặc mã PIN rồi thử lại.',
+    ERROR_AUTHENTICATOR_MISSING_DISCOVERABLE_CREDENTIAL_SUPPORT:
+      'Bộ quản lý mật khẩu hiện tại chưa hỗ trợ Passkey có thể đồng bộ. Hãy chọn Google Password ' +
+      'Manager trên Android hoặc Mật khẩu & Chuỗi khóa iCloud trên iPhone.',
+    ERROR_AUTHENTICATOR_NO_SUPPORTED_PUBKEYCREDPARAMS_ALG:
+      'Trình duyệt hoặc bộ quản lý Passkey đã quá cũ. Hãy cập nhật trình duyệt và dịch vụ hệ thống rồi thử lại.',
+    ERROR_INVALID_RP_ID:
+      'Tên miền Passkey không khớp. Hãy mở đúng https://enclave.id.vn rồi thử lại.',
+    ERROR_INVALID_DOMAIN:
+      'Địa chỉ đang mở không đủ điều kiện tạo Passkey. Hãy mở đúng https://enclave.id.vn bằng HTTPS.',
+  };
+
+  function isMobileBrowser() {
+    return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent || '');
+  }
+
+  function isEmbeddedBrowser() {
+    const ua = navigator.userAgent || '';
+    return /;\s*wv\)|\bwv\b|FBAN|FBAV|Instagram|Zalo|MicroMessenger|Line\//i.test(ua);
+  }
+
+  /**
+   * Kiểm tra nhẹ trước khi tạo tài khoản. Đây không thay thế bước WebAuthn thật, nhưng chặn
+   * sớm các trường hợp chắc chắn không chạy được để người mới không bị tạo tài khoản dở dang.
+   */
+  async function inspectPasskeyReadiness() {
+    const localDev = /^(localhost|127\.0\.0\.1)$/.test(location.hostname);
+    const secure = window.isSecureContext === true || location.protocol === 'https:' || localDev;
+    if (!secure) return { ok: false, code: 'INSECURE' };
+    if (isEmbeddedBrowser()) return { ok: false, code: 'EMBEDDED' };
+    if (!window.PublicKeyCredential || !navigator.credentials || typeof navigator.credentials.create !== 'function') {
+      return { ok: false, code: 'UNSUPPORTED' };
+    }
+
+    try {
+      if (window.SimpleWebAuthnBrowser && typeof window.SimpleWebAuthnBrowser.browserSupportsWebAuthn === 'function') {
+        const supported = window.SimpleWebAuthnBrowser.browserSupportsWebAuthn();
+        if (!supported) return { ok: false, code: 'UNSUPPORTED' };
+      }
+    } catch (_) {
+      // Một số trình duyệt cũ không cung cấp API dò khả năng chi tiết. WebAuthn thật bên dưới
+      // vẫn là nguồn quyết định, nên không chặn chỉ vì phép dò phụ thất bại.
+    }
+
+    if (isMobileBrowser() && typeof window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable === 'function') {
+      try {
+        const available = await window.PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable();
+        if (!available) return { ok: false, code: 'NO_PLATFORM_AUTHENTICATOR' };
+      } catch (_) { /* để WebAuthn thật quyết định */ }
+    }
+    return { ok: true, code: 'READY' };
+  }
+
+  function passkeyReadinessCopy(result) {
+    const copies = {
+      READY: {
+        tone: 'note-success', icon: 'shield-check',
+        text: '<b>Thiết bị sẵn sàng.</b> Bước tiếp theo sẽ mở vân tay, Face ID hoặc mã PIN của máy.',
+      },
+      EMBEDDED: {
+        tone: 'note-warning', icon: 'smartphone',
+        text: '<b>Trang đang mở trong trình duyệt nhúng.</b> Hãy chọn menu ⋮ → “Mở bằng Chrome/Safari”, rồi kiểm tra lại.',
+      },
+      NO_PLATFORM_AUTHENTICATOR: {
+        tone: 'note-warning', icon: 'fingerprint',
+        text: '<b>Điện thoại chưa cung cấp Passkey cho trình duyệt.</b> Hãy bật Google Password Manager hoặc Mật khẩu & Chuỗi khóa iCloud và khóa màn hình.',
+      },
+      INSECURE: {
+        tone: 'note-danger', icon: 'shield',
+        text: '<b>Trang chưa được mở qua kết nối an toàn.</b> Hãy dùng đúng địa chỉ https://enclave.id.vn.',
+      },
+      UNSUPPORTED: {
+        tone: 'note-danger', icon: 'circle-alert',
+        text: '<b>Trình duyệt này chưa hỗ trợ Passkey.</b> Hãy mở Enclave bằng Chrome hoặc Safari bản mới nhất.',
+      },
+    };
+    return copies[result.code] || copies.UNSUPPORTED;
+  }
+
+  function renderPasskeyReadiness(target, result) {
+    const box = typeof target === 'string' ? $(target.startsWith('#') ? target : `#${target}`) : target;
+    if (!box || !result) return;
+    const copy = passkeyReadinessCopy(result);
+    box.className = `note passkey-readiness ${copy.tone}`;
+    box.innerHTML = `${ico(copy.icon, 18)}<div class="passkey-readiness-body"><span>${copy.text}</span>` +
+      `${result.ok ? '' : `<button class="btn btn-sm mt-2" data-act="passkey-check" data-target="${esc(box.id)}">Kiểm tra lại</button>`}</div>`;
+  }
+
+  async function refreshPasskeyReadiness(targetId) {
+    const box = $(targetId.startsWith('#') ? targetId : `#${targetId}`);
+    if (!box) return null;
+    box.className = 'note passkey-readiness';
+    box.innerHTML = `${ico('loader-circle', 18)}<div class="passkey-readiness-body"><span>Đang tự kiểm tra Passkey trên thiết bị này…</span></div>`;
+    const result = await inspectPasskeyReadiness();
+    renderPasskeyReadiness(box, result);
+    return result;
+  }
 
   /**
    * Bọc một lời gọi WebAuthn và đổi lỗi thô thành câu người dùng hiểu được.
@@ -475,9 +580,11 @@ const App = (() => {
       return await fn();
     } catch (e) {
       // Nguyên văn giữ lại cho người phát triển; giao diện chỉ nhận câu đã diễn giải.
-      console.error(`[webauthn:${kind}]`, e && e.name, e && e.message);
+      console.error(`[webauthn:${kind}]`, e && e.name, e && e.code, e && e.message,
+        e && e.cause && e.cause.name, e && e.cause && e.cause.message);
       const byKind = WEBAUTHN_HINTS[kind] || {};
-      const message = byKind[e && e.name] || WEBAUTHN_COMMON[e && e.name];
+      const errorName = (e && e.name) || (e && e.cause && e.cause.name);
+      const message = byKind[errorName] || WEBAUTHN_CODE_HINTS[e && e.code] || WEBAUTHN_COMMON[errorName];
       if (message) throw new Error(message);
       throw new Error(
         'Thiết bị xác thực không hoàn tất được thao tác. Hãy thử lại; nếu vẫn lỗi, ' +
@@ -665,6 +772,9 @@ const App = (() => {
       // ở trang chủ gửi yêu cầu cho quản trị viên.
       panel.innerHTML = `
         <div class="stack">
+          <div id="registerPasskeyReadiness" class="note passkey-readiness">
+            ${ico('loader-circle', 18)}<div class="passkey-readiness-body"><span>Đang tự kiểm tra Passkey trên thiết bị này…</span></div>
+          </div>
           <div class="field">
             <label for="regUsername">Tên đăng nhập hoặc email</label>
             <input id="regUsername" type="text" autocomplete="username" maxlength="254">
@@ -683,6 +793,10 @@ const App = (() => {
 
           <button class="btn btn-primary btn-block btn-lg" data-act="do-register">Tạo tài khoản</button>
         </div>`;
+      Promise.resolve(refreshPasskeyReadiness('registerPasskeyReadiness')).catch((error) => {
+        console.error('[passkey-readiness:register]', error);
+        renderPasskeyReadiness('registerPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
+      });
     }
   }
 
@@ -717,13 +831,20 @@ const App = (() => {
             </div>
             <button class="btn btn-primary btn-block btn-lg" data-act="do-bootstrap-password">Tiếp tục</button>
           ` : `
+            <div id="setupPasskeyReadiness" class="note passkey-readiness">
+              ${ico('loader-circle', 18)}<div class="passkey-readiness-body"><span>Đang tự kiểm tra Passkey trên thiết bị này…</span></div>
+            </div>
             <button class="btn btn-primary btn-block btn-lg" data-act="do-enroll-passkey">
               ${ico('key-round', 17)} Gắn Passkey
             </button>
           `}
 
-          <button class="btn btn-ghost btn-block" data-act="do-logout">Để lúc khác</button>
+          <button class="btn btn-ghost btn-block" data-act="do-logout">Đăng xuất và hoàn tất sau</button>
         </div>`,
+    });
+    if (!bootstrap) Promise.resolve(refreshPasskeyReadiness('setupPasskeyReadiness')).catch((error) => {
+      console.error('[passkey-readiness:setup]', error);
+      renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
   }
 
@@ -757,6 +878,8 @@ const App = (() => {
     if (!password) return toast('Vui lòng đặt mật khẩu', 'err');
 
     await guard('register', btn, async () => {
+      const readiness = await refreshPasskeyReadiness('registerPasskeyReadiness');
+      if (!readiness || !readiness.ok) return;
       const result = await api('/passkeys/register/account', {
         method: 'POST', body: { username, displayName, password },
       });
@@ -774,6 +897,8 @@ const App = (() => {
       return;
     }
     await guard('enroll', btn, async () => {
+      const readiness = await refreshPasskeyReadiness('setupPasskeyReadiness');
+      if (!readiness || !readiness.ok) return;
       const { registrationSessionId, options } = await api('/passkeys/register/passkey/options', {
         method: 'POST', body: {},
       });
@@ -4421,6 +4546,7 @@ const App = (() => {
     'modal-close': () => dismissModal(),
     'reload': () => route(),
     'open-sell': () => openSell(),
+    'passkey-check': (el) => refreshPasskeyReadiness(el.dataset.target),
     'go-home': () => resetAndGoHome(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
     'clear-filters': () => resetAndGoHome(),

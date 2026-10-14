@@ -301,6 +301,8 @@ img { max-width: 100%; display: block; }
 .note-warning { background: var(--warning-soft); color: #6B3E00; }
 .note-danger  { background: var(--danger-soft);  color: #8C1D14; }
 .note-trust   { background: var(--trust-soft);   color: #0A4F41; }
+.passkey-readiness { align-items: flex-start; }
+.passkey-readiness-body { display: flex; flex: 1 1 auto; flex-direction: column; align-items: flex-start; }
 
 /* ---------------------------------------------------------------- ô nhập */
 
