@@ -219,6 +219,11 @@ img { max-width: 100%; display: block; }
 .banner-actions { display: flex; gap: var(--s-2); flex-wrap: wrap; }
 .breadcrumb { font-size: 13px; color: var(--muted); display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .breadcrumb a:hover { color: var(--primary); }
+.home-breadcrumb {
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 10px 14px;
+}
+.home-breadcrumb [aria-current="page"] { color: var(--text); font-weight: 600; }
 
 /* ---------------------------------------------------------------- card */
 

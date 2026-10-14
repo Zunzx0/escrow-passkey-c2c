@@ -1357,6 +1357,14 @@ const App = (() => {
     else location.hash = '#/';
   }
 
+  /** Trở về đúng trang chủ của chợ, kể cả khi URL đã là #/ nhưng đang lọc danh mục. */
+  function resetAndGoHome() {
+    state.filters = { q: '', category: '', condition: '', location: '', sort: 'new' };
+    const searchInput = $('#topSearchInput');
+    if (searchInput) searchInput.value = '';
+    goHome();
+  }
+
 
   // =====================================================================
   // Trang: Trang chủ — học Shopee/Lazada: banner nhỏ, danh mục, sản phẩm mới
@@ -1372,6 +1380,11 @@ const App = (() => {
 
     view().innerHTML = `
       <div class="page-flush">
+        ${f.category ? `
+        <nav class="breadcrumb home-breadcrumb" aria-label="Đường dẫn">
+          <a href="#/" data-act="go-home">Trang chủ</a>${ico('chevron-right', 14)}
+          <span aria-current="page">${esc(categoryLabel(f.category))}</span>
+        </nav>` : ''}
         ${filtering ? '' : `
         <div class="home-top">
           <div class="promo-banner">
@@ -4408,13 +4421,9 @@ const App = (() => {
     'modal-close': () => dismissModal(),
     'reload': () => route(),
     'open-sell': () => openSell(),
+    'go-home': () => resetAndGoHome(),
     'filter-cat': (el) => { state.filters.category = el.dataset.cat || ''; goHome(); },
-    'clear-filters': () => {
-      state.filters = { q: '', category: '', condition: '', location: '', sort: 'new' };
-      const searchInput = $('#topSearchInput');
-      if (searchInput) searchInput.value = '';
-      goHome();
-    },
+    'clear-filters': () => resetAndGoHome(),
     'load-more': () => { state.homeLimit += HOME_PAGE_SIZE; renderListingPage(); },
     'scroll-products': () => { const el = $('#products'); if (el) el.scrollIntoView({ behavior: 'smooth' }); },
 
