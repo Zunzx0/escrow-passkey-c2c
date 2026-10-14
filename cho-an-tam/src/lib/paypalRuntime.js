@@ -10,6 +10,7 @@ const {createSandboxPaymentService}=require('./paypalSandboxService');
 const {parseAmount,parseClientRequestId,assertTopupLimits}=require('./topupPolicy');
 const {getUserWallet}=require('./walletOps');
 const {createAbandonment}=require('./paypalAbandonment');
+const {paypalCallbackUrl}=require('./paypalCallbackUrl');
 function configFromEnvironment() {
   return {enabled:process.env.PAYPAL_SANDBOX_ENABLED==='1',mode:'sandbox',clientId:process.env.PAYPAL_SANDBOX_CLIENT_ID,
     clientSecret:process.env.PAYPAL_SANDBOX_CLIENT_SECRET,merchantId:process.env.PAYPAL_SANDBOX_MERCHANT_ID,
@@ -38,7 +39,7 @@ function createPayPalRuntime({config=configFromEnvironment(),provider=null}={}) 
   const adapter=provider||createSandboxProvider(config);
   const settle=createPayPalSettlement({db,store:secureStore});
   const coordinator=createCaptureCoordinator({store:secureStore,provider:adapter,settle,leaseMs:enabled?config.leaseMs:120000});
-  const callback=(kind,id)=>{const u=new URL(config.frontendOrigin);u.searchParams.set('paypal',kind);u.searchParams.set('paymentRequestId',id);u.hash='/wallet';return u.href;};
+  const callback=(kind,id)=>paypalCallbackUrl(config.frontendOrigin,kind,id);
   const service=createSandboxPaymentService({store:secureStore,provider:adapter,settle,captureCoordinator:coordinator,returnUrl:id=>callback('return',id),cancelUrl:id=>callback('cancel',id)});
   const ready=()=>{if(!enabled)throw new AppError(503,'PAYPAL_DISABLED','PayPal Sandbox chưa được bật hoặc chưa đủ cấu hình');};
   async function owned(id,userId) {const row=await store.loadByRequestId(id);if(!row)throw new AppError(404,'PAYMENT_REQUEST_NOT_FOUND','Không tìm thấy yêu cầu');

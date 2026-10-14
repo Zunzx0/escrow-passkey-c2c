@@ -836,7 +836,7 @@ const App = (() => {
 
   function currentHead() {
     const hash = (location.hash || '#/').replace(/^#/, '');
-    return hash.split('?')[0].split('/').filter(Boolean)[0] || '';
+    return hash.split(/[?&]/)[0].split('/').filter(Boolean)[0] || '';
   }
 
   function currentArea() { return STORE_HEADS.has(currentHead()) ? 'store' : 'console'; }
@@ -860,9 +860,9 @@ const App = (() => {
     const security = { icon: 'shield-check', title: 'Bảo mật tài khoản', desc: 'Passkey và mật khẩu', href: '#/security' };
     const audit = { icon: 'link-2', title: 'Kiểm chứng nhật ký', href: '#/audit' };
 
-    if (role === 'BUYER') return [orders, inbox, wallet, security, audit];
+    if (role === 'BUYER') return [orders, wallet, inbox, security, audit];
     if (role === 'SELLER') {
-      return [orders, { icon: 'store', title: 'Tin đăng của tôi', href: '#/shop' }, inbox, wallet, security, audit];
+      return [orders, { icon: 'store', title: 'Tin đăng của tôi', href: '#/shop' }, wallet, inbox, security, audit];
     }
     if (role === 'ADMIN') return [
       { icon: 'gavel', title: 'Tranh chấp', href: '#/admin/disputes' },
@@ -1307,7 +1307,7 @@ const App = (() => {
 
   async function route() {
     const hash = (location.hash || '#/').replace(/^#/, '');
-    const [pathPart] = hash.split('?');
+    const [pathPart] = hash.split(/[?&]/);
     const parts = pathPart.split('/').filter(Boolean);
     window.scrollTo({ top: 0 });
 
@@ -3457,8 +3457,13 @@ const App = (() => {
       kind = q.get('paypal');
       id = q.get('paymentRequestId');
       if (q.has('paypal') || q.has('paymentRequestId')) {
-        // Dọn query khỏi thanh địa chỉ: tải lại trang không xử lý lại, và token/PayerID không nằm lại trong lịch sử.
-        window.history.replaceState(null, '', window.location.pathname + window.location.hash);
+        // PayPal có thể nối &token/PayerID SAU fragment của URL cũ. Luôn quay về
+        // trang ví sạch; dữ liệu query chỉ chọn yêu cầu để máy chủ kiểm tra.
+        window.history.replaceState(null, '', window.location.pathname + '#/wallet');
+      } else if (/^#\/wallet[?&]/.test(window.location.hash)) {
+        // Khôi phục cả địa chỉ lỗi đã bị dọn query ở phiên bản cũ. Token/PayerID
+        // không đủ để capture: giữ nguyên các bước xác minh ý định/phiên hiện có.
+        window.history.replaceState(null, '', window.location.pathname + window.location.search + '#/wallet');
       }
     } catch (_) { return null; }
     if ((kind !== 'return' && kind !== 'cancel') || !/^[A-Za-z0-9-]{8,64}$/.test(id || '')) return null;
