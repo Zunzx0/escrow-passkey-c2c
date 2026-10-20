@@ -230,6 +230,27 @@ CREATE INDEX IF NOT EXISTS idx_transaction_seller ON transactions(seller_id);
 CREATE INDEX IF NOT EXISTS idx_transaction_status ON transactions(status);
 CREATE INDEX IF NOT EXISTS idx_transaction_listing ON transactions(listing_id, status);
 
+-- Lịch vận chuyển mô phỏng bền vững: chỉ tạo khi người bán đóng gói, không áp vào đơn cũ.
+-- Đây là mô phỏng đơn vị vận chuyển; không phải xác nhận nhận hàng hay uỷ quyền giải ngân.
+CREATE TABLE IF NOT EXISTS shipments (
+  id TEXT PRIMARY KEY,
+  transaction_id TEXT NOT NULL UNIQUE REFERENCES transactions(id) ON DELETE CASCADE,
+  status TEXT NOT NULL CHECK (status IN ('PICKUP_PENDING','IN_TRANSIT','ARRIVED','STOPPED')),
+  packed_at TEXT NOT NULL,
+  pickup_due_at TEXT NOT NULL,
+  picked_up_at TEXT,
+  arrival_due_at TEXT NOT NULL,
+  arrived_at TEXT,
+  stopped_at TEXT,
+  stop_reason TEXT,
+  version INTEGER NOT NULL DEFAULT 0,
+  CHECK (pickup_due_at >= packed_at AND arrival_due_at > pickup_due_at),
+  CHECK (status NOT IN ('IN_TRANSIT','ARRIVED') OR picked_up_at IS NOT NULL),
+  CHECK (status <> 'ARRIVED' OR arrived_at IS NOT NULL),
+  CHECK (status <> 'STOPPED' OR (stopped_at IS NOT NULL AND stop_reason IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_shipment_status_due ON shipments(status, pickup_due_at, arrival_due_at);
+
 -- context_data giữ ngữ cảnh mà kết quả nghiệp vụ phụ thuộc vào nhưng KHÔNG được phép
 -- nhận lại từ phía người dùng: tên đăng nhập đã kiểm trùng và vai trò mặc định lúc đăng
 -- ký, hoặc nội dung giao dịch lúc xác thực lại.

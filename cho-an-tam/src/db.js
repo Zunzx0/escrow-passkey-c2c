@@ -371,6 +371,7 @@ const PG_MIGRATIONS = [
   { version: 4, name: 'payment-provider-isolation', file: 'schema.pg.004-payment-provider.sql' },
   { version: 5, name: 'paypal-durable-bindings', file: 'schema.pg.005-paypal-bindings.sql' },
   { version: 6, name: 'paypal-terminal-evidence', file: 'schema.pg.006-paypal-terminal-evidence.sql' },
+  { version: 7, name: 'simulated-shipping', file: 'schema.pg.007-simulated-shipping.sql' },
 ];
 
 function installPgTypeParsers(pg) {

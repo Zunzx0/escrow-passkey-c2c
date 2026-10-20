@@ -45,6 +45,7 @@ const App = (() => {
     topupNotice: null,          // thông báo trạng thái nạp tiền đang hiện trên trang ví
     payConfig: null,            // cấu hình công khai của cổng nạp tiền do máy chủ trả (PayPal Sandbox / mô phỏng)
     paypalCallback: null,       // {kind:'return'|'cancel', id} đọc từ URL khi PayPal đưa người dùng quay lại; dùng một lần
+    shippingModalId: null,
   };
 
   const ROLE_LABEL = { BUYER: 'Người mua', SELLER: 'Người bán', ADMIN: 'Quản trị viên' };
@@ -601,6 +602,7 @@ const App = (() => {
   // việc bấm ra ngoài để tắt, vì phiên lúc đó chưa gọi được chức năng nào — đóng modal chỉ
   // dẫn người dùng tới một màn hình trống rồi lỗi 403.
   let modalDismissible = true;
+  let modalGeneration = 0;
 
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
     closeModal();
@@ -622,7 +624,14 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() { $('#modalRoot').innerHTML = ''; modalDismissible = true; state.paypalAbandonConfirmation = null; }
+  function closeModal() {
+    modalGeneration++;
+    if (window.EnclaveShippingMotion) window.EnclaveShippingMotion.stop();
+    state.shippingModalId = null;
+    $('#modalRoot').innerHTML = '';
+    modalDismissible = true;
+    state.paypalAbandonConfirmation = null;
+  }
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
   // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
@@ -643,10 +652,13 @@ const App = (() => {
     if (fresh) {
       state.sessionEpoch++;
       resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
+      stopShippingWatch();
     }
+    startShippingWatch(); // Tài khoản vừa kích hoạt Passkey cũng cần bắt đầu theo dõi.
   }
 
   function clearSession() {
+    stopShippingWatch();
     state.token = null;
     state.user = null;
     state.wallet = null;
@@ -1313,6 +1325,12 @@ const App = (() => {
   }
 
   function statusTag(t) {
+    if (t.status === 'SECURED' && t.shipment && t.shipment.status === 'PICKUP_PENDING') {
+      return '<span class="tag tag-info">Chờ xe lấy hàng</span>';
+    }
+    if (t.status === 'SHIPPING' && t.shipment && t.shipment.status === 'ARRIVED') {
+      return '<span class="tag tag-success">Hàng đã đến · chờ nhận</span>';
+    }
     const ui = STATUS_UI[t.status] || { label: t.status, tone: '' };
     return `<span class="tag ${ui.tone}">${esc(ui.label)}</span>`;
   }
@@ -1331,7 +1349,7 @@ const App = (() => {
     { key: 'CREATED', label: 'Đã tạo đơn', actions: ['ORDER_CREATED', 'TRANSACTION_CREATED'] },
     { key: 'LOCKED', label: 'Đã khoá tiền vào ký quỹ', actions: ['ESCROW_LOCKED'] },
     { key: 'ACK', label: 'Người bán xác nhận đơn', actions: ['SELLER_ACKNOWLEDGED'] },
-    { key: 'SHIPPED', label: 'Người bán đã giao hàng', actions: ['SELLER_SHIPPED'] },
+    { key: 'SHIPPED', label: 'Đã bàn giao cho vận chuyển', actions: ['SELLER_SHIPPED', 'SIMULATED_CARRIER_PICKED_UP'] },
     { key: 'RECEIVED', label: 'Người mua đã nhận hàng', actions: ['BUYER_RECEIVED_PACKAGE'] },
     { key: 'DONE', label: 'Hoàn tất', actions: ['ESCROW_RELEASED', 'ADMIN_RELEASE', 'ADMIN_REFUND'] },
   ];
@@ -1362,9 +1380,13 @@ const App = (() => {
     switch (t.status) {
       case 'CREATED': return isBuyer ? 'Thanh toán để tiền được giữ trong ký quỹ' : 'Chờ người mua thanh toán';
       case 'SECURED':
+        if (t.shipment && t.shipment.status === 'PICKUP_PENDING') return 'Đã đóng gói · xe đang đến lấy hàng, không cần thao tác thêm';
         if (!t.sellerAckAt) return isBuyer ? 'Chờ người bán xác nhận đơn' : 'Xác nhận đơn và chuẩn bị gửi hàng';
-        return isBuyer ? 'Chờ người bán gửi hàng' : 'Gửi hàng rồi bấm "Xác nhận đã giao hàng"';
-      case 'SHIPPING': return isBuyer ? 'Bấm "Xác nhận đã nhận hàng" khi kiện hàng tới' : 'Chờ người mua nhận hàng';
+        return isBuyer ? 'Người bán đang đóng gói kiện hàng' : 'Đóng gói xong rồi bấm "Đã đóng gói" để xe đến lấy';
+      case 'SHIPPING':
+        if (t.shipment && t.shipment.status === 'IN_TRANSIT') return 'Enclave Delivery đang vận chuyển · tiền vẫn ở ký quỹ';
+        if (!t.shipment) return isBuyer ? 'Bấm "Xác nhận đã nhận hàng" khi kiện hàng tới' : 'Chờ người mua nhận hàng';
+        return isBuyer ? 'Kiện hàng đã đến · nhận và kiểm tra hàng trước khi xác nhận' : 'Chờ người mua nhận và kiểm tra hàng';
       case 'WAIT_CONFIRM': return isBuyer ? 'Kiểm hàng rồi giải ngân, hoặc mở tranh chấp' : 'Chờ người mua xác nhận giải ngân';
       case 'DISPUTED': return 'Tiền đang bị đóng băng, chờ quản trị viên phân xử';
       case 'COMPLETED': return 'Người mua đã giải ngân — giao dịch kết thúc';
@@ -1917,7 +1939,7 @@ const App = (() => {
       if (t.status === 'CREATED') {
         out.push(`<button class="btn btn-primary btn-sm" data-act="secure" data-id="${id}">${ico('lock', 15)} Thanh toán an toàn</button>`);
       }
-      if (t.status === 'SHIPPING') {
+      if (t.status === 'SHIPPING' && (!t.shipment || t.shipment.status === 'ARRIVED')) {
         out.push(`<button class="btn btn-primary btn-sm" data-act="wait-confirm" data-id="${id}">${ico('package', 15)} Xác nhận đã nhận hàng</button>`);
       }
       if (t.status === 'WAIT_CONFIRM') {
@@ -1928,18 +1950,158 @@ const App = (() => {
       if (t.status === 'SECURED' && !t.sellerAckAt) {
         out.push(`<button class="btn btn-primary btn-sm" data-act="acknowledge" data-id="${id}">${ico('check', 15)} Xác nhận đơn hàng</button>`);
       }
-      if (t.status === 'SECURED' && t.sellerAckAt) {
-        out.push(`<button class="btn btn-primary btn-sm" data-act="ship" data-id="${id}">${ico('truck', 15)} Xác nhận đã giao hàng</button>`);
+      if (t.status === 'SECURED' && t.sellerAckAt && !t.shipment) {
+        out.push(`<button class="btn btn-primary btn-sm" data-act="pack" data-id="${id}">${ico('package', 15)} Đã đóng gói</button>`);
       }
       if (t.status === 'WAIT_CONFIRM') {
         out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-id="${id}">${ico('triangle-alert', 15)} Báo sự cố</button>`);
       }
     }
+    if (t.shipment) out.push(`<button class="btn btn-sm" data-act="shipping-open" data-id="${id}">${ico('truck', 15)} Theo dõi giao hàng</button>`);
     return out.join('');
   }
 
 
   // ---------- Hành động trên đơn ----------
+
+  // Máy chủ giữ lịch vận chuyển; trình duyệt chỉ theo dõi và minh họa kết quả.
+  // Một vòng theo dõi cho mỗi phiên, không chạy chồng và bỏ mọi phản hồi của phiên cũ.
+  let shippingWatch = null;
+  let transactionRenderGen = 0;
+  const shippingRows = new Map();
+  const shippingSeen = new Set();
+
+  function shippingKey(t) {
+    return [t.id, t.version, t.status, t.sellerAckAt, t.shipment && t.shipment.status].join(':');
+  }
+
+  function rememberShipping(t) {
+    if (!t || !t.id || !t.shipment) return;
+    const previous = shippingRows.get(t.id);
+    if (previous && (Number(previous.version) > Number(t.version)
+      || Date.parse(previous.shipment.serverNow) > Date.parse(t.shipment.serverNow))) return;
+    shippingRows.set(t.id, t);
+  }
+
+  function shippingNoticeKey(t) {
+    return 'cat_shipping_seen:' + state.user.id + ':' + t.shipment.id + ':' + t.shipment.status;
+  }
+
+  function shippingNoticeSeen(t) {
+    const key = shippingNoticeKey(t);
+    try { return shippingSeen.has(key) || sessionStorage.getItem(key) === '1'; }
+    catch (_) { return shippingSeen.has(key); }
+  }
+
+  function markShippingNotice(t) {
+    const key = shippingNoticeKey(t);
+    shippingSeen.add(key);
+    try { sessionStorage.setItem(key, '1'); } catch (_) { /* bộ nhớ phiên vẫn đủ */ }
+  }
+
+  function showShipping(t) {
+    const motion = window.EnclaveShippingMotion;
+    if (!motion || !t.shipment || !state.user) return;
+    const modal = openModal({
+      title: 'Enclave Delivery',
+      body: `<p class="small muted m-0-0-6">${esc(t.itemName)} · Đơn #${esc(shortId(t.id))}</p>${motion.scene(t)}`,
+      footer: `<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="shipping-order" data-id="${esc(t.id)}">Xem đơn hàng</button>`,
+    });
+    modal.querySelector('.modal-backdrop').classList.add('shipping-backdrop');
+    modal.querySelector('.modal').classList.add('shipping-modal');
+    state.shippingModalId = t.id;
+    markShippingNotice(t);
+    motion.mount(modal.querySelector('.modal-body'), t);
+  }
+
+  async function openShipping(id, btn) {
+    const epoch = state.sessionEpoch;
+    const hash = location.hash;
+    const modalIntent = modalGeneration;
+    const t = await guard('shipping-open:' + id, btn, () => api('/transactions/' + encodeURIComponent(id)));
+    if (epoch !== state.sessionEpoch || hash !== location.hash || modalIntent !== modalGeneration || !t) return;
+    rememberShipping(t);
+    showShipping(shippingRows.get(t.id) || t);
+    wakeShippingWatch();
+  }
+
+  function stopShippingWatch() {
+    if (shippingWatch) {
+      shippingWatch.stopped = true;
+      clearTimeout(shippingWatch.timer);
+    }
+    shippingWatch = null;
+    shippingRows.clear();
+  }
+
+  function startShippingWatch() {
+    if (shippingWatch || !state.token || !state.user || state.user.role === 'ADMIN'
+      || state.user.accountStatus && state.user.accountStatus !== 'ACTIVE') return;
+    const watch = { epoch: state.sessionEpoch, stopped: false, busy: false, timer: null };
+    shippingWatch = watch;
+    watch.timer = setTimeout(() => pollShipping(watch), 100);
+  }
+
+  function wakeShippingWatch() {
+    startShippingWatch();
+    if (!shippingWatch || shippingWatch.busy) return;
+    clearTimeout(shippingWatch.timer);
+    shippingWatch.timer = setTimeout(() => pollShipping(shippingWatch), 100);
+  }
+
+  function shippingWatchAlive(watch) {
+    return watch && !watch.stopped && shippingWatch === watch && watch.epoch === state.sessionEpoch && state.user;
+  }
+
+  async function pollShipping(watch) {
+    if (!shippingWatchAlive(watch) || watch.busy) return;
+    watch.busy = true;
+    let active = false;
+    try {
+      if (document.visibilityState === 'hidden') return;
+      const perspectives = state.user.role === 'SELLER' ? ['buyer', 'seller'] : ['buyer'];
+      const lists = await Promise.all(perspectives.map((as) => api('/transactions?as=' + as)));
+      if (!shippingWatchAlive(watch)) return;
+      let changed = false;
+      for (const list of lists) for (const t of list.transactions || []) {
+        if (!t.shipment) continue;
+        const before = shippingRows.get(t.id);
+        rememberShipping(t);
+        const current = shippingRows.get(t.id);
+        if (current && (!before || shippingKey(before) !== shippingKey(current))) changed = true;
+      }
+      const rows = Array.from(shippingRows.values());
+      active = rows.some((t) => ['PICKUP_PENDING', 'IN_TRANSIT'].includes(t.shipment.status));
+      if (state.shippingModalId) {
+        const t = shippingRows.get(state.shippingModalId);
+        if (t && window.EnclaveShippingMotion) {
+          window.EnclaveShippingMotion.update(t);
+          markShippingNotice(t);
+        }
+      }
+      const page = $('#txPage');
+      const current = page && shippingRows.get(page.dataset.id);
+      if (current && page.dataset.shippingKey !== shippingKey(current)) {
+        await viewTransaction(current.id);
+      } else if (changed && currentHead() === 'orders' && !state.busy.size) {
+        const perspective = state.orderTab === 'sell' ? 'SELLER' : 'BUYER';
+        await Promise.all([loadOrders('#orderList', perspective, perspective === 'SELLER' ? 'seller' : 'buyer'), loadTodo('#todoBox', { hideWhenEmpty: true })]);
+      }
+      if (!shippingWatchAlive(watch)) return;
+      if (!$('#modalRoot').children.length && !state.busy.size && document.visibilityState !== 'hidden') {
+        const candidate = rows.find((t) => ['SECURED', 'SHIPPING'].includes(t.status) && t.escrowStatus === 'LOCKED'
+          && ((t.sellerId === state.user.id && t.shipment.status === 'PICKUP_PENDING')
+            || (t.buyerId === state.user.id && ['IN_TRANSIT', 'ARRIVED'].includes(t.shipment.status)))
+          && !shippingNoticeSeen(t));
+        if (candidate) showShipping(candidate);
+      }
+    } catch (_) {
+      // Mất mạng: giữ kết quả máy chủ đã xác nhận, không tự tuyên bố đã giao hàng.
+    } finally {
+      watch.busy = false;
+      if (shippingWatchAlive(watch)) watch.timer = setTimeout(() => pollShipping(watch), active ? 1200 : 6000);
+    }
+  }
 
   async function secureOrder(id, btn, then) {
     await guard('secure:' + id, btn, () => api(`/transactions/${id}/secure`, {
@@ -1953,14 +2115,40 @@ const App = (() => {
 
   async function acknowledgeOrder(id, btn) {
     await guard('ack:' + id, btn, () => api(`/transactions/${id}/acknowledge`, { method: 'POST' }),
-      'Đã xác nhận đơn. Hãy gửi hàng rồi bấm "Xác nhận đã giao hàng".');
+      'Đã xác nhận đơn. Đóng gói xong rồi bấm "Đã đóng gói" để xe đến lấy hàng.');
     route();
   }
 
-  async function shipOrder(id, btn) {
-    await guard('ship:' + id, btn, () => api(`/transactions/${id}/ship`, { method: 'POST' }),
-      'Đã ghi nhận giao hàng. Tiền vẫn ở ký quỹ cho tới khi người mua xác nhận.');
-    route();
+  function confirmPackedOrder(id) {
+    openModal({
+      title: 'Kiện hàng đã sẵn sàng?',
+      body: '<p>Hãy đóng gói chắc chắn và chuẩn bị kiện hàng tại điểm lấy. Sau khi xác nhận, Enclave Delivery sẽ tự mô phỏng lấy và giao hàng.</p><div class="note note-trust">' + ico('shield-check', 18) + '<span>Tiền vẫn ở ký quỹ. Giao hàng đến nơi chưa phải là xác nhận nhận hàng hay giải ngân.</span></div>',
+      footer: `<button class="btn" data-act="modal-close">Chưa sẵn sàng</button><button class="btn btn-primary" data-act="pack-confirm" data-id="${esc(id)}">${ico('package', 16)} Xác nhận đã đóng gói</button>`,
+    });
+  }
+
+  async function packOrder(id, btn) {
+    if (state.busy.has('pack:' + id)) return;
+    const epoch = state.sessionEpoch;
+    const root = $('#modalRoot');
+    const buttons = Array.from(root.querySelectorAll('button'));
+    modalDismissible = false;
+    buttons.forEach((button) => { button.disabled = true; });
+    try {
+      const t = await guard('pack:' + id, btn, () => api(`/transactions/${encodeURIComponent(id)}/pack`, { method: 'POST' }));
+      if (!t || epoch !== state.sessionEpoch) return;
+      rememberShipping(t);
+      closeModal();
+      await route();
+      if (epoch !== state.sessionEpoch) return;
+      showShipping(t);
+      wakeShippingWatch();
+    } finally {
+      if (epoch === state.sessionEpoch && root === $('#modalRoot') && !state.shippingModalId) {
+        modalDismissible = true;
+        buttons.forEach((button) => { if (button.isConnected) button.disabled = false; });
+      }
+    }
   }
 
   async function waitConfirmOrder(id, btn) {
@@ -3862,16 +4050,22 @@ const App = (() => {
     if (!state.user) return requireLogin('Đăng nhập để xem chi tiết giao dịch.');
     if (!id) { location.hash = consoleHome(); return; }
 
+    const epoch = state.sessionEpoch;
+    const hash = location.hash;
+    const generation = ++transactionRenderGen;
+
     const [t, { logs }] = await Promise.all([
       api('/transactions/' + encodeURIComponent(id)),
       api(`/transactions/${encodeURIComponent(id)}/logs`),
     ]);
+    if (epoch !== state.sessionEpoch || hash !== location.hash || generation !== transactionRenderGen) return;
+    rememberShipping(t);
     const me = state.user;
     const role = t.buyerId === me.id ? 'BUYER' : t.sellerId === me.id ? 'SELLER' : me.role === 'ADMIN' ? 'ADMIN' : null;
     const isBuyer = role === 'BUYER';
 
     view().innerHTML = `
-      <div class="page">
+      <div class="page" id="txPage" data-id="${esc(t.id)}" data-shipping-key="${esc(shippingKey(t))}">
         <div class="breadcrumb">
           <a href="${consoleHome()}">${role === 'ADMIN' ? 'Quản trị' : 'Giao dịch của tôi'}</a>${ico('chevron-right', 14)}
           <span>Giao dịch #${esc(shortId(t.id))}</span>
@@ -3896,6 +4090,7 @@ const App = (() => {
 
         <div class="tx-grid">
           <div class="stack">
+            ${window.EnclaveShippingMotion ? window.EnclaveShippingMotion.render(t) : ''}
             <div class="card">
               <div class="card-head"><h2>Trạng thái giao dịch</h2><span class="tag tag-navy">${ico('link-2', 12)} ${logs.length} bản ghi trong chuỗi băm</span></div>
               <div class="card-body"><ol class="steps">${txSteps(t, logs)}</ol></div>
@@ -4432,6 +4627,10 @@ const App = (() => {
     ESCROW_LOCKED: 'Khoá tiền vào ký quỹ',
     SELLER_ACKNOWLEDGED: 'Người bán xác nhận đơn',
     SELLER_SHIPPED: 'Người bán gửi hàng',
+    SELLER_PACKED: 'Người bán đã đóng gói',
+    SIMULATED_CARRIER_PICKED_UP: 'Enclave Delivery đã lấy hàng (mô phỏng)',
+    SIMULATED_CARRIER_ARRIVED: 'Đơn hàng đã đến điểm giao (mô phỏng)',
+    SIMULATED_SHIPMENT_STOPPED: 'Tạm dừng vận chuyển mô phỏng',
     BUYER_RECEIVED_PACKAGE: 'Người mua đã nhận hàng',
     ESCROW_RELEASED: 'Tất toán & giải ngân',
     DISPUTE_OPENED: 'Mở tranh chấp',
@@ -4559,7 +4758,10 @@ const App = (() => {
     'order-tab': (el) => { state.orderTab = el.dataset.tab; route(); },
     'acknowledge': (el) => acknowledgeOrder(el.dataset.id, el),
     'secure': (el) => secureOrder(el.dataset.id, el, el.dataset.then),
-    'ship': (el) => shipOrder(el.dataset.id, el),
+    'pack': (el) => confirmPackedOrder(el.dataset.id),
+    'pack-confirm': (el) => packOrder(el.dataset.id, el),
+    'shipping-open': (el) => openShipping(el.dataset.id, el),
+    'shipping-order': (el) => { closeModal(); location.hash = '#/tx/' + encodeURIComponent(el.dataset.id); },
     'wait-confirm': (el) => waitConfirmOrder(el.dataset.id, el),
     'open-release': (el) => openReleaseModal(el.dataset.id),
     'do-release': (el) => doRelease(el.dataset.id, el),
@@ -4657,6 +4859,7 @@ const App = (() => {
     await refreshSellerRequest();
     renderChrome();
     await route();
+    startShippingWatch();
     if (state.token && state.user && state.user.accountStatus && state.user.accountStatus !== 'ACTIVE') {
       openSetupModal(state.user);
     }
@@ -4674,7 +4877,10 @@ const App = (() => {
     // để máy ngủ, để người dùng không bị đăng xuất giữa chừng.
     setInterval(() => { if (state.token) refreshSession(); }, 10 * 60 * 1000);
     document.addEventListener('visibilitychange', () => {
-      if (document.visibilityState === 'visible' && state.token) refreshSession();
+      if (document.visibilityState === 'visible' && state.token) {
+        refreshSession();
+        wakeShippingWatch();
+      }
     });
   }
 

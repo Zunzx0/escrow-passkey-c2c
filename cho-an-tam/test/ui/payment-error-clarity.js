@@ -85,7 +85,7 @@ async function openPage({ hash, user, routes }) {
       });
       // Nối thành MỘT lần eval: các tệp khai báo `const` ở mức script và dùng chung phạm vi đó khi nạp
       // bằng thẻ <script>, còn mỗi lần eval riêng lại có phạm vi riêng.
-      w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'app.js']
+      w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'shipping-motion.js', 'app.js']
         .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')).join('\n;\n'));
     },
   });
