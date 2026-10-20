@@ -60,8 +60,8 @@ const money = (n) => `${Number(n).toLocaleString('vi-VN')}₫`;
 async function onOrderSecured(txn) {
   await notify([{
     userId: txn.seller_id, type: 'ORDER_PAID', key: txn.id, transactionId: txn.id,
-    title: 'Đơn hàng đã được thanh toán — cần giao hàng',
-    body: `"${txn.item_name}" — ${money(txn.amount)} đang được giữ trong ký quỹ. Hãy gửi hàng cho người mua.`,
+    title: 'Đơn hàng đã được thanh toán — cần xác nhận',
+    body: `"${txn.item_name}" — ${money(txn.amount)} đang được giữ trong ký quỹ. Hãy xác nhận đơn rồi đóng gói để đơn vị vận chuyển mô phỏng tới lấy.`,
   }]);
 }
 
@@ -70,6 +70,30 @@ async function onOrderAcknowledged(txn) {
     userId: txn.buyer_id, type: 'ORDER_ACKNOWLEDGED', key: txn.id, transactionId: txn.id,
     title: 'Người bán đã xác nhận đơn hàng',
     body: `"${txn.item_name}" sẽ sớm được gửi đi. Tiền của bạn vẫn đang được giữ trong ký quỹ.`,
+  }]);
+}
+
+async function onOrderPacked(txn) {
+  await notify([{
+    userId: txn.buyer_id, type: 'ORDER_PACKED', key: txn.id, transactionId: txn.id,
+    title: 'Người bán đã đóng gói — chờ lấy hàng',
+    body: `"${txn.item_name}" đang chờ đơn vị vận chuyển mô phỏng lấy hàng. Tiền vẫn được giữ trong ký quỹ.`,
+  }]);
+}
+
+async function onShipmentPickedUp(txn) {
+  await notify([txn.buyer_id, txn.seller_id].map((userId) => ({
+    userId, type: 'SHIPMENT_PICKED_UP', key: txn.id, transactionId: txn.id,
+    title: 'Đơn vị vận chuyển đã lấy hàng (mô phỏng)',
+    body: `"${txn.item_name}" đang được vận chuyển tới người mua. Tiền vẫn được giữ trong ký quỹ.`,
+  })));
+}
+
+async function onShipmentArrived(txn) {
+  await notify([{
+    userId: txn.buyer_id, type: 'SHIPMENT_ARRIVED', key: txn.id, transactionId: txn.id,
+    title: 'Đơn hàng đã đến (mô phỏng)',
+    body: `"${txn.item_name}" đã đến điểm giao. Hãy nhận kiện hàng rồi xác nhận đã nhận. Đây chưa phải xác nhận giải ngân.`,
   }]);
 }
 
@@ -156,16 +180,23 @@ async function todoFor(user) {
     items.push({ kind: 'PAY_ORDER', role: 'BUYER', transactionId: t.id, title: 'Thanh toán đơn hàng',
       detail: `"${t.item_name}" — ${money(t.amount)} chưa được khoá vào ký quỹ.` });
   }
-  for (const t of await txns(`SELECT * FROM transactions WHERE seller_id = ? AND status = 'SECURED' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT t.*, sp.id AS shipment_id FROM transactions t
+    LEFT JOIN shipments sp ON sp.transaction_id = t.id
+    WHERE t.seller_id = ? AND t.status = 'SECURED' ORDER BY t.created_at`, user.id)) {
+    if (t.shipment_id) continue; // Packed: the carrier now owns the next step.
     items.push(t.seller_ack_at
-      ? { kind: 'SHIP_ORDER', role: 'SELLER', transactionId: t.id, title: 'Giao hàng cho người mua',
-        detail: `"${t.item_name}" — bạn đã xác nhận đơn, hãy gửi hàng và bấm "Xác nhận giao hàng".` }
+      ? { kind: 'SHIP_ORDER', role: 'SELLER', transactionId: t.id, title: 'Đóng gói đơn hàng',
+        detail: `"${t.item_name}" — bạn đã xác nhận đơn. Đóng gói rồi bấm "Đã đóng gói" để đơn vị vận chuyển mô phỏng tới lấy.` }
       : { kind: 'ACK_ORDER', role: 'SELLER', transactionId: t.id, title: 'Xác nhận đơn hàng mới',
         detail: `"${t.item_name}" — người mua đã thanh toán ${money(t.amount)} vào ký quỹ.` });
   }
-  for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'SHIPPING' ORDER BY created_at`, user.id)) {
+  for (const t of await txns(`SELECT t.*, sp.id AS shipment_id, sp.status AS shipment_status FROM transactions t
+    LEFT JOIN shipments sp ON sp.transaction_id = t.id
+    WHERE t.buyer_id = ? AND t.status = 'SHIPPING' ORDER BY t.created_at`, user.id)) {
+    if (t.shipment_id && t.shipment_status !== 'ARRIVED') continue;
     items.push({ kind: 'CONFIRM_RECEIPT', role: 'BUYER', transactionId: t.id, title: 'Xác nhận đã nhận hàng',
-      detail: `"${t.item_name}" đã được gửi đi.` });
+      detail: t.shipment_id ? `"${t.item_name}" đã đến điểm giao (mô phỏng). Hãy nhận kiện hàng rồi xác nhận.`
+        : `"${t.item_name}" đã được gửi đi.` });
   }
   for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'WAIT_CONFIRM' ORDER BY created_at`, user.id)) {
     items.push({ kind: 'RELEASE_OR_DISPUTE', role: 'BUYER', transactionId: t.id, title: 'Xác nhận giải ngân hoặc mở tranh chấp',
@@ -199,6 +230,9 @@ module.exports = {
   todoFor,
   onOrderSecured,
   onOrderAcknowledged,
+  onOrderPacked,
+  onShipmentPickedUp,
+  onShipmentArrived,
   onOrderShipped,
   onOrderWaitConfirm,
   onOrderCompleted,

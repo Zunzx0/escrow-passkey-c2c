@@ -12,8 +12,9 @@ const { rateLimit } = require('../lib/rateLimit');
 const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounter');
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const {
-  onOrderSecured, onOrderAcknowledged, onOrderShipped, onOrderWaitConfirm, onOrderCompleted, onDisputeOpened,
+  onOrderSecured, onOrderAcknowledged, onOrderPacked, onOrderShipped, onOrderWaitConfirm, onOrderCompleted, onDisputeOpened,
 } = require('../lib/notifications');
+const { serializeShipment, createShipment } = require('../lib/shipping');
 const { settleListing } = require('../lib/listingLifecycle');
 const { parseVndAmount } = require('../lib/money');
 
@@ -45,11 +46,17 @@ const TXN_SELECT = `
          l.title  AS listing_title,
          l.image  AS listing_image,
          l.category AS listing_category,
-         l.location AS listing_location
+         l.location AS listing_location,
+         sp.id AS shipment_id, sp.status AS shipment_status,
+         sp.packed_at AS shipment_packed_at, sp.pickup_due_at AS shipment_pickup_due_at,
+         sp.picked_up_at AS shipment_picked_up_at, sp.arrival_due_at AS shipment_arrival_due_at,
+         sp.arrived_at AS shipment_arrived_at, sp.stopped_at AS shipment_stopped_at,
+         sp.stop_reason AS shipment_stop_reason
   FROM transactions t
   JOIN users b ON b.id = t.buyer_id
   JOIN users s ON s.id = t.seller_id
   LEFT JOIN listings l ON l.id = t.listing_id
+  LEFT JOIN shipments sp ON sp.transaction_id = t.id
 `;
 
 function serializeTxn(t) {
@@ -75,6 +82,13 @@ function serializeTxn(t) {
     listingLocation: t.listing_location || null,
     buyerNote: t.buyer_note || null,
     sellerAckAt: t.seller_ack_at || null,
+    shipment: serializeShipment(t.shipment_id ? {
+      id: t.shipment_id, status: t.shipment_status,
+      packed_at: t.shipment_packed_at, pickup_due_at: t.shipment_pickup_due_at,
+      picked_up_at: t.shipment_picked_up_at, arrival_due_at: t.shipment_arrival_due_at,
+      arrived_at: t.shipment_arrived_at, stopped_at: t.shipment_stopped_at,
+      stop_reason: t.shipment_stop_reason,
+    } : null),
   };
 }
 
@@ -408,8 +422,7 @@ router.post('/:id/secure', requireAuth, async (req, res, next) => {
 // ---------- Người bán xác nhận đơn ----------
 //
 // Mốc sự kiện, không phải trạng thái: đơn vẫn SECURED + LOCKED, không có tiền nào di chuyển.
-// Cho người mua biết người bán đã thấy đơn và sẽ gửi hàng. Không bắt buộc trước khi gửi hàng —
-// thêm một điều kiện chặn chuyển trạng thái là đổi máy trạng thái đã chốt ở Chương 2.
+// Luồng mô phỏng mới bắt buộc mốc này trước khi đóng gói. /ship của đơn cũ vẫn giữ tương thích.
 router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
     const txn = await loadTxnOr404(req.params.id);
@@ -422,7 +435,8 @@ router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, 
     await db.transaction(async () => {
       // Điều kiện nằm trong WHERE: hai lần bấm gần như đồng thời chỉ một lần ghi được.
       const r = await db
-        .prepare(`UPDATE transactions SET seller_ack_at = ?, updated_at = ? WHERE id = ? AND seller_ack_at IS NULL AND status = 'SECURED'`)
+        .prepare(`UPDATE transactions SET seller_ack_at = ?, updated_at = ?, version = version + 1
+          WHERE id = ? AND seller_ack_at IS NULL AND status = 'SECURED' AND escrow_status = 'LOCKED'`)
         .run(nowIso(), nowIso(), txn.id);
       if (r.changes !== 1) throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'Đơn này vừa được xác nhận');
       await appendAuditLog(db, {
@@ -441,6 +455,34 @@ router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, 
   }
 });
 
+// ---------- Đóng gói: đặt lịch đơn vị vận chuyển mô phỏng ----------
+router.post('/:id/pack', requireAuth, requireRole('SELLER'), async (req, res, next) => {
+  try {
+    const initial = await loadTxnOr404(req.params.id);
+    assertOwnership(initial, req.user, ['SELLER']);
+    let packed;
+    let current;
+    await db.transaction(async () => {
+      current = await loadTxnOr404(initial.id);
+      assertOwnership(current, req.user, ['SELLER']);
+      packed = await createShipment(current);
+      if (packed.created) {
+        await appendAuditLog(db, {
+          transactionId: current.id, actorId: req.user.id, action: 'SELLER_PACKED',
+          oldStatus: 'SECURED', newStatus: 'SECURED',
+          eventData: {
+            shipmentId: packed.shipment.id, packedAt: packed.shipment.packed_at,
+            pickupDueAt: packed.shipment.pickup_due_at, arrivalDueAt: packed.shipment.arrival_due_at,
+            simulated: true,
+          },
+        });
+      }
+    })();
+    if (packed.created) await onOrderPacked(current);
+    res.status(packed.created ? 201 : 200).json(serializeTxn(await loadTxnOr404(initial.id)));
+  } catch (e) { next(e); }
+});
+
 // ---------- UC07: Người bán giao hàng ----------
 
 router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, next) => {
@@ -451,7 +493,16 @@ router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, ne
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SECURED + LOCKED');
     }
     await db.transaction(async () => {
-      await applyTransactionStatus(txn, { status: 'SHIPPING', escrowStatus: 'LOCKED' });
+      // Compatibility for historical orders only. A new persisted carrier schedule
+      // cannot be skipped by calling the old endpoint or racing a /pack request.
+      const current = await loadTxnOr404(txn.id);
+      if (current.shipment_id) {
+        throw new AppError(409, 'SHIPMENT_MANAGED', 'Đơn đã có lịch vận chuyển mô phỏng; hệ thống sẽ tự lấy và giao hàng.');
+      }
+      if (current.status !== 'SECURED' || current.escrow_status !== 'LOCKED') {
+        throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SECURED + LOCKED');
+      }
+      await applyTransactionStatus(current, { status: 'SHIPPING', escrowStatus: 'LOCKED' });
       await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
@@ -489,7 +540,14 @@ router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SHIPPING + LOCKED');
     }
     await db.transaction(async () => {
-      await applyTransactionStatus(txn, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
+      const current = await loadTxnOr404(txn.id);
+      if (current.status !== 'SHIPPING' || current.escrow_status !== 'LOCKED') {
+        throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SHIPPING + LOCKED');
+      }
+      if (current.shipment_id && current.shipment_status !== 'ARRIVED') {
+        throw new AppError(409, 'SHIPMENT_NOT_ARRIVED', 'Đơn hàng đang vận chuyển. Hãy đợi hàng đến rồi xác nhận đã nhận.');
+      }
+      await applyTransactionStatus(current, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
       await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,

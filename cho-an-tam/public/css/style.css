@@ -584,6 +584,78 @@ a.pcard:hover { border-color: var(--primary); box-shadow: var(--shadow); transfo
 .action-box.idle { border-color: var(--border); background: var(--surface); }
 .action-box.idle h3 { color: var(--text); }
 
+/* ---------------------------------------------------------------- xe giao hàng Enclave */
+
+.shipping-tracking { padding: 20px; background: #fff; }
+.modal-backdrop.shipping-backdrop { display: flex; padding: 16px; }
+.shipping-backdrop .shipping-modal { margin: auto; }
+.shipping-modal .modal-body { padding: 16px 20px; }
+.shipping-tracking-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.shipping-tracking h3 { font-size: 17px; margin: 4px 0 0; }
+.shipping-eyebrow { font-size: 10px; letter-spacing: 1.4px; font-weight: 700; color: #8d622b; }
+.shipping-demo-badge { display: inline-block; padding: 4px 9px; border-radius: 20px; background: #fff4df; border: 1px solid #edd7ad; font-size: 11px; color: #7d5b27; }
+.shipping-tracking-title { font-weight: 600; margin: 18px 0 4px; }
+.shipping-tracking-copy { font-size: 13px; color: #686868; margin: 0 0 14px; line-height: 1.6; }
+.shipping-tracking-note { color: #757575; font-size: 11px; line-height: 1.6; margin: 12px 0 0; }
+.shipping-motion-scene { --sm-paper:#fff; --sm-bg:#f5f5f5; --sm-line:#e6e6e6; --sm-ink:#222; --sm-muted:#757575; --sm-road:#e6e4dc; --sm-soft:#f5f1e8; --sm-city:#e8e6dc; --sm-grass:#c5d2b5; --sm-orange:#ee5a24; --sm-yellow:#ffd17a; --sm-green:#0b7a63; --sm-shade:#332e2526; color:#222; background:#fff; color-scheme: light; width: 100%; }
+.shipping-motion-scene *, .shipping-motion-scene *::before, .shipping-motion-scene *::after { box-sizing: border-box; }
+.shipping-motion-scene [hidden] { display: none !important; }
+.shipping-motion-scene .sm-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.shipping-motion-scene .sm-step-pill { padding: 5px 10px; font-size: 11px; color: #757575; background: #f5f1e8; border-radius: 20px; white-space: nowrap; }
+.shipping-motion-scene .sm-title { color: #222; margin: 12px 0 0; font-size: 21px; line-height: 1.4; }
+.shipping-motion-scene .sm-symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
+.shipping-motion-scene .sm-scene { position: relative; overflow: hidden; margin: 12px -8px 8px; }
+.shipping-motion-scene .sm-scene > svg { display: block; width: 100%; height: auto; overflow: visible; }
+.shipping-motion-scene .sm-route-label { font-size: 13px; fill: #757575; font-family: inherit; }
+.shipping-motion-scene .sm-route-travel { stroke: #ee5a24; stroke-width: 4; fill: none; stroke-linecap: round; }
+.shipping-motion-scene .sm-activity-text { position: absolute; left: 0; right: 0; bottom: 3px; text-align: center; font-size: 11px; color: #757575; }
+.shipping-motion-scene .sm-status { display: flex; align-items: flex-start; gap: 12px; padding: 8px 0 16px; }
+.shipping-motion-scene .sm-status strong { font-size: 14px; font-weight: 600; }
+.shipping-motion-scene .sm-status p { font-size: 12px; color: #757575; margin: 3px 0 0; line-height: 1.6; }
+.shipping-motion-scene .sm-pulse { flex: 0 0 10px; width: 10px; height: 10px; margin-top: 6px; border-radius: 50%; background: #ee5a24; box-shadow: 0 0 0 5px #ee5a2414; }
+.shipping-motion-scene[data-phase="delivered"] .sm-pulse { background: #0b7a63; box-shadow: 0 0 0 5px #0b7a6314; }
+.shipping-motion-scene[data-phase="stopped"] .sm-pulse { background: #777; box-shadow: 0 0 0 5px #77777714; }
+.shipping-motion-scene .sm-mini-route { display: flex; align-items: center; gap: 9px; color: #757575; font-size: 11px; margin-bottom: 16px; }
+.shipping-motion-scene .sm-progress { flex: 1; height: 4px; border-radius: 5px; background: #e6e6e6; overflow: hidden; }
+.shipping-motion-scene .sm-progress > span { display: block; width: 0; height: 100%; border-radius: 5px; background: #ee5a24; }
+.shipping-motion-scene .sm-footer { padding: 12px 14px; color: #0b7a63; border-radius: 8px; background: #f0f7f5; font-size: 12px; line-height: 1.6; margin: 0; }
+.shipping-motion-scene .sm-disclosure { color: #757575; font-size: 11px; margin: 12px 0; line-height: 1.6; }
+.shipping-motion-scene .sm-controls { display: flex; gap: 12px; align-items: center; justify-content: space-between; margin-top: 12px; padding-top: 8px; border-top: 1px solid #e6e6e6; color: #757575; font-size: 11px; }
+.shipping-motion-scene .sm-controls > span { flex: 1; min-width: 0; }
+.shipping-motion-scene .sm-controls button { white-space: normal; max-width: 170px; min-height: 42px; font-size: 11px; }
+.shipping-motion-scene .sm-road-mark { stroke: #fffdf8; stroke-dasharray: 22 23; stroke-width: 3; animation: sm-road-run .6s linear infinite; animation-play-state: paused; }
+.shipping-motion-scene .sm-wheel-spin { transform-box: fill-box; transform-origin: center; animation: sm-wheel .65s linear infinite; animation-play-state: paused; }
+.shipping-motion-scene .sm-suspension { animation: sm-bounce .65s ease-in-out infinite; animation-play-state: paused; }
+.shipping-motion-scene .sm-speed-lines, .shipping-motion-scene .sm-handoff-flash { opacity: 0; }
+.shipping-motion-scene[data-phase="approach"] .sm-wheel-spin,
+.shipping-motion-scene[data-phase="depart"] .sm-wheel-spin,
+.shipping-motion-scene[data-phase="arrival"] .sm-wheel-spin,
+.shipping-motion-scene[data-phase="transit"] .sm-wheel-spin,
+.shipping-motion-scene[data-phase="approach"] .sm-suspension,
+.shipping-motion-scene[data-phase="depart"] .sm-suspension,
+.shipping-motion-scene[data-phase="transit"] .sm-suspension,
+.shipping-motion-scene[data-phase="transit"] .sm-road-mark { animation-play-state: running; }
+.shipping-motion-scene[data-phase="depart"] .sm-speed-lines,
+.shipping-motion-scene[data-phase="transit"] .sm-speed-lines { opacity: .5; }
+.shipping-motion-scene[data-phase="handoff"] .sm-handoff-flash { opacity: 1; }
+.shipping-motion-scene[data-paused="true"] *,
+.shipping-motion-scene[data-paused="true"] *::before,
+.shipping-motion-scene[data-paused="true"] *::after { animation-play-state: paused !important; }
+@keyframes sm-wheel { to { transform: rotate(360deg); } }
+@keyframes sm-bounce { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-2px); } }
+@keyframes sm-road-run { to { stroke-dashoffset: 90; } }
+@media (prefers-reduced-motion: reduce) {
+  .shipping-motion-scene *, .shipping-motion-scene *::before, .shipping-motion-scene *::after { animation: none !important; }
+}
+@media (max-width: 520px) {
+  .shipping-tracking { padding: 16px; }
+  .shipping-motion-scene .sm-title { font-size: 18px; }
+  .shipping-motion-scene .sm-controls { align-items: flex-start; flex-wrap: wrap; }
+  .shipping-motion-scene .sm-controls > span { flex-basis: 100%; }
+  .shipping-motion-scene .sm-controls button { max-width: none; width: 100%; }
+  .shipping-motion-scene .sm-activity-text { font-size: 9px; }
+}
+
 /* Thanh tiến trình rút gọn dùng trong modal cũ */
 .money-strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: var(--s-3); margin: var(--s-3) 0; padding: var(--s-3) var(--s-4); background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); }
 .money-strip > div { display: grid; gap: 2px; }

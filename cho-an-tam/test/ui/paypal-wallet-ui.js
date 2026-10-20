@@ -124,7 +124,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
           resolve(new Response(body, { status: x.status, headers: { 'Content-Type': x.type || 'application/json' } }));
         }, reject);
       });
-      w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'app.js']
+      w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'shipping-motion.js', 'app.js']
         .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')).join('\n;\n'));
     },
   });

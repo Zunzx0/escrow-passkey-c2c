@@ -7,6 +7,7 @@
 // Đặt khoảng chạy = 0 để tắt một tác vụ.
 const { startReconciler } = require('./reconciler');
 const { cleanupChallenges } = require('./maintenance');
+const { startShippingWorker } = require('./shipping');
 
 function intEnv(name, fallback) {
   const v = parseInt(process.env[name] || '', 10);
@@ -19,6 +20,7 @@ function backgroundJobConfig() {
     reconcileMinAgeSeconds: intEnv('RECONCILE_MIN_AGE_SECONDS', 30),
     challengeCleanupIntervalSeconds: intEnv('CHALLENGE_CLEANUP_INTERVAL_SECONDS', 600),
     challengeCleanupGraceSeconds: intEnv('CHALLENGE_CLEANUP_GRACE_SECONDS', 3600),
+    shippingIntervalMilliseconds: intEnv('SHIPPING_WORKER_INTERVAL_MS', 1000),
   };
 }
 
@@ -39,6 +41,9 @@ function startChallengeCleanup({ intervalSeconds, graceSeconds }) {
 
 function startBackgroundJobs() {
   const cfg = backgroundJobConfig();
+  if (cfg.shippingIntervalMilliseconds > 0) {
+    startShippingWorker({ intervalMilliseconds: cfg.shippingIntervalMilliseconds });
+  }
   if (cfg.reconcileIntervalSeconds > 0) {
     startReconciler({ intervalSeconds: cfg.reconcileIntervalSeconds, minAgeSeconds: cfg.reconcileMinAgeSeconds });
   }
