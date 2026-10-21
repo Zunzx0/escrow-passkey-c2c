@@ -144,18 +144,18 @@ async function main(){
   const disabled=createPayPalRuntime({config:{...config,enabled:false},provider:createSandboxProvider(config,{fetchImpl:transport})});
   ok(!disabled.publicConfig().paypalSandbox.enabled,'disabled configuration fails closed');
   await assert.rejects(()=>disabled.create({userId:a.user.id,amount:10000,requestId:uuid()}),e=>e.code==='PAYPAL_DISABLED');ok(true,'disabled runtime makes no remote payment call');
-  require('../src/lib/rateLimit').resetRateLimits();
+  await require('../src/lib/rateLimit').resetRateLimits();
   const verifyBefore=signatureCalls;let lastWebhook;
   for(let i=0;i<61;i++)lastWebhook=await fetch(base+'/api/payments/paypal/webhook',{method:'POST',headers:{'content-type':'application/json',...headers},body:JSON.stringify(event(row))});
   ok(lastWebhook.status===429&&Number(lastWebhook.headers.get('retry-after'))>0,'webhook quota returns 429 and Retry-After');
   ok(signatureCalls-verifyBefore===60,'webhook limiter prevents additional provider verification calls');
-  require('../src/lib/rateLimit').resetRateLimits();let lastCapture;
+  await require('../src/lib/rateLimit').resetRateLimits();let lastCapture;
   for(let i=0;i<11;i++)lastCapture=await http('/api/payments/paypal/'+row.id+'/capture','POST',a.token);
   ok(lastCapture.status===429,'authenticated capture quota cannot be bypassed by repeats');
   const disabledApp=express();disabledApp.use(express.json());disabledApp.use('/api/payments/paypal',createPayPalRouter(disabled));disabledApp.use((err,req,res,next)=>res.status(err.status||500).json({error:err.code}));
   const disabledServer=await new Promise(resolve=>{const s=disabledApp.listen(0,'127.0.0.1',()=>resolve(s));});
   try {
-    require('../src/lib/rateLimit').resetRateLimits();
+    await require('../src/lib/rateLimit').resetRateLimits();
     const dbase='http://127.0.0.1:'+disabledServer.address().port;
     for(const [route,method] of [['/topup','POST'],['/'+row.id+'/checkout','GET'],['/'+row.id+'/capture','POST'],['/webhook','POST']]) {
       const r=await fetch(dbase+'/api/payments/paypal'+route,{method,headers:{'content-type':'application/json',authorization:'Bearer '+a.token},body:method==='POST'?'{}':undefined});

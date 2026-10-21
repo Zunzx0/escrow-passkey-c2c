@@ -333,6 +333,7 @@ function openSqlite() {
 
   migrate();
   migratePasskeyCredentials();
+  require('./lib/authMigration').migrateSqlite(db);
   db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
   if (db.prepare("SELECT 1 FROM paypal_payment_bindings WHERE not_captured_evidence IS NOT NULL AND not_captured_evidence <> 'ORDER_VOIDED' LIMIT 1").get()) {
     throw new Error('PAYPAL_TERMINAL_EVIDENCE_INVALID: manual reconciliation required before startup');
@@ -372,6 +373,10 @@ const PG_MIGRATIONS = [
   { version: 5, name: 'paypal-durable-bindings', file: 'schema.pg.005-paypal-bindings.sql' },
   { version: 6, name: 'paypal-terminal-evidence', file: 'schema.pg.006-paypal-terminal-evidence.sql' },
   { version: 7, name: 'simulated-shipping', file: 'schema.pg.007-simulated-shipping.sql' },
+  { version: 8, name: 'auth-redesign-columns', file: 'schema.pg.008-auth-redesign.sql' },
+  { version: 9, name: 'auth-redesign-state', file: 'schema.auth.sql' },
+  { version: 10, name: 'progressive-auth-lock-authorization', file: 'schema.pg.010-progressive-auth.sql' },
+  { version: 11, name: 'auth-verification-hardening', file: 'schema.pg.011-auth-verification-hardening.sql' },
 ];
 
 function installPgTypeParsers(pg) {

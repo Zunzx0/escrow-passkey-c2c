@@ -110,7 +110,7 @@ async function main() {
   const S = await startApp(rtShort, { withPayments: true });
   const L = await startApp(rtLong, { withPayments: false });
   const PP = S.base + '/paypal'; const PAY = S.base; const LP = L.base + '/paypal';
-  const call = (base, route, opts) => { rateLimit.resetRateLimits(); return H.http(base, route, opts); };
+  const call = async (base, route, opts) => { await rateLimit.resetRateLimits(); return H.http(base, route, opts); };
   const abandon = (base, user, id, body = {}) => call(base, `/${id}/abandon`, { method: 'POST', token: user && user.token, body });
 
   // ------------------------------------------------------------------ tiện ích dữ liệu

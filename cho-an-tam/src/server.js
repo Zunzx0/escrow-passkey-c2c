@@ -1,4 +1,4 @@
-require('dotenv').config();
+require('dotenv').config({path:process.env.DOTENV_CONFIG_PATH || '.env'});
 const crypto = require('crypto');
 const path = require('path');
 const express = require('express');
@@ -11,6 +11,7 @@ const { RP_ID, ORIGIN } = require('./lib/webauthnConfig');
 // trông như đang chạy bình thường.
 assertSecretsConfigured();
 assertEnvironmentSafe();
+require('./lib/authKeys').validateProduction();
 
 const { db, describeDatabase } = require('./db');
 
@@ -59,6 +60,7 @@ function corsAllowlist() {
     }
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Access-Control-Allow-Credentials', 'true');
+    res.setHeader('Access-Control-Expose-Headers', 'Retry-After');
     if (req.method === 'OPTIONS') {
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, PUT, DELETE, OPTIONS');
       res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
@@ -79,6 +81,7 @@ app.disable('x-powered-by');
 app.use(securityHeaders({ enableHsts: process.env.ENABLE_HSTS === '1' }));
 app.use(corsAllowlist());
 app.use(express.json({ limit: '1mb' }));
+app.use('/api/passkeys',require('./lib/authOrigin').authOrigin);
 
 app.use('/', healthRouter);
 // Đăng ký + đăng nhập dùng CHUNG một luồng cho cả ba vai trò. Đăng ký gồm hai bước và luôn
@@ -265,4 +268,5 @@ function onListening() {
   }
 }
 
-start();
+if(require.main===module) start();
+module.exports={app,start};

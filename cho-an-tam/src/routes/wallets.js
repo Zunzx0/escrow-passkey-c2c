@@ -1,8 +1,9 @@
 const express = require('express');
 const { db } = require('../db');
-const { requireAuth } = require('../lib/auth');
+const { requireAuth,requireWallet } = require('../lib/auth');
 
 const router = express.Router();
+router.use(requireAuth,requireWallet);
 
 router.get('/me', requireAuth, async (req, res) => {
   const wallet = await db.prepare('SELECT * FROM wallets WHERE user_id = ?').get(req.user.id);

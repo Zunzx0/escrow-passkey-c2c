@@ -1,0 +1,84 @@
+// DOM regression: fake network/authenticator; no real email or account changes.
+const assert=require('node:assert/strict');
+const {wallet,json,sleep,logoutUi,BUYER}=require('./paypal-wallet-ui');
+let checks=0;
+const ok=(condition,message)=>{assert.ok(condition,message);checks++;console.log('PASS '+message);};
+const person={...BUYER,email:'demo@example.test',emailVerified:true,recoveryAcknowledged:true,authMethod:'passkey'};
+async function click(p,act,ms=160){const button=p.d.querySelector('[data-act="'+act+'"]');assert.ok(button,'button '+act);p.click(button);await sleep(ms);}
+function fill(p,id,value){p.d.getElementById(id).value=value;}
+async function main(){
+ const p=await wallet({hash:'#/',user:person});
+ try{
+  ok(p.authState().token && p.w.localStorage.getItem('cat_token')===null && p.w.localStorage.getItem('cat_user')===null,'cookie restores memory session; legacy localStorage cleared');
+  await logoutUi(p);await click(p,'open-auth-register');
+  ok(['regEmail','regUsername','regDisplayName','regPassword'].every(id=>p.d.getElementById(id)),'registration has four separate fields');
+  fill(p,'regEmail','new@example.test');fill(p,'regUsername','new_person');fill(p,'regDisplayName','Người dùng mới');fill(p,'regPassword','MatKhau-Rieng-2026!');
+  let finish; p.routes['POST /api/passkeys/register/account']=()=>new Promise(resolve=>{finish=resolve;});
+  await click(p,'do-register',30);
+  ok([...p.d.querySelectorAll('#modalRoot button')].every(b=>b.disabled),'all modal actions disabled while registration is pending');
+  const basic={...person,id:'new-user',accountStatus:'BASIC',emailVerified:false,authMethod:'password'};
+  finish(json(201,{token:'basic-test',scope:'full',user:basic}));await sleep(220);
+  ok(p.authState().user.accountStatus==='BASIC'&&!p.d.querySelector('#modalRoot .modal'),'new account enters marketplace immediately');
+  ok(!p.d.getElementById('emailVerificationCode')&&!p.d.querySelector('[data-act="do-enroll-passkey"]'),'signup does not force OTP or Passkey');
+  ok(/Xác minh email/.test(p.d.getElementById('securitySessionBanner').textContent),'nonblocking email banner appears');
+  p.w.location.hash='#/wallet';await sleep(220);
+  ok(!!p.d.querySelector('[data-act="activate-wallet"]')&&!p.d.getElementById('topupAmount'),'BASIC wallet shows activation instead of topup');
+  await click(p,'activate-wallet');
+  ok(!!p.d.getElementById('emailVerificationCode'),'first money action opens in-place OTP');
+  ok(p.d.getElementById('emailVerificationCode').getAttribute('autocomplete')==='one-time-code','OTP supports paste and mobile autofill');
+  ok(p.d.getElementById('emailResend').disabled,'resend shows cooldown');
+  await click(p,'activation-later');ok(!p.d.querySelector('#modalRoot .modal')&&p.w.location.hash==='#/wallet','defer activation closes popup and keeps route');
+  await click(p,'activate-wallet');
+  const verified={...basic,accountStatus:'VERIFIED',emailVerified:true};
+  p.routes['POST /api/passkeys/email/verify']=()=>json(200,{token:'verified-test',scope:'full',user:verified});
+  fill(p,'emailVerificationCode','123456');await click(p,'email-verify');
+  ok(!!p.d.querySelector('[data-act="do-enroll-passkey"]')&&!!p.d.getElementById('activationDeviceName'),'verified account sees inline device name and Passkey button');
+  ok(/5.000.000/.test(p.d.getElementById('modalRoot').textContent),'activation labels demo balance gift');
+  p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'reg-one',options:{}});
+  p.w.SimpleWebAuthnBrowser.startRegistration=async()=>({id:'new-key'});
+  let promptUsed=false;p.w.prompt=()=>{promptUsed=true;throw new Error('native prompt forbidden');};
+  const codes=['ABCDE-FGHJK','LMNPQ-RSTUV','WXYZA-BCDEF','GHJKL-MNPQR','STUVW-XYZAB','CDEFG-HJKLM','NPQRS-TUVWX','YZABC-DEFGH'];
+  const active={...person,id:'new-user',recoveryAcknowledged:false};
+  p.routes['POST /api/passkeys/register/passkey/verify']=()=>json(201,{token:'full-key',scope:'full',user:active,recoveryCodes:codes});
+  fill(p,'activationDeviceName','Điện thoại cá nhân');await click(p,'do-enroll-passkey',240);
+  ok(!promptUsed&&p.count('POST /api/passkeys/register/passkey/verify')===1,'inline optional name completes activation without native prompt');
+  ok(p.d.querySelectorAll('.recovery-code-grid code').length===8,'eight codes displayed once');
+  ok(!!p.d.querySelector('[data-act="recovery-codes-later"]'),'saving codes can be deferred');
+  ok(p.d.getElementById('recoveryCodesDone').disabled,'acknowledge stays gated before save');
+  let copied='';Object.defineProperty(p.w.navigator,'clipboard',{value:{writeText:async value=>{copied=value;}},configurable:true});
+  await click(p,'recovery-codes-copy');
+  ok(copied===codes.join('\n')&&p.d.getElementById('recoveryCodesDone').disabled,'copy alone does not claim acknowledgment');
+  const ack=p.d.getElementById('recoveryCodesAcknowledged');ack.checked=true;ack.dispatchEvent(new p.w.Event('change',{bubbles:true}));
+  ok(!p.d.getElementById('recoveryCodesDone').disabled,'save and checkbox enable completion');
+  ok(!JSON.stringify(p.store()).includes(codes[0])&&p.w.localStorage.getItem('cat_token')===null,'codes and token never written to localStorage');
+  p.routes['POST /api/passkeys/recovery-codes/acknowledge']=()=>json(200,{ok:true});await click(p,'recovery-codes-done',220);
+  ok(!p.d.querySelector('.recovery-code-grid')&&!!p.d.getElementById('topupAmount'),'activation resumes wallet topup at original route');
+  const t={id:'tx-lock',itemName:'Sản phẩm thử',amount:60000,sellerName:'Người bán',status:'CREATED',escrowStatus:'NONE',buyerId:'new-user',sellerId:'seller',version:0};
+  p.routes['GET /api/transactions']=()=>json(200,{transactions:[t]});
+  p.routes['POST /api/transactions/tx-lock/reauth/options']=()=>json(200,{reauthSessionId:'lock-one',options:{},context:t});
+  p.routes['POST /api/transactions/tx-lock/reauth/verify']=()=>json(200,{reauthGrant:'lock-grant'});
+  p.routes['POST /api/transactions/tx-lock/secure']=()=>json(200,{...t,status:'SECURED',escrowStatus:'LOCKED'});
+  p.w.SimpleWebAuthnBrowser.startAuthentication=async()=>({id:'existing-key'});
+  p.w.location.hash='#/orders';await sleep(220);await click(p,'secure');
+  ok(p.count('POST /api/transactions/tx-lock/secure')===0&&!!p.d.querySelector('[data-act="secure-confirm"]'),'payment shows confirmation before touching Passkey or balance');
+  await click(p,'secure-confirm',220);
+  ok(p.bodies['POST /api/transactions/tx-lock/secure'][0].reauthGrant==='lock-grant','payment sends fresh order-specific G even in K session');
+  await logoutUi(p);
+  p.routes['POST /api/passkeys/login/password']=()=>json(200,{token:'password-session',user:{...person,authMethod:'password'}});
+  await click(p,'open-auth');fill(p,'loginUsername','demo');fill(p,'loginPassword','MatKhau-Rieng-2026!');await click(p,'do-login-password');
+  ok(/phiên mật khẩu/.test(p.d.getElementById('securitySessionBanner').textContent),'P session has upgrade banner');
+  p.routes['POST /api/passkeys/reauth/options']=()=>json(200,{reauthSessionId:'upgrade',options:{}});
+  p.routes['POST /api/passkeys/reauth/verify']=()=>json(200,{token:'upgraded-session',user:person});await click(p,'upgrade-session');
+  ok(p.authState().user.authMethod==='passkey'&&!p.d.querySelector('[data-act="upgrade-session"]'),'upgrade changes session without logout');
+  p.routes['GET /api/passkeys/credentials']=()=>json(200,{credentials:[{id:'key-one',deviceName:'Điện thoại',createdAt:'2026-10-21',backedUp:true,backupEligible:true},{id:'key-two',deviceName:'Dự phòng',createdAt:'2026-10-21'}]});
+  p.routes['GET /api/passkeys/security']=()=>json(200,{email:person.email,emailVerified:true,recoveryCodesRemaining:8,recoveryAcknowledged:true,sessions:[],events:[]});
+  p.w.location.hash='#/security';await sleep(220);
+  await click(p,'add-device');ok(!!p.d.getElementById('deviceNameInput')&&!promptUsed,'adding later key uses custom modal');
+  await click(p,'modal-close');await click(p,'del-device');
+  ok(/các phiên khác sẽ bị đăng xuất/.test(p.d.getElementById('modalRoot').textContent),'key deletion has explicit confirmation');
+  await click(p,'modal-close');await click(p,'open-change-password');
+  ok(!!p.d.getElementById('currentPassword'),'password change requires current password');
+  console.log('AUTH UI: '+checks+' checks passed');
+ }finally{p.close();}
+}
+main().catch(e=>{console.error(e);process.exitCode=1;});

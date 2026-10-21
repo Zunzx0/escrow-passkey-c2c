@@ -773,3 +773,9 @@ table.data th.num, table.data td.num { text-align: right; }
   .spec { grid-template-columns: 1fr; gap: 2px; }
   .promo-side { grid-template-columns: 1fr; }
 }
+/* Account security: compact on mobile, no inline styles or external assets. */
+.recovery-code-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;padding:16px;background:#f5f7f8;border-radius:10px;}
+.recovery-code-grid code {font-size:16px;letter-spacing:1px;text-align:center;padding:8px;background:white;border:1px solid #dde2e5;border-radius:6px;}
+#securitySessionBanner .note {display:flex;align-items:center;gap:12px;flex-wrap:wrap;}
+#securityDetails .border-row {overflow-wrap:anywhere;}
+.operation-error {margin-bottom:16px;}

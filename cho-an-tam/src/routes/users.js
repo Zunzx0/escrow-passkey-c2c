@@ -41,7 +41,7 @@ function serializeSellerRequest(r) {
 router.get('/me', requireEnrollAuth, async (req, res, next) => {
   try {
     const user = await db
-      .prepare('SELECT id, username, display_name, role, account_status, is_active, created_at FROM users WHERE id = ?')
+      .prepare('SELECT id, username, display_name, role, account_status, is_active, created_at,email,email_verified_at,recovery_acknowledged,recovery_restricted_until FROM users WHERE id = ?')
       .get(req.user.id);
     if (!user || !user.is_active) throw new AppError(401, 'USER_INACTIVE', 'Tài khoản không khả dụng');
 
@@ -62,6 +62,13 @@ router.get('/me', requireEnrollAuth, async (req, res, next) => {
         accountStatus: user.account_status,
         sessionScope: req.user.scope,
         credentialCount,
+        email:user.email,
+        emailVerified:!!user.email_verified_at,
+        emailProofFresh:!!req.user.enrollmentVerifiedAt&&Date.parse(req.user.enrollmentVerifiedAt)+1800000>Date.now(),
+        recoveryAcknowledged:!!user.recovery_acknowledged,
+        recoveryRestrictedUntil:user.recovery_restricted_until,
+        authMethod:req.user.authMethod,
+        authAt:req.user.authAt,
         createdAt: user.created_at,
       },
       wallet: wallet
@@ -99,7 +106,7 @@ router.get('/me', requireEnrollAuth, async (req, res, next) => {
 
 router.post('/me/password', requireAuth, sensitiveLimiter, async (req, res, next) => {
   try {
-    const { newPassword, reauthGrant } = req.body || {};
+    const { currentPassword,newPassword, reauthGrant } = req.body || {};
     if (!newPassword) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu newPassword');
 
     const grant = await requireGrant({
@@ -113,6 +120,8 @@ router.post('/me/password', requireAuth, sensitiveLimiter, async (req, res, next
     assertPasswordPolicy(newPassword);
 
     const user = await db.prepare('SELECT * FROM users WHERE id = ?').get(req.user.id);
+    if(!currentPassword || !verifyPassword(currentPassword,user.password_hash)) throw new AppError(401,'INVALID_CURRENT_PASSWORD','Mật khẩu hiện tại không đúng.');
+    assertPasswordPolicy(newPassword,{username:user.username,email:user.email});
     if (verifyPassword(newPassword, user.password_hash)) {
       throw new AppError(400, 'SAME_PASSWORD', 'Mật khẩu mới phải khác mật khẩu hiện tại');
     }
@@ -122,11 +131,15 @@ router.post('/me/password', requireAuth, sensitiveLimiter, async (req, res, next
 
     // Đổi mật khẩu, thu hồi phiên cũ và tiêu thụ phiếu trong CÙNG một giao dịch cơ sở dữ liệu.
     await db.transaction(async () => {
+      const current=await db.prepare('SELECT password_hash FROM users WHERE id=?').get(user.id);
+      if(!current || !verifyPassword(currentPassword,current.password_hash)) throw new AppError(401,'INVALID_CURRENT_PASSWORD','Mật khẩu hiện tại đã thay đổi. Hãy thử lại.');
       await db.prepare(
         'UPDATE users SET password_hash = ?, token_version = token_version + 1, updated_at = ? WHERE id = ?'
       ).run(hashed, now, user.id);
       await revokeAllSessions(user.id, 'PASSWORD_CHANGED', req.user.sessionId);
+      await db.prepare("UPDATE auth_links SET used_at=? WHERE user_id=? AND purpose='PASSWORD_RESET' AND used_at IS NULL").run(now,user.id);
       await markGrantUsed(grant.id);
+      await require('../lib/accountSecurity').securityNotice(user.id,'PASSWORD_CHANGED','Mật khẩu đã được thay đổi; các phiên khác đã bị thu hồi');
     })();
 
     await logSecurityEvent(req, { type: EVENTS.PASSWORD_CHANGED, outcome: 'ALLOWED', statusCode: 200 });

@@ -1,13 +1,13 @@
 'use strict';
 const express=require('express');
-const {requireAuth,requireRole}=require('../lib/auth');
+const {requireAuth,requireWallet,requireRole}=require('../lib/auth');
 const {AppError}=require('../lib/errors');
 const {rateLimit}=require('../lib/rateLimit');
 const {PayPalSandboxError}=require('../lib/paypalSandboxProvider');
 const {PayPalStoreError}=require('../lib/paypalPaymentStore');
 function createPayPalRouter(runtime=require('../lib/paypalRuntime').getRuntime()) {
   const router=express.Router();
-  const walletRole=requireRole('BUYER','SELLER');
+  const walletRole=[requireWallet,requireRole('BUYER','SELLER')];
   const writes=rateLimit({perMinute:10,name:'paypal-auth-writes'});
   const reads=rateLimit({perMinute:20,name:'paypal-checkout'});
   const webhooks=rateLimit({perMinute:60,name:'paypal-webhook'});

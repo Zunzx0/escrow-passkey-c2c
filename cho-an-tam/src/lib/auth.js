@@ -18,7 +18,7 @@ const SCOPE_FULL = 'full';
 const SCOPE_ENROLL = 'enroll';
 
 function scopeForStatus(accountStatus) {
-  return accountStatus === 'ACTIVE' ? SCOPE_FULL : SCOPE_ENROLL;
+  return ['BASIC','VERIFIED','ACTIVE','RECOVERING'].includes(accountStatus) ? SCOPE_FULL : accountStatus==='PENDING_EMAIL' ? 'verify' : SCOPE_ENROLL;
 }
 
 /**
@@ -46,10 +46,10 @@ function signAccessToken(user, scope, sessionId) {
 }
 
 /** Mở một phiên mới: ghi phiên phía máy chủ, đặt cookie làm mới, trả access token. */
-async function startSession(req, res, user, scope) {
-  const { sessionId, refreshToken } = await createSession(user.id);
-  setRefreshCookie(req, res, refreshToken);
-  return { token: signAccessToken(user, scope, sessionId), sessionId };
+async function startSession(req, res, user, scope, authMethod='password',{deferCookie=false}={}) {
+  const { sessionId, refreshToken } = await createSession(user.id,{authMethod,deviceName:req.headers['user-agent'] || 'Trình duyệt'});
+  if(!deferCookie)setRefreshCookie(req, res, refreshToken);
+  return { token: signAccessToken(user, scope, sessionId), sessionId,refreshToken };
 }
 
 /**
@@ -70,9 +70,9 @@ async function startSession(req, res, user, scope) {
 async function loadUserFromToken(token) {
   const payload = jwt.verify(token, JWT_SECRET);
   const row = await db
-    .prepare('SELECT id, username, display_name, role, account_status, token_version, is_active FROM users WHERE id = ?')
+    .prepare('SELECT id, username, display_name, role, account_status, token_version, is_active,recovery_restricted_until FROM users WHERE id = ?')
     .get(payload.sub);
-  if (!row || !row.is_active) return null;
+  if (!row || !row.is_active || row.account_status==='SUSPENDED') return null;
   if ((payload.tv || 0) !== row.token_version) return null; // mật khẩu đã đổi -> phiên cũ hết hiệu lực
 
   // Phiên phía máy chủ: đã đăng xuất, quá hạn hay nhàn rỗi quá lâu thì JWT còn hạn cũng vô hiệu.
@@ -84,8 +84,8 @@ async function loadUserFromToken(token) {
   // hiện tại cho phép. Token cũ mang scope 'full' của một tài khoản vừa bị đưa về trạng thái
   // chưa hoàn tất sẽ không còn dùng được như phiên đầy đủ.
   const allowed = scopeForStatus(row.account_status);
-  const claimed = payload.scp === SCOPE_FULL ? SCOPE_FULL : SCOPE_ENROLL;
-  const scope = allowed === SCOPE_FULL && claimed === SCOPE_FULL ? SCOPE_FULL : SCOPE_ENROLL;
+  const claimed = [SCOPE_FULL,SCOPE_ENROLL,'verify','recover'].includes(payload.scp) ? payload.scp : SCOPE_ENROLL;
+  const scope = session.auth_method==='recovery' ? 'recover' : allowed === SCOPE_FULL && claimed === SCOPE_FULL ? SCOPE_FULL : allowed==='verify' ? 'verify' : SCOPE_ENROLL;
 
   // role='ADMIN' trong CSDL CHƯA đủ để là quản trị viên: phải có dấu nguồn gốc độc lập
   // (lib/adminProvenance.js). Thiếu dấu thì req.user mang một role nội bộ không khớp vai trò nào,
@@ -102,6 +102,10 @@ async function loadUserFromToken(token) {
     accountStatus: row.account_status,
     tokenVersion: row.token_version,
     sessionId: session.id,
+    authMethod:session.auth_method,
+    authAt:session.auth_at,
+    enrollmentVerifiedAt:session.enrollment_verified_at,
+    recoveryRestrictedUntil:row.recovery_restricted_until,
     scope,
   };
 }
@@ -207,6 +211,11 @@ function requireAccountStatus(...statuses) {
 }
 
 module.exports = {
+  requireWallet: async (req,res,next) => {
+    const row=await db.prepare('SELECT account_status,is_active FROM users WHERE id=?').get(req.user.id);
+    if(!row?.is_active || !['ACTIVE','RECOVERING'].includes(row.account_status)) return res.status(403).json({error:'WALLET_ACTIVATION_REQUIRED',message:'Hãy xác minh email và tạo Passkey để kích hoạt ví.',accountStatus:row?.account_status});
+    next();
+  },
   signAccessToken,
   startSession,
   loadUserFromToken,

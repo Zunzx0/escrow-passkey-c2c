@@ -22,6 +22,7 @@ function createAuthenticator({ zeroCounter = false } = {}) {
   const credentialId = crypto.randomBytes(32);
   let counter = 0;
   let forcedNext = null;
+  let residentUserHandle = null;
 
   const jwk = publicKey.export({ format: 'jwk' });
   const x = Buffer.from(jwk.x, 'base64url');
@@ -62,7 +63,8 @@ function createAuthenticator({ zeroCounter = false } = {}) {
   // uv=false mô phỏng một bộ xác thực chỉ báo "có người hiện diện" mà KHÔNG thực hiện xác
   // minh người dùng cục bộ. Dùng để kiểm rằng máy chủ từ chối đúng ở những chỗ đã tuyên bố
   // mức xác minh người dùng là bắt buộc.
-  function register({ rpId, origin, challenge, uv = true }) {
+  function register({ rpId, origin, challenge, uv = true,userHandle = null }) {
+    residentUserHandle = userHandle;
     const clientData = JSON.stringify({ type: 'webauthn.create', challenge, origin, crossOrigin: false });
     const clientDataJSON = Buffer.from(clientData);
     // flags: UP(0x01) | UV(0x04) | AT(0x40) = 0x45; bỏ UV thì còn 0x41
@@ -83,7 +85,7 @@ function createAuthenticator({ zeroCounter = false } = {}) {
     };
   }
 
-  function authenticate({ rpId, origin, challenge, uv = true }) {
+  function authenticate({ rpId, origin, challenge, uv = true,userHandle = residentUserHandle }) {
     const clientData = JSON.stringify({ type: 'webauthn.get', challenge, origin, crossOrigin: false });
     const clientDataJSON = Buffer.from(clientData);
     const clientDataHash = sha256(clientDataJSON);
@@ -100,7 +102,7 @@ function createAuthenticator({ zeroCounter = false } = {}) {
         clientDataJSON: b64url(clientDataJSON),
         authenticatorData: b64url(authenticatorData),
         signature: b64url(signature),
-        userHandle: null,
+        userHandle,
       },
     };
   }

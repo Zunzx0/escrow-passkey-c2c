@@ -1,11 +1,15 @@
 const express = require('express');
 const crypto = require('crypto');
-const { generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+const { generateAuthenticationOptions, verifyAuthenticationResponse:verifyAssertion } = require('@simplewebauthn/server');
 
 const { db, uuid, nowIso } = require('../db');
-const { requireAuth, requireRole } = require('../lib/auth');
+const { requireAuth, requireWallet, requireRole } = require('../lib/auth');
 const { appendAuditLog, verifyChain } = require('../lib/hash');
 const { AppError, ConflictError } = require('../lib/errors');
+async function verifyAuthenticationResponse(options){
+  try{return await verifyAssertion(options);}
+  catch{throw new AppError(400,'VERIFICATION_FAILED','Không xác minh được Passkey. Giao dịch chưa thay đổi.');}
+}
 const { RESERVING_STATUSES } = require('../lib/catalog');
 const { ACTIONS, REAUTH_TTL_SECONDS, issueGrant, requireGrant, markGrantUsed } = require('../lib/reauth');
 const { rateLimit } = require('../lib/rateLimit');
@@ -74,6 +78,7 @@ function serializeTxn(t) {
     version: t.version,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
+    inspectionDueAt:t.inspection_due_at||null,
     // Thông tin tin đăng (null với các giao dịch tạo bằng API thủ công, không gắn listing)
     listingId: t.listing_id || null,
     listingTitle: t.listing_title || null,
@@ -147,7 +152,7 @@ async function findReservingOrder(listingId, exceptTxnId) {
  * công nhưng bước ví sau đó lỗi, cả hai phải cùng rollback — không để tin đăng kẹt ở
  * LOCKED mà không có tiền nào thực sự bị khoá.
  */
-async function lockListingForOrder(listingId) {
+async function lockListingForOrder(listingId,expectedVersion) {
   const listing = await db.prepare('SELECT status, version FROM listings WHERE id = ?').get(listingId);
   if (!listing) throw new AppError(404, 'LISTING_NOT_FOUND', 'Tin đăng không còn tồn tại');
   const result = await db
@@ -155,7 +160,7 @@ async function lockListingForOrder(listingId) {
       `UPDATE listings SET status = 'LOCKED', version = version + 1, updated_at = ?
        WHERE id = ? AND status = 'AVAILABLE' AND version = ?`
     )
-    .run(nowIso(), listingId, listing.version);
+    .run(nowIso(), listingId, expectedVersion??listing.version);
   if (result.changes !== 1) {
     throw new ConflictError('LISTING_SOLD', 'Sản phẩm vừa được người khác mua trước, đơn này không thể thanh toán');
   }
@@ -164,7 +169,7 @@ async function lockListingForOrder(listingId) {
 // ---------- Tạo giao dịch thủ công, không gắn tin đăng ----------
 // Giữ lại để các kịch bản kiểm thử lõi escrow chạy được mà không cần lớp marketplace.
 
-router.post('/', requireAuth, requireRole('BUYER'), async (req, res, next) => {
+router.post('/', requireAuth, requireWallet, requireRole('BUYER'), async (req, res, next) => {
   try {
     const { sellerId, itemName, itemDescription, amount: rawAmount } = req.body || {};
     if (!sellerId || !itemName || rawAmount === undefined || rawAmount === null) {
@@ -206,7 +211,7 @@ router.post('/', requireAuth, requireRole('BUYER'), async (req, res, next) => {
 
 // ---------- Đặt mua một sản phẩm từ storefront ----------
 
-router.post('/orders', requireAuth, requireRole('BUYER'), async (req, res, next) => {
+router.post('/orders', requireAuth, requireWallet, requireRole('BUYER'), async (req, res, next) => {
   try {
     const { listingId, note } = req.body || {};
     if (!listingId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu listingId');
@@ -329,9 +334,9 @@ router.get('/:id', requireAuth, async (req, res, next) => {
 
 // ---------- UC06: Khóa tiền vào Escrow ----------
 
-router.post('/:id/secure', requireAuth, async (req, res, next) => {
+router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) => {
   try {
-    const { requestId } = req.body || {};
+    const { requestId,reauthGrant } = req.body || {};
     if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
 
     const txn = await loadTxnOr404(req.params.id);
@@ -365,10 +370,17 @@ router.post('/:id/secure', requireAuth, async (req, res, next) => {
       throw new AppError(400, 'INSUFFICIENT_FUNDS', 'Số dư khả dụng không đủ');
     }
 
+    const grant=await requireGrant({userId:req.user.id,sessionId:req.user.sessionId,transactionId:txn.id,action:ACTIONS.LOCK,rawToken:reauthGrant});
     await db.transaction(async () => {
+      const current=await loadTxnOr404(txn.id);
+      await assertLockReady(current,req.user);
+      const context=await buildAuthorizationContext(current,ACTIONS.LOCK,req.user.sessionId);
+      const expected=contextDigest(context).toString('hex');
+      if(!grant.context_hash || grant.context_hash!==expected) throw new AppError(409,'CONTEXT_MISMATCH','Giá hoặc nội dung đơn đã thay đổi. Hãy tải lại và xác nhận lại.');
+      await markGrantUsed(grant.id);
       // Chiếm độc quyền tin đăng TRƯỚC khi chạm tới ví — đúng thứ tự bước 3-4 của quy trình
       // LOCK đã chốt. Thua ở bước này thì không có delta ví nào phát sinh để phải rollback.
-      if (txn.listing_id) await lockListingForOrder(txn.listing_id);
+      if (txn.listing_id) await lockListingForOrder(txn.listing_id,context.listing.version);
 
       const updated = await applyOrderedWalletUpdates([
         { wallet: buyerWallet, availableDelta: -txn.amount, lockedDelta: 0 },
@@ -410,6 +422,8 @@ router.post('/:id/secure', requireAuth, async (req, res, next) => {
         newStatus: 'SECURED',
         eventData: { amount: txn.amount, requestId },
       });
+      const recipient=await db.prepare('SELECT id,email,email_verified_at FROM users WHERE id=?').get(txn.buyer_id);
+      if(recipient?.email_verified_at)await require('../lib/accountSecurity').queueMail(recipient,'Biên nhận thanh toán ký quỹ Enclave',`Đơn ${txn.id}: ${txn.item_name}. Đã giữ ${txn.amount} VND trong ký quỹ. Người bán chưa nhận tiền. Chỉ xác nhận giải ngân sau khi nhận và kiểm tra hàng.`);
     })();
     await onOrderSecured(txn);
 
@@ -548,6 +562,9 @@ router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
         throw new AppError(409, 'SHIPMENT_NOT_ARRIVED', 'Đơn hàng đang vận chuyển. Hãy đợi hàng đến rồi xác nhận đã nhận.');
       }
       await applyTransactionStatus(current, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
+      const inspectionSeconds=Number(process.env.ORDER_INSPECTION_SECONDS||86400);
+      if(!Number.isSafeInteger(inspectionSeconds)||inspectionSeconds<60)throw new AppError(503,'INVALID_INSPECTION_POLICY','Thời hạn kiểm tra hàng chưa hợp lệ.');
+      await db.prepare('UPDATE transactions SET inspection_due_at=? WHERE id=?').run(new Date(Date.now()+inspectionSeconds*1000).toISOString(),current.id);
       await appendAuditLog(db, {
         transactionId: txn.id,
         actorId: req.user.id,
@@ -591,11 +608,32 @@ router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
 //
 // Thứ tự khoá trong object này là một phần của giao thức: JSON.stringify giữ nguyên thứ
 // tự chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
-async function buildAuthorizationContext(txn) {
+async function assertLockReady(txn,user) {
+  assertOwnership(txn,user,['BUYER']);
+  const buyer=await db.prepare('SELECT account_status,is_active FROM users WHERE id=?').get(user.id);
+  if(!buyer?.is_active || !['ACTIVE','RECOVERING'].includes(buyer.account_status))throw new AppError(403,'WALLET_ACTIVATION_REQUIRED','Hãy kích hoạt ví trước khi thanh toán.');
+  if(txn.buyer_id===txn.seller_id)throw new AppError(400,'SELF_PURCHASE','Không thể tự mua hàng của mình.');
+  if(txn.status!=='CREATED'||txn.escrow_status!=='NONE')throw new AppError(409,'INVALID_STATE','Đơn không còn ở bước thanh toán.');
+  const seller=await db.prepare('SELECT is_active,account_status FROM users WHERE id=?').get(txn.seller_id);
+  if(!seller?.is_active || !['ACTIVE','RECOVERING'].includes(seller.account_status))throw new AppError(409,'SELLER_UNAVAILABLE','Người bán chưa sẵn sàng nhận giao dịch.');
+  if(txn.listing_id){
+    const listing=await db.prepare('SELECT * FROM listings WHERE id=?').get(txn.listing_id);
+    if(!listing || listing.visibility!=='PUBLIC' || listing.seller_id!==txn.seller_id || listing.price!==txn.amount)throw new AppError(409,'CONTEXT_MISMATCH','Tin đăng hoặc giá đã thay đổi. Hãy quay lại sản phẩm để đặt đơn mới.');
+    if(await findReservingOrder(txn.listing_id,txn.id))throw new AppError(409,'LISTING_SOLD','Sản phẩm vừa có người mua trước.');
+  }
+  const wallet=await getUserWallet(user.id);
+  if(!wallet || wallet.available_balance<txn.amount)throw new AppError(400,'INSUFFICIENT_FUNDS','Số dư không đủ. Hãy nạp thêm trước khi xác nhận Passkey.');
+}
+async function buildAuthorizationContext(txn,action=ACTIONS.RELEASE,sessionId=null) {
   const seller = await db.prepare('SELECT display_name FROM users WHERE id = ?').get(txn.seller_id);
+  if(action===ACTIONS.LOCK){
+    const listing=txn.listing_id?await db.prepare('SELECT * FROM listings WHERE id=?').get(txn.listing_id):null;
+    return {v:3,action,transactionId:txn.id,buyerId:txn.buyer_id,sellerId:txn.seller_id,sellerName:seller?.display_name||'',amount:txn.amount,currency:'VND',itemName:txn.item_name,orderVersion:txn.version,sessionId,listing:listing?{id:listing.id,title:listing.title,price:listing.price,version:listing.version,visibility:listing.visibility}:null};
+  }
   return {
     v: 2,
     action: 'RELEASE_ESCROW',
+    sessionId,
     transactionId: txn.id,
     listingId: txn.listing_id || null,
     itemName: txn.item_name,
@@ -617,16 +655,21 @@ async function userCredentials(userId) {
 
 router.post('/:id/reauth/options', requireAuth, sensitiveLimiter, async (req, res, next) => {
   try {
+    const action=req.body?.action||ACTIONS.RELEASE;
+    if(![ACTIONS.LOCK,ACTIONS.RELEASE].includes(action))throw new AppError(400,'INVALID_ACTION','Hành động xác nhận không hợp lệ.');
+    if(action===ACTIONS.RELEASE)await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,action);
+    await require('../lib/accountSecurity').assertReauthAvailable(req.user.id);
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
-    if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
+    if(action===ACTIONS.LOCK)await assertLockReady(txn,req.user);
+    else if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở WAIT_CONFIRM + LOCKED');
     }
 
     const credentials = await userCredentials(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản chưa có Passkey');
 
-    const context = await buildAuthorizationContext(txn);
+    const context = await buildAuthorizationContext(txn,action,req.user.sessionId);
 
     // KHÔNG truyền challenge: để thư viện tự sinh giá trị ngẫu nhiên bằng nguồn ngẫu
     // nhiên mật mã. Thao tác chạm tới tiền nên đòi mức xác minh người dùng (PIN hoặc
@@ -656,6 +699,7 @@ router.post('/:id/reauth/options', requireAuth, sensitiveLimiter, async (req, re
 
 router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res, next) => {
   try {
+    await require('../lib/accountSecurity').assertReauthAvailable(req.user.id,{count:false});
     const { reauthSessionId, response } = req.body || {};
     if (!reauthSessionId || !response) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
 
@@ -670,6 +714,13 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     if (new Date(challengeRow.expires_at).getTime() < Date.now()) {
       throw new AppError(400, 'CHALLENGE_EXPIRED', 'Challenge đã hết hạn');
     }
+    const action=JSON.parse(challengeRow.context_data).action;
+    if(![ACTIONS.LOCK,ACTIONS.RELEASE].includes(action))throw new AppError(400,'INVALID_ACTION','Hành động xác nhận không hợp lệ.');
+    if(action===ACTIONS.LOCK)await assertLockReady(txn,req.user);
+    else {
+      await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,action);
+      if(txn.status!=='WAIT_CONFIRM'||txn.escrow_status!=='LOCKED')throw new AppError(409,'INVALID_STATE','Đơn không còn ở bước giải ngân.');
+    }
 
     // Người dùng có thể ký bằng BẤT KỲ thiết bị nào của họ — chọn đúng cái đã ký.
     const credential = await db
@@ -680,7 +731,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     // Đối chiếu ngữ cảnh uỷ quyền lần 1: dựng lại nội dung giao dịch từ dữ liệu HIỆN TẠI
     // và so với bản đã lưu lúc phát challenge. Đơn bị sửa trong lúc chờ ký thì hai bản
     // lệch nhau và yêu cầu bị chặn ngay, trước khi cấp phiếu uỷ quyền.
-    const currentContext = await buildAuthorizationContext(txn);
+    const currentContext = await buildAuthorizationContext(txn,action,req.user.sessionId);
     if (challengeRow.context_data !== JSON.stringify(currentContext)) {
       throw new AppError(409, 'CONTEXT_MISMATCH', 'Nội dung giao dịch đã thay đổi kể từ lúc bắt đầu xác thực. Hãy thử lại.');
     }
@@ -721,14 +772,17 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
         userId: req.user.id,
         sessionId: req.user.sessionId,
         transactionId: txn.id,
-        action: ACTIONS.RELEASE,
+        action,
         contextHash,
+        credentialId:credential.id,
       });
     })();
     await reportCounterAnomaly(req, credential, counterCheck);
+    await require('../lib/accountSecurity').clearReauthFailures(req.user.id);
 
     res.json({ reauthGrant: issued.rawToken, expiresAt: issued.expiresAt, signedContext: currentContext });
   } catch (e) {
+    if(['VERIFICATION_FAILED','NO_CREDENTIAL'].includes(e.code)) await require('../lib/accountSecurity').recordReauthFailure(req.user.id);
     next(e);
   }
 });
@@ -772,8 +826,8 @@ router.post('/:id/release', requireAuth, async (req, res, next) => {
     // "người này đã uỷ quyền MỘT nội dung nào đó". Ở đây kiểm nội dung ấy có đúng là nội
     // dung đang sắp thực thi không — chặn kịch bản giao dịch bị sửa số tiền trong khoảng
     // thời gian giữa lúc ký và lúc lệnh giải ngân thực sự chạy.
-    const currentContextHash = contextDigest(await buildAuthorizationContext(txn)).toString('hex');
-    if (grant.context_hash && grant.context_hash !== currentContextHash) {
+    const currentContextHash = contextDigest(await buildAuthorizationContext(txn,ACTIONS.RELEASE,req.user.sessionId)).toString('hex');
+    if (!grant.context_hash || grant.context_hash !== currentContextHash) {
       throw new AppError(
         409,
         'CONTEXT_MISMATCH',
@@ -786,6 +840,8 @@ router.post('/:id/release', requireAuth, async (req, res, next) => {
     const sellerWallet = await getUserWallet(txn.seller_id);
 
     await db.transaction(async () => {
+      const latestContext=contextDigest(await buildAuthorizationContext(await loadTxnOr404(txn.id),ACTIONS.RELEASE,req.user.sessionId)).toString('hex');
+      if(!grant.context_hash || latestContext!==grant.context_hash) throw new AppError(409,'CONTEXT_MISMATCH','Nội dung giao dịch đã thay đổi. Hãy xác nhận lại.');
       const updated = await applyOrderedWalletUpdates([
         { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
         { wallet: sellerWallet, availableDelta: txn.amount, lockedDelta: 0 },
@@ -829,6 +885,10 @@ router.post('/:id/release', requireAuth, async (req, res, next) => {
         newStatus: 'COMPLETED',
         eventData: { amount: txn.amount, payoutToSeller: txn.amount, requestId },
       });
+      for(const userId of [txn.buyer_id,txn.seller_id]){
+        const recipient=await db.prepare('SELECT id,email,email_verified_at FROM users WHERE id=?').get(userId);
+        if(recipient?.email_verified_at)await require('../lib/accountSecurity').queueMail(recipient,'Đã hoàn tất giao dịch Enclave',`Đơn ${txn.id}: ${txn.item_name}. Đã giải ngân ${txn.amount} VND cho người bán. Giao dịch hoàn tất.`);
+      }
     })();
     await onOrderCompleted(txn);
 
@@ -924,3 +984,4 @@ router.get('/:id/logs/verify', requireAuth, async (req, res, next) => {
 });
 
 module.exports = router;
+module.exports.buildAuthorizationContext=buildAuthorizationContext;
