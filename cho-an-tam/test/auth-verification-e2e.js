@@ -49,9 +49,13 @@ async function main(){
   ({app}=require('../src/server'));({db}=require('../src/db'));sec=require('../src/lib/accountSecurity');await db.ready;
   server=app.listen(port);await new Promise(r=>server.once('listening',r));
   const squat=await signup('squat_user','shared@example.test'),owner=await signup('real_owner','shared@example.test');
+  const unverifiedAlias=await api('/passkeys/login/password',{body:{username:'shared@example.test',password}});
+  check(unverifiedAlias.status===401&&unverifiedAlias.data.error==='INVALID_CREDENTIALS','unverified email cannot select an arbitrary account sharing that address');
+  check(must(await login(owner)).user.id===owner.user.id&&must(await login(squat)).user.id===squat.user.id,'unverified accounts still log in by their own unique usernames');
   const ownerCode=(await contents(owner)).code;
   must(await api('/passkeys/email/verify',{token:owner.token,body:{code:ownerCode}}));
   check((await db.prepare('SELECT email_verified_at FROM users WHERE id=?').get(owner.user.id)).email_verified_at,'mailbox owner can verify despite an older unverified registration');
+  check(must(await api('/passkeys/login/password',{body:{username:' SHARED@EXAMPLE.TEST ',password}})).user.id===owner.user.id,'verified email login resolves to its proven owner instead of an older unverified account');
   check((await api('/passkeys/email/verify',{token:squat.token,body:{code:ownerCode}})).status===400,'older unverified account cannot claim email after owner verification');
   check(sec.normalizeEmail(' A.Name+tag@EXAMPLE.TEST ')==='a.name+tag@example.test','email normalization preserves dots and plus tag');
   const quotaEmail='quota@example.test';
@@ -61,6 +65,7 @@ async function main(){
   check((await db.prepare('SELECT COUNT(*) AS n FROM auth_email_outbox WHERE recipient=?').get(quotaEmail)).n===5,'20 pending accounts share a hard five-email recipient/hour budget');
   check(!(await mail(quotaEmail)).includes('<script>'),'public display name is absent from verification email');
   const stable=await signup('stable_otp');
+  check((await api('/passkeys/login/password',{body:{username:stable.email,password}})).status===401,'email login requires mailbox verification even when there is only one pending account');
   const beforeEnsure=await db.prepare('SELECT * FROM auth_email_codes WHERE user_id=?').get(stable.user.id);
   const countBeforeEnsure=(await db.prepare('SELECT COUNT(*) AS n FROM auth_email_outbox WHERE user_id=?').get(stable.user.id)).n;
   const ensured=must(await api('/passkeys/email/resend',{token:stable.token,body:{ensure:true},host:'attacker.example'}));

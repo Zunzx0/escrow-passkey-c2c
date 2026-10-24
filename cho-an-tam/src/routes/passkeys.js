@@ -347,7 +347,10 @@ router.post('/login/password', authLimiter, async (req, res, next) => {
     if (!username || !password) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu username hoặc password');
 
     const cleanUsername = String(username).trim().toLowerCase();
-    const user = await db.prepare('SELECT * FROM users WHERE username = ? OR email = ? ORDER BY CASE WHEN username=? THEN 0 WHEN email_verified_at IS NOT NULL THEN 1 ELSE 2 END,created_at,id LIMIT 1').get(cleanUsername,cleanUsername,cleanUsername);
+    // Pending registrations may share an email. It is a login alias only after
+    // mailbox ownership is proven; selecting the oldest pending row is ambiguous.
+    const cleanEmail = accountSecurity.normalizeEmail(String(username));
+    const user = await db.prepare('SELECT * FROM users WHERE username = ? OR (email = ? AND email_verified_at IS NOT NULL) ORDER BY CASE WHEN username=? THEN 0 ELSE 1 END LIMIT 1').get(cleanUsername,cleanEmail,cleanUsername);
     const throttleIdentity=user?.id || cleanUsername;
 
     // Kiểm khoá TRƯỚC khi đụng tới mật khẩu: trong lúc khoá, mật khẩu đúng cũng không được thử.

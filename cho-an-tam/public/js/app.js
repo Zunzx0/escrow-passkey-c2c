@@ -811,6 +811,7 @@ const App = (() => {
           <div class="field">
             <label for="loginUsername">Tên đăng nhập hoặc email</label>
             <input id="loginUsername" type="text" autocomplete="username webauthn" maxlength="254">
+            <p class="hint">Chưa xác minh email? Hãy dùng tên đăng nhập đã chọn khi đăng ký.</p>
           </div>
           <div class="field">
             <label for="loginPassword">Mật khẩu</label>
