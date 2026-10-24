@@ -23,7 +23,7 @@ function isValidUsername(username) {
 // Tên email không được đưa vào hồ sơ/tin đăng công khai. Người dùng vẫn thấy
 // địa chỉ đầy đủ của chính mình ở /api/users/me; quản trị viên có quyền xem ở API quản trị.
 function publicUsername(username) {
-  return String(username || '').includes('@') ? null : username;
+  return null; // Login identifiers are private; public profiles use display_name.
 }
 
 const USERNAME_HINT = 'Dùng tên đăng nhập 3–32 ký tự (chữ, số, . _ -) hoặc địa chỉ email hợp lệ.';

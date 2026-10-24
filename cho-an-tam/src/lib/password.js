@@ -25,7 +25,7 @@ const SALT_LEN = 16;
 const SCRYPT_MAXMEM = 256 * SCRYPT_N * SCRYPT_R;
 
 const MIN_LENGTH = 8;
-const MAX_LENGTH = 200;
+const MAX_LENGTH = 128;
 
 class PasswordPolicyError extends Error {
   constructor(message) {
@@ -92,7 +92,8 @@ function burnVerify(plain) {
   verifyPassword(String(plain || ''), DUMMY_HASH);
 }
 
-function assertPasswordPolicy(plain) {
+function assertPasswordPolicy(plain, { username, email } = {}) {
+  if(typeof plain!=='string') throw new PasswordPolicyError('Mật khẩu phải là chuỗi ký tự.');
   const value = String(plain == null ? '' : plain);
   if (value.length < MIN_LENGTH) {
     throw new PasswordPolicyError(`Mật khẩu phải dài ít nhất ${MIN_LENGTH} ký tự.`);
@@ -100,9 +101,9 @@ function assertPasswordPolicy(plain) {
   if (value.length > MAX_LENGTH) {
     throw new PasswordPolicyError(`Mật khẩu dài quá ${MAX_LENGTH} ký tự.`);
   }
-  if (/^\d+$/.test(value)) {
-    throw new PasswordPolicyError('Mật khẩu không được chỉ gồm chữ số.');
-  }
+  const normalized=value.toLowerCase();
+  const common=new Set(['password','password1','password123','12345678','123456789','1234567890','12345678910','qwerty123','qwertyuiop','11111111','00000000','abcdefgh','iloveyou','admin123','welcome1','letmein123','matkhau123']);
+  if(common.has(normalized) || (username && normalized===String(username).toLowerCase()) || (email && normalized===String(email).toLowerCase())) throw new PasswordPolicyError('Mật khẩu quá phổ biến hoặc trùng thông tin đăng nhập. Hãy chọn mật khẩu khác.');
   if (/^(.)\1+$/.test(value)) {
     throw new PasswordPolicyError('Mật khẩu không được chỉ gồm một ký tự lặp lại.');
   }

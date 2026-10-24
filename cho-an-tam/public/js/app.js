@@ -20,11 +20,12 @@ const App = (() => {
 
   const STORAGE_TOKEN = 'cat_token';
   const STORAGE_USER = 'cat_user';
+  const SIGNED_OUT='cat_signed_out';
   const HOME_PAGE_SIZE = 18;    // số tin mỗi lần "Xem thêm" ở trang chủ
 
   const state = {
-    token: localStorage.getItem(STORAGE_TOKEN) || null,
-    user: safeParse(localStorage.getItem(STORAGE_USER)),
+    token: null,
+    user: null,
     wallet: null,
     sellerRequest: null,        // yêu cầu cấp quyền bán hàng mới nhất của chính mình
     meta: null,                 // danh mục + tình trạng + khu vực, nạp 1 lần từ /api/listings/meta
@@ -185,18 +186,32 @@ const App = (() => {
   // không đọc được). Nhiều request cùng gặp 401 thì chỉ làm mới một lần.
   // credentials: 'include' vì cookie làm mới thuộc về origin của API, có thể khác origin của trang.
   let refreshing = null;
+  let cookieMutation=Promise.resolve();
+  function withAuthCookieLock(fn){
+    if(navigator.locks?.request)return navigator.locks.request('enclave-auth-cookie',fn);
+    const job=cookieMutation.then(fn,fn);cookieMutation=job.catch(()=>{});return job;
+  }
   function refreshSession() {
+    if(localStorage.getItem(SIGNED_OUT)==='1')return Promise.resolve(false);
     const epoch = state.sessionEpoch;
     const userId = state.user && state.user.id;
     if (!refreshing || refreshing.epoch !== epoch) {
       const job = { epoch, promise: null };
       job.promise = (async () => {
         try {
-          const res = await fetch(API_BASE + '/api/passkeys/session/refresh', { method: 'POST', credentials: 'include' });
+          const perform=async()=>{
+            for(let attempt=0;attempt<3;attempt++){
+              const result=await fetchJson(API_BASE + '/api/passkeys/session/refresh', {method:'POST',credentials:'include'});
+              if(result.res.status!==409||result.data.error!=='SESSION_REFRESH_ROTATED'||attempt===2)return result;
+              await new Promise(resolve=>setTimeout(resolve,150*2**attempt));
+              if(state.sessionEpoch!==epoch||localStorage.getItem(SIGNED_OUT)==='1')return {res:{ok:false},data:{}};
+            }
+          };
+          const {res,data} = await withAuthCookieLock(perform);
           if (state.sessionEpoch !== epoch || !res.ok) return false;
-          const data = await res.json();
-          if (state.sessionEpoch !== epoch || !data.token || !userId || !data.user || data.user.id !== userId) return false;
+          if (state.sessionEpoch !== epoch || !data.token || !data.user || (userId && data.user.id !== userId)) return false;
           setSession(data.token, { ...(state.user || {}), ...data.user });
+          if(data.scope==='recover')authUi.recoveryEmail=data.recoveryMethod==='EMAIL';
           return true;
         } catch (_) { return false; }
       })();
@@ -219,6 +234,7 @@ const App = (() => {
     'Đừng thử lại ngay: hãy kiểm tra lại trạng thái (đơn hàng, ví, lịch sử nạp tiền) rồi mới quyết định.';
 
   const API_ERROR_MESSAGES = {
+    EMAIL_NOT_CONFIGURED:()=> 'Dịch vụ email xác minh chưa được cấu hình. Vui lòng liên hệ quản trị viên để hoàn tất thiết lập.',
     INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
     // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
     // của máy chủ ("… từ X đến Y") thay vì ghi cứng một con số ở đây.
@@ -348,7 +364,9 @@ const App = (() => {
     let res;
     let data;
     try {
-      ({ res, data } = await fetchJson(API_BASE + '/api' + path, { method, headers, credentials: 'include', body: body !== undefined ? JSON.stringify(body) : undefined }));
+      const send=()=>fetchJson(API_BASE + '/api' + path, { method, headers, credentials:'include',body:body!==undefined?JSON.stringify(body):undefined });
+      const cookieEndpoint=/^\/passkeys\/(register\/(account|passkey\/verify)|login\/(password|verify)|email\/verify|recovery\/(code|email\/authorize|passkey\/verify))$/.test(path);
+      ({res,data}=await (cookieEndpoint?withAuthCookieLock(send):send()));
     } catch (e) {
       throw state.sessionEpoch !== epoch ? oldSession() : e;
     }
@@ -370,6 +388,9 @@ const App = (() => {
       const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
       err.status = res.status;
+      // 429: số giây phải chờ nằm ở header Retry-After (API khác origin cần expose header này).
+      const retryAfter = Number(res.headers.get('Retry-After'));
+      if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfter = Math.ceil(retryAfter);
       throw err;
     }
     return data;
@@ -390,6 +411,11 @@ const App = (() => {
     if (state.busy.has(key)) return;
     state.busy.add(key);
     const original = btn ? btn.innerHTML : null;
+    const generation=modalGeneration;
+    const inModal=btn?.closest?.('.modal');
+    const oldDismissible=modalDismissible;
+    const controls=inModal?Array.from(inModal.querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled})):[];
+    if(inModal) {modalDismissible=false;controls.forEach(({el})=>{el.disabled=true;});}
     if (btn) { btn.disabled = true; btn.innerHTML = ico('loader-circle', 17, 'spin') + ' Đang xử lý…'; }
     try {
       const result = await fn();
@@ -397,7 +423,13 @@ const App = (() => {
       return result;
     } catch (e) {
       // Lỗi của một phản hồi cũ (phiên đã đổi) mang cờ silent: không được hiện thông báo cho người đang dùng phiên mới.
-      if (!(e && e.silent)) toast(e.message, 'err');
+      if (!(e && e.silent)) {
+        const body=$('#modalRoot .modal-body');
+        if(body && inModal && generation===modalGeneration) {
+          body.querySelector('.operation-error')?.remove();
+          const message=document.createElement('div');message.className='note note-danger operation-error';message.setAttribute('role','alert');message.textContent=e.message;body.prepend(message);
+        } else toast(e.message, 'err');
+      }
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
       // một thao tác sẽ lại bị từ chối.
       if (e && e.code === 'DISPUTE_NOT_OPEN') {
@@ -407,6 +439,7 @@ const App = (() => {
       throw e;
     } finally {
       state.busy.delete(key);
+      if(inModal && generation===modalGeneration) {modalDismissible=oldDismissible;controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});}
       if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = original; }
     }
   }
@@ -436,8 +469,8 @@ const App = (() => {
         'Chưa gắn được Passkey. Bạn đã bấm huỷ ở cửa sổ xác minh, hoặc để quá lâu. ' +
         'Bấm lại và hoàn tất bước vân tay, Face ID hoặc mã PIN của thiết bị.',
       InvalidStateError:
-        'Thiết bị này đã có sẵn một Passkey của tài khoản khác trên Enclave. ' +
-        'Hãy chọn "Dùng thiết bị khác" trong cửa sổ của trình duyệt, hoặc tạo Passkey mới cho tài khoản này.',
+        'Passkey của tài khoản này đã có trong bộ xác thực đang chọn. ' +
+        'Hãy đăng nhập bằng Passkey đó, hoặc chọn thiết bị khác.',
       ConstraintError:
         'Thiết bị chưa bật khoá màn hình (vân tay, Face ID hoặc mã PIN). ' +
         'Passkey đầu tiên bắt buộc phải có bước xác minh này, hãy bật rồi thử lại.',
@@ -446,7 +479,7 @@ const App = (() => {
       NotAllowedError:
         'Chưa thêm được thiết bị. Bạn đã bấm huỷ hoặc để quá lâu ở cửa sổ xác minh.',
       InvalidStateError:
-        'Thiết bị này đã được đăng ký cho tài khoản của bạn rồi. Hãy dùng một thiết bị khác.',
+        'Bộ xác thực đang chọn đã có Passkey của tài khoản này. Hãy chọn thiết bị hoặc bộ xác thực khác để thêm khóa dự phòng.',
     },
     reauth: {
       NotAllowedError:
@@ -559,7 +592,7 @@ const App = (() => {
     const copy = passkeyReadinessCopy(result);
     box.className = `note passkey-readiness ${copy.tone}`;
     box.innerHTML = `${ico(copy.icon, 18)}<div class="passkey-readiness-body"><span>${copy.text}</span>` +
-      `${result.ok ? '' : `<button class="btn btn-sm mt-2" data-act="passkey-check" data-target="${esc(box.id)}">Kiểm tra lại</button>`}</div>`;
+      `${result.ok ? '' : `<button class="btn btn-sm mt-2" data-act="copy-site-link">Sao chép liên kết để mở bằng Chrome hoặc Safari</button>`}</div>`;
   }
 
   async function refreshPasskeyReadiness(targetId) {
@@ -635,20 +668,23 @@ const App = (() => {
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
   // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
-  function dismissModal() { if (modalDismissible) closeModal(); }
+  function dismissModal() {
+    if(!modalDismissible)return;
+    if(authUi.codes && authUi.activation){finishActivation().catch(e=>toast(e.message,'err'));return;}
+    authUi.activation=null;authUi.codes=null;closeModal();
+  }
 
   // =====================================================================
   // Phiên đăng nhập
   // =====================================================================
 
   function setSession(token, user) {
+    localStorage.removeItem(SIGNED_OUT);
     // Phiên MỚI = chưa có phiên, hoặc đổi sang tài khoản khác. Làm mới token của cùng một phiên (refreshSession)
     // thì KHÔNG phải phiên mới, nếu không mọi thao tác đang chạy sẽ bị coi là "cũ" oan mỗi lần token được gia hạn.
     const fresh = !state.token || !state.user || !user || state.user.id !== user.id;
     state.token = token;
     state.user = user;
-    localStorage.setItem(STORAGE_TOKEN, token);
-    localStorage.setItem(STORAGE_USER, JSON.stringify(user));
     if (fresh) {
       state.sessionEpoch++;
       resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
@@ -658,6 +694,7 @@ const App = (() => {
   }
 
   function clearSession() {
+    authUi.codes=null;authUi.nameCallback=null;authUi.linkToken=null;authUi.activation=null;authUi.lock=null;
     stopShippingWatch();
     state.token = null;
     state.user = null;
@@ -677,6 +714,7 @@ const App = (() => {
   async function refreshWallet() {
     const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role === 'ADMIN') { state.wallet = null; return; }
+    if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){state.wallet=null;return;}
     try {
       const wallet = await api('/wallets/me');
       if (state.sessionEpoch === epoch) state.wallet = wallet;
@@ -710,14 +748,15 @@ const App = (() => {
   }
 
   function logout() {
+    localStorage.setItem(SIGNED_OUT,'1');
     // Thu hồi phiên ở máy chủ, không chỉ xoá token trong trình duyệt. Lỗi mạng thì vẫn đăng xuất
     // phía máy khách; phiên ở máy chủ sẽ tự hết hạn.
     const token = state.token;
-    fetch(API_BASE + '/api/passkeys/session/logout', {
+    withAuthCookieLock(()=>fetch(API_BASE + '/api/passkeys/session/logout', {
       method: 'POST',
       credentials: 'include',
       headers: token ? { Authorization: 'Bearer ' + token } : {},
-    }).catch(() => {});
+    })).catch(() => {});
     clearSession();
     toast('Đã đăng xuất', 'ok');
     location.hash = '#/';
@@ -729,10 +768,8 @@ const App = (() => {
 
   // Mô hình xác thực LAI.
   //
-  // Đăng nhập có hai lối, mật khẩu hoặc Passkey, và cả hai cấp CÙNG một loại phiên. Ranh
-  // giới không nằm ở chỗ đăng nhập bằng gì, mà nằm ở chiều tiền đi ra: mọi thao tác làm
-  // tiền rời khỏi ký quỹ và mọi thay đổi thông tin xác thực đều phải xác thực lại bằng
-  // Passkey, kể cả khi phiên hiện tại được tạo bằng chính Passkey.
+  // Đăng nhập mật khẩu mở phiên P có hạn mức; Passkey có UV mở phiên K. Giải ngân và
+  // thay đổi thông tin xác thực vẫn cần phiếu G mới dù đang ở phiên K.
   //
   // Giao diện chỉ dẫn đường; MỌI phép kiểm đều nằm ở máy chủ. Ẩn một nút không phải là
   // một biện pháp an toàn.
@@ -750,7 +787,10 @@ const App = (() => {
     switchAuthTab(tab);
   }
 
+  let authTabGeneration=0;
   function switchAuthTab(tab) {
+    authTabGeneration++;
+    const title=$('#modalRoot .modal-head h2');if(title)title.textContent=tab==='login'?'Đăng nhập':'Tạo tài khoản Enclave';
     document.querySelectorAll('#authTabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
     const panel = $('#authPanel');
     if (!panel) return;
@@ -770,7 +810,8 @@ const App = (() => {
 
           <div class="field">
             <label for="loginUsername">Tên đăng nhập hoặc email</label>
-            <input id="loginUsername" type="text" autocomplete="username" maxlength="254">
+            <input id="loginUsername" type="text" autocomplete="username webauthn" maxlength="254">
+            <p class="hint">Chưa xác minh email? Hãy dùng tên đăng nhập đã chọn khi đăng ký.</p>
           </div>
           <div class="field">
             <label for="loginPassword">Mật khẩu</label>
@@ -784,31 +825,37 @@ const App = (() => {
       // ở trang chủ gửi yêu cầu cho quản trị viên.
       panel.innerHTML = `
         <div class="stack">
-          <div id="registerPasskeyReadiness" class="note passkey-readiness">
-            ${ico('loader-circle', 18)}<div class="passkey-readiness-body"><span>Đang tự kiểm tra Passkey trên thiết bị này…</span></div>
+          <div class="field">
+            <label for="regEmail">Email</label>
+            <input id="regEmail" type="email" autocomplete="email" maxlength="254" required>
+            <span class="hint">Dùng để xác minh, nhận thông báo bảo mật và khôi phục tài khoản. Không hiển thị công khai.</span>
           </div>
           <div class="field">
-            <label for="regUsername">Tên đăng nhập hoặc email</label>
-            <input id="regUsername" type="text" autocomplete="username" maxlength="254">
-            <span class="hint">Tên 3–32 ký tự (chữ, số, . _ -) hoặc email. Email chưa được xác minh.</span>
+            <label for="regUsername">Tên đăng nhập</label>
+            <input id="regUsername" type="text" autocomplete="username" minlength="3" maxlength="32" required>
+            <span class="hint">3–32 chữ thường, số, . _ -. Không đặt dấu ở đầu, cuối hoặc liền nhau. Không hiển thị công khai.</span>
           </div>
           <div class="field">
             <label for="regDisplayName">Tên hiển thị</label>
-            <input id="regDisplayName" type="text" autocomplete="name">
-            <span class="hint">Tên này hiển thị công khai; không nhập email nếu muốn giữ riêng tư.</span>
+            <input id="regDisplayName" type="text" autocomplete="name" minlength="2" maxlength="40" required>
+            <span class="hint">Hiển thị công khai. Đừng dùng email, số điện thoại hoặc tên giả mạo quản trị.</span>
           </div>
           <div class="field">
             <label for="regPassword">Mật khẩu</label>
-            <input id="regPassword" type="password" autocomplete="new-password">
-            <span class="hint">Ít nhất 8 ký tự</span>
+            <input id="regPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
+            <button class="btn btn-ghost btn-sm" data-act="toggle-password" data-target="regPassword">Hiện mật khẩu</button>
+            <span class="hint">Ít nhất 8 ký tự. Không dùng lại mật khẩu ở nơi khác; đây là hệ thống demo.</span>
           </div>
 
-          <button class="btn btn-primary btn-block btn-lg" data-act="do-register">Tạo tài khoản</button>
+          <button class="btn btn-primary btn-block btn-lg" data-act="do-register">Tiếp tục</button>
+          <p class="hint">Bạn có thể xem hàng ngay. Khi thanh toán lần đầu, chúng tôi sẽ nhờ bạn tạo Passkey (vân tay, khuôn mặt hoặc mã PIN thiết bị).</p>
+          <p class="hint">Bằng việc tạo tài khoản, bạn đồng ý <button class="btn btn-ghost btn-sm" data-act="auth-terms">Điều khoản và Chính sách bảo mật</button>.</p>
         </div>`;
-      Promise.resolve(refreshPasskeyReadiness('registerPasskeyReadiness')).catch((error) => {
-        console.error('[passkey-readiness:register]', error);
-        renderPasskeyReadiness('registerPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
-      });
+      bindRegistrationValidation();
+    }
+    if(tab==='login') {
+      panel.insertAdjacentHTML('beforeend','<div class="row mt-3"><button class="btn btn-ghost btn-sm" data-act="forgot-password">Quên mật khẩu</button><button class="btn btn-ghost btn-sm" data-act="lost-passkey">Mất Passkey?</button></div>');
+      startConditionalLogin();
     }
   }
 
@@ -821,15 +868,23 @@ const App = (() => {
    * giao diện cũng không dẫn đi đâu khác.
    */
   function openSetupModal(user, note) {
+    if(['BASIC','VERIFIED'].includes(user.accountStatus)&&(!user.emailVerified||user.emailProofFresh===false)){
+      if(!user.email)return openLegacyEmailSetup();
+      // openEmailVerification tự gọi ensure: dùng lại mã còn hiệu lực, không gửi/xoay mã mỗi lần mở.
+      openEmailVerification(user);
+      return;
+    }
+    if(user.accountStatus==='PENDING_EMAIL') return openEmailVerification(user);
+    if(!user.emailVerified && user.role!=='ADMIN' && user.accountStatus==='PENDING_PASSKEY') return openLegacyEmailSetup();
     const bootstrap = user.accountStatus === 'PENDING_BOOTSTRAP';
     openModal({
-      title: bootstrap ? 'Đổi mật khẩu tạm' : 'Gắn Passkey',
-      dismissible: false,
+      title: bootstrap ? 'Đổi mật khẩu tạm' : 'Kích hoạt ví bằng Passkey',
+      dismissible: !bootstrap,
       body: `
         <div class="stack">
           <p class="muted m-0">${note || (bootstrap
             ? 'Đặt mật khẩu riêng của bạn để tiếp tục.'
-            : 'Bước cuối để kích hoạt tài khoản.')}</p>
+            : esc(authUi.activation?.label || 'Kích hoạt ví để nạp tiền và mua hàng.'))}</p>
 
           ${bootstrap ? `
             <div class="field">
@@ -843,15 +898,16 @@ const App = (() => {
             </div>
             <button class="btn btn-primary btn-block btn-lg" data-act="do-bootstrap-password">Tiếp tục</button>
           ` : `
+            <p class="muted">Đăng nhập và xác nhận giao dịch bằng vân tay, khuôn mặt hoặc mã PIN thiết bị. Máy chủ chỉ lưu khóa công khai, không lưu sinh trắc học hay khóa riêng của bạn.</p>
             <div id="setupPasskeyReadiness" class="note passkey-readiness">
               ${ico('loader-circle', 18)}<div class="passkey-readiness-body"><span>Đang tự kiểm tra Passkey trên thiết bị này…</span></div>
             </div>
             <button class="btn btn-primary btn-block btn-lg" data-act="do-enroll-passkey">
-              ${ico('key-round', 17)} Gắn Passkey
+              ${ico('key-round', 17)} Tạo Passkey
             </button>
           `}
 
-          <button class="btn btn-ghost btn-block" data-act="do-logout">Đăng xuất và hoàn tất sau</button>
+          ${!bootstrap?authField('activationDeviceName','Tên Passkey (có thể bỏ qua)','text',suggestedDeviceName())+'<p class="hint">Tặng 5.000.000 VND demo khi kích hoạt ví. Đây là số dư mô phỏng.</p><button class="btn btn-ghost btn-block" data-act="activation-later">Để sau</button>':'<button class="btn btn-ghost btn-block" data-act="do-logout">Đăng xuất và hoàn tất sau</button>'}
         </div>`,
     });
     if (!bootstrap) Promise.resolve(refreshPasskeyReadiness('setupPasskeyReadiness')).catch((error) => {
@@ -868,7 +924,9 @@ const App = (() => {
    */
   async function afterSession(result, greeting) {
     setSession(result.token, result.user);
-    if (result.user.accountStatus && result.user.accountStatus !== 'ACTIVE') {
+    if(result.verification)applyEmailMeta(result.verification);
+    if(result.scope==='recover') {renderChrome();openRecoveryPasskey(result.recoveryMethod==='EMAIL');return false;}
+    if (result.user.accountStatus && !['BASIC','VERIFIED','ACTIVE','RECOVERING'].includes(result.user.accountStatus)) {
       renderChrome();
       openSetupModal(result.user);
       return false;
@@ -879,10 +937,15 @@ const App = (() => {
     if (greeting) toast(greeting, 'ok');
     renderChrome();
     route();
+    if(state.recoverAfterLogin){state.recoverAfterLogin=false;openRecoveryCode();return true;}
+    if(result.recoveryCodes?.length) showRecoveryCodes(result.recoveryCodes);
+    else if(authUi.emailLink) await openEmailLinkModal();
     return true;
   }
 
   async function doRegister(btn) {
+    for(const input of document.querySelectorAll('#authPanel input')) {if(!input.reportValidity()) return;}
+    const email=$('#regEmail').value.trim();
     const username = $('#regUsername').value.trim();
     const displayName = $('#regDisplayName').value.trim();
     const password = $('#regPassword').value;
@@ -890,14 +953,10 @@ const App = (() => {
     if (!password) return toast('Vui lòng đặt mật khẩu', 'err');
 
     await guard('register', btn, async () => {
-      const readiness = await refreshPasskeyReadiness('registerPasskeyReadiness');
-      if (!readiness || !readiness.ok) return;
       const result = await api('/passkeys/register/account', {
-        method: 'POST', body: { username, displayName, password },
+        method: 'POST', body: { email,username, displayName, password },
       });
-      setSession(result.token, result.user);
-      renderChrome();
-      openSetupModal(result.user, 'Bước cuối để kích hoạt tài khoản và mở ví.');
+      await afterSession(result,'Tài khoản đã tạo. Bạn có thể xem hàng ngay; xác minh email trước khi mở ví.');
     });
   }
 
@@ -909,21 +968,27 @@ const App = (() => {
       return;
     }
     await guard('enroll', btn, async () => {
-      const readiness = await refreshPasskeyReadiness('setupPasskeyReadiness');
-      if (!readiness || !readiness.ok) return;
-      const { registrationSessionId, options } = await api('/passkeys/register/passkey/options', {
-        method: 'POST', body: {},
-      });
+      const deviceName=$('#activationDeviceName')?.value.trim()||suggestedDeviceName();
+      let prepared;
+      try{prepared=await api('/passkeys/register/passkey/options',{method:'POST',body:{}});}
+      catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
+      const {registrationSessionId,options}=prepared;
       const attResp = await webauthn('enroll', () =>
         SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));
-      const result = await api('/passkeys/register/passkey/verify', {
-        method: 'POST', body: { registrationSessionId, response: attResp },
-      });
-      await afterSession(result,
-        `Chào mừng ${result.user.displayName}. Bạn đang là ${ROLE_LABEL[result.user.role]}.`);
-      location.hash = consoleHome(result.user.role);
-      route();
+      let result;
+      // Bằng chứng email có thể hết hạn trong lúc người dùng ở hộp thoại hệ điều hành: quay lại bước email,
+      // giữ nguyên authUi.activation và KHÔNG tự mở lại hộp thoại Passkey.
+      try{result=await api('/passkeys/register/passkey/verify',{method:'POST',body:{registrationSessionId,response:attResp,deviceName}});}
+      catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
+      await afterSession(result,`Đã kích hoạt ví cho ${result.user.displayName}.`);
     });
+  }
+
+  /** Máy chủ đòi bằng chứng email mới: mở lại bước email, giữ (hoặc tạo) ý định kích hoạt để quay lại sau khi xác minh. */
+  function reopenEmailStep() {
+    state.user.emailProofFresh=false;
+    if(!authUi.activation)authUi.activation={label:'Kích hoạt ví bằng Passkey.',resume:()=>route(),userId:state.user.id,hash:location.hash};
+    openSetupModal(state.user);
   }
 
   /** Ngoại lệ khởi tạo: đổi mật khẩu tạm của quản trị viên, khi chưa có credential nào. */
@@ -1020,8 +1085,10 @@ const App = (() => {
   }
 
   function renderChrome() {
+    renderSecurityBanner();
     const here = (location.hash || '#/').split('?')[0];
-    const showSidebar = currentArea() === 'console' && !!state.user;
+    const full=!!state.user&&['BASIC','VERIFIED','ACTIVE','RECOVERING'].includes(state.user.accountStatus)&&state.user.authMethod!=='recovery';
+    const showSidebar = currentArea() === 'console' && full;
     $('#app').setAttribute('data-sidebar', showSidebar ? 'on' : 'off');
 
     const search = $('#topSearchInput');
@@ -1048,6 +1115,7 @@ const App = (() => {
       return;
     }
 
+    if(!full){$('#topbarActions').innerHTML='<button class="top-link" data-act="resume-setup">Hoàn tất thiết lập</button><button class="top-link" data-act="do-logout">Đăng xuất</button>';return;}
     const role = state.user.role;
     const unread = state.unread > 99 ? '99+' : state.unread;
     const balance = state.wallet
@@ -1443,7 +1511,6 @@ const App = (() => {
         const me = await api('/users/me');
         state.user = me.user;
         state.wallet = me.wallet;
-        localStorage.setItem(STORAGE_USER, JSON.stringify(me.user));
         state.sellerRequest = null;
         toast('Yêu cầu mở cửa hàng đã được duyệt. Bạn đã có thể đăng tin bán.', 'ok');
       } catch (_) { /* lần điều hướng sau sẽ thử lại */ }
@@ -1476,6 +1543,7 @@ const App = (() => {
       if (head === 'notifications') return await viewNotifications();
       if (head === 'wallet') return await viewWallet();
       if (head === 'security') return await viewSecurity();
+      if(head==='account-action') {view().innerHTML='<div class="page"><div class="card p-5"><h2>Bảo mật tài khoản</h2><p>Làm theo hướng dẫn trong hộp thoại. Nếu đã đóng hoặc tải lại trang, hãy mở lại liên kết trong email.</p><button class="btn" data-act="open-auth">Đăng nhập</button></div></div>';return;}
       if (head === 'admin') return await viewAdmin(parts[1] || 'disputes');
       if (head === 'audit') return await viewAudit(parts[1]);
       view().innerHTML = `<div class="page">${empty('compass', 'Không có trang này', 'Đường dẫn bạn mở không tồn tại.',
@@ -1546,7 +1614,7 @@ const App = (() => {
             </div>
             <div class="promo-mini">
               <span class="ico-box">${ico('fingerprint', 22)}</span>
-              <div><b>Xác thực vân tay, khuôn mặt</b><span>An toàn hơn mã OTP qua tin nhắn</span></div>
+              <div><b>Xác thực bằng Passkey</b><span>Vân tay, khuôn mặt hoặc mã PIN thiết bị</span></div>
             </div>
           </div>
         </div>`}
@@ -1802,8 +1870,9 @@ const App = (() => {
       <p class="muted tiny center m-0">Chưa trừ tiền ở bước này — bạn xác nhận thanh toán vào ký quỹ ở bước sau.</p>`;
   }
 
-  async function doOrder(listingId, btn) {
-    const note = $('#bkNote') ? $('#bkNote').value.trim() : '';
+  async function doOrder(listingId, btn, savedNote) {
+    const note = savedNote ?? ($('#bkNote') ? $('#bkNote').value.trim() : '');
+    if(!['ACTIVE','RECOVERING'].includes(state.user?.accountStatus))return beginActivation('Bạn đang đặt mua sản phẩm này. Lời nhắn và sản phẩm được giữ nguyên.',()=>doOrder(listingId,null,note));
     const txn = await guard('order', btn, () => api('/transactions/orders', { method: 'POST', body: { listingId, note } }));
     if (!txn) return;
 
@@ -1943,7 +2012,7 @@ const App = (() => {
         out.push(`<button class="btn btn-primary btn-sm" data-act="wait-confirm" data-id="${id}">${ico('package', 15)} Xác nhận đã nhận hàng</button>`);
       }
       if (t.status === 'WAIT_CONFIRM') {
-        out.push(`<button class="btn btn-trust btn-sm" data-act="open-release" data-id="${id}">${ico('fingerprint', 15)} Xác thực vân tay &amp; giải ngân</button>`);
+        out.push(`<button class="btn btn-trust btn-sm" data-act="open-release" data-id="${id}">${ico('fingerprint', 15)} Xác nhận bằng Passkey &amp; giải ngân</button>`);
         out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-id="${id}">${ico('triangle-alert', 15)} Mở tranh chấp</button>`);
       }
     } else {
@@ -2104,9 +2173,25 @@ const App = (() => {
   }
 
   async function secureOrder(id, btn, then) {
-    await guard('secure:' + id, btn, () => api(`/transactions/${id}/secure`, {
-      method: 'POST', body: { requestId: newRequestId() },
-    }), 'Đã thanh toán — tiền đang được giữ trong ký quỹ, chưa chuyển cho người bán.');
+    if(!['ACTIVE','RECOVERING'].includes(state.user?.accountStatus))return beginActivation('Bạn đang thanh toán đơn hàng.',()=>secureOrder(id,null,then));
+    const epoch=state.sessionEpoch;
+    const prepared=await guard('prepare-secure:'+id,btn,()=>api(`/transactions/${id}/reauth/options`,{method:'POST',body:{action:'LOCK_ESCROW'}}));
+    if(!prepared || epoch!==state.sessionEpoch)return;
+    authUi.lock={id,then,prepared,createdAt:Date.now(),requestId:newRequestId(),epoch};
+    openModal({title:'Xác nhận thanh toán vào ký quỹ',body:`<p>Sản phẩm: <b>${esc(prepared.context.itemName)}</b></p><div class="price-row total"><span>Thanh toán cho ${esc(prepared.context.sellerName)}</span><b>${money(prepared.context.amount)}</b></div><div class="note note-trust mt-3">Tiền sẽ được giữ trong ký quỹ cho đến khi bạn xác nhận đã nhận hàng. Xác nhận bằng Passkey để thanh toán.</div><p class="hint">Tiền chưa chuyển cho người bán. Mỗi lần thanh toán đều cần xác nhận, kể cả khi đã đăng nhập bằng Passkey.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="secure-confirm">Xác nhận bằng Passkey</button>'});
+  }
+  async function confirmSecureOrder(btn){
+    const pending=authUi.lock;if(!pending || pending.epoch!==state.sessionEpoch)return;
+    const {id,then}=pending;
+    await guard('secure:'+id,btn,async()=>{
+      if(Date.now()-pending.createdAt>110000){pending.prepared=await api(`/transactions/${id}/reauth/options`,{method:'POST',body:{action:'LOCK_ESCROW'}});pending.createdAt=Date.now();}
+      const {reauthSessionId,options}=pending.prepared;
+      const response=await webauthn('reauth',()=>SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options}));
+      const {reauthGrant}=await api(`/transactions/${id}/reauth/verify`,{method:'POST',body:{reauthSessionId,response}});
+      pending.createdAt=0;
+      return api(`/transactions/${id}/secure`,{method:'POST',body:{requestId:pending.requestId,reauthGrant}});
+    },'Đã thanh toán — tiền đang được giữ trong ký quỹ, chưa chuyển cho người bán.');
+    authUi.lock=null;
     closeModal();
     await refreshWallet();
     if (then === 'tx') { location.hash = '#/tx/' + id; return; }
@@ -2207,13 +2292,12 @@ const App = (() => {
         </div>
         <div class="note mt-3">
           ${ico('key-round', 18)}
-          <span>Đây là thao tác <b>chuyển tiền thật</b>, nên hệ thống bắt buộc <b>xác thực lại bằng vân tay hoặc
-            khuôn mặt</b> ngay cả khi bạn đang đăng nhập. Xác thực này chỉ dùng được đúng một lần, cho đúng đơn
+          <span>Đây là thao tác <b>chuyển số dư mô phỏng</b>, nên hệ thống bắt buộc <b>xác thực lại bằng Passkey (vân tay, khuôn mặt hoặc mã PIN thiết bị)</b> ngay cả khi bạn đang đăng nhập. Xác thực này chỉ dùng được đúng một lần, cho đúng đơn
             này, và hết hạn sau ít phút.</span>
         </div>`,
       footer: `
         <button class="btn" data-act="modal-close">Huỷ</button>
-        <button class="btn btn-trust" data-act="do-release" data-id="${esc(t.id)}">${ico('fingerprint', 17)} Xác thực vân tay &amp; giải ngân</button>`,
+        <button class="btn btn-trust" data-act="do-release" data-id="${esc(t.id)}">${ico('fingerprint', 17)} Xác nhận bằng Passkey &amp; giải ngân</button>`,
     });
   }
 
@@ -2246,19 +2330,195 @@ const App = (() => {
    * Phiếu ràng buộc với đúng MỘT hành động: phiếu xin cho việc quản lý thiết bị không đổi
    * được mật khẩu, và ngược lại.
    */
-  async function getAccountGrant(action = 'MANAGE_CREDENTIAL') {
+  async function getAccountGrant(action,details={}) {
     const { reauthSessionId, options } = await api('/passkeys/reauth/options', {
-      method: 'POST', body: { action },
+      method: 'POST', body: { action,...details },
     });
     const assertion = await webauthn('reauth', () =>
       SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
-    const { reauthGrant } = await api('/passkeys/reauth/verify', {
+    const result = await api('/passkeys/reauth/verify', {
       method: 'POST', body: { reauthSessionId, response: assertion },
     });
-    return reauthGrant;
+    return action==='UPGRADE_SESSION' ? result : result.reauthGrant;
   }
 
-  const getCredentialGrant = () => getAccountGrant('MANAGE_CREDENTIAL');
+  const getCredentialGrant = () => getAccountGrant('ADD_CREDENTIAL');
+
+  // Auth v3: all credentials/tokens below stay in page memory.
+  const authUi={nameCallback:null,codes:null,codesSaved:false,action:null,linkToken:null,emailChange:null,recoveryEmail:false,activation:null,lock:null,emailMeta:null,emailTick:0,emailLink:null};
+  function beginActivation(label,resume){
+    if(!state.user)return openAuthModal('login');
+    authUi.activation={label,resume,userId:state.user.id,hash:location.hash};
+    openSetupModal(state.user);
+  }
+  async function finishActivation(){
+    const pending=authUi.activation;authUi.activation=null;authUi.codes=null;closeModal();renderChrome();
+    if(pending && state.user?.id===pending.userId && location.hash===pending.hash && ['ACTIVE','RECOVERING'].includes(state.user.accountStatus))await pending.resume?.();
+  }
+  const authField=(id,label,type='text',value='')=>`<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" type="${type}" value="${esc(value)}" ${type==='password'?'autocomplete="new-password" maxlength="128"':''} required></div>`;
+  function suggestedDeviceName(){const ua=navigator.userAgent;return `${/Android/.test(ua)?'Android':/iPhone|iPad/.test(ua)?'iPhone / iPad':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Thiết bị'}, ${/Edg/.test(ua)?'Edge':/Chrome/.test(ua)?'Chrome':/Safari/.test(ua)?'Safari':'trình duyệt'}`;}
+  function bindRegistrationValidation(){
+    const reserved=new Set(['admin','support','enclave','root','system','moderator']);
+    for(const input of document.querySelectorAll('#authPanel input')){
+      input.addEventListener('input',()=>input.setCustomValidity(''));
+      input.addEventListener('blur',async()=>{
+        if(input.id==='regUsername'){
+          input.value=input.value.trim().toLowerCase();const name=input.value;
+          input.setCustomValidity(/^[a-z0-9](?:[a-z0-9]|[._-](?=[a-z0-9])){1,30}[a-z0-9]$/.test(name)&&!reserved.has(name)?'':'Tên đăng nhập không hợp lệ hoặc dành riêng.');
+          if(input.checkValidity())try{const result=await api('/passkeys/username-availability?username='+encodeURIComponent(name));if(input.isConnected&&input.value===name)input.setCustomValidity(result.available?'':'Tên đăng nhập đã có người dùng.');}catch{}
+        }
+        if(input.value)input.reportValidity();
+      });
+    }
+  }
+  async function startConditionalLogin(){
+    const generation=modalGeneration,epoch=state.sessionEpoch,tabGeneration=authTabGeneration;
+    try{
+      if(!SimpleWebAuthnBrowser.browserSupportsWebAuthnAutofill || !await SimpleWebAuthnBrowser.browserSupportsWebAuthnAutofill())return;
+      if(generation!==modalGeneration||tabGeneration!==authTabGeneration||!$('#loginUsername'))return;
+      const {authenticationSessionId,options}=await api('/passkeys/login/options',{method:'POST'});
+      const response=await SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options,useBrowserAutofill:true});
+      if(generation!==modalGeneration||tabGeneration!==authTabGeneration||epoch!==state.sessionEpoch)return;
+      const result=await api('/passkeys/login/verify',{method:'POST',body:{authenticationSessionId,response}});
+      if(generation===modalGeneration&&tabGeneration===authTabGeneration&&epoch===state.sessionEpoch)await afterSession(result,`Xin chào ${result.user.displayName}`);
+    }catch{ /* Conditional UI is optional. Explicit login buttons remain available. */ }
+  }
+  // Hạn gửi lại/hết hạn mã theo đồng hồ máy chủ (bù lệch bằng serverNow), không đếm lại 60 giây mỗi lần mở.
+  // Metadata chỉ nói yêu cầu đã được tiếp nhận, KHÔNG chứng minh email đã tới hộp thư.
+  function applyEmailMeta(meta){
+    if(!meta||!state.user)return;
+    const skew=Date.parse(meta.serverNow)-Date.now(),offset=Number.isFinite(skew)?skew:0;
+    const at=(iso)=>{const t=Date.parse(iso);return Number.isFinite(t)?t-offset:null;};
+    let nextAt=at(meta.nextRequestAt);
+    if(nextAt===null&&Number(meta.resendAfterSeconds)>=0)nextAt=Date.now()+Number(meta.resendAfterSeconds)*1000;
+    authUi.emailMeta={userId:state.user.id,nextAt,expiresAt:at(meta.expiresAt),emailMask:meta.emailMask||currentEmailMeta()?.emailMask||null,failed:false};
+  }
+  function currentEmailMeta(){const m=authUi.emailMeta;return m&&state.user&&m.userId===state.user.id?m:null;}
+  async function requestEmailCode(btn,ensure){
+    const userId=state.user?.id;
+    try{
+      const result=await guard(ensure?'email-ensure':'email-resend',btn,()=>api('/passkeys/email/resend',{method:'POST',body:ensure?{ensure:true}:{}}));
+      if(result&&state.user?.id===userId)applyEmailMeta(result.verification||result);
+    }catch(e){
+      // guard đã hiện lỗi trong hộp thoại; ở đây chỉ cập nhật nút: 429 thì chờ theo Retry-After, lỗi khác cho thử lại.
+      if(!e?.silent&&state.user?.id===userId)authUi.emailMeta={...(currentEmailMeta()||{userId,expiresAt:null,emailMask:null}),nextAt:e.retryAfter?Date.now()+e.retryAfter*1000:null,failed:!e.retryAfter};
+    }finally{emailResendCountdown();}
+  }
+  function openEmailVerification(user){
+    const email=user.emailMask || currentEmailMeta()?.emailMask || user.email?.replace(/^(.{1,2})[^@]*@/,'$1***@') || 'email của bạn';
+    openModal({title:authUi.activation?'Kích hoạt ví · xác minh email':'Nhập mã xác minh',body:`${authUi.activation?`<p>${esc(authUi.activation.label)}</p>`:''}<p>Nhập mã 6 số được gửi tới <b id="emailCodeMask">${esc(email)}</b>.</p><p class="hint" id="emailCodeStatus" role="status">Đang chuẩn bị mã xác minh…</p><div class="field"><label for="emailVerificationCode">Mã xác minh</label><input id="emailVerificationCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></div><button class="btn btn-ghost" data-act="email-resend" id="emailResend" disabled>Gửi lại mã</button><button class="btn btn-ghost" data-act="activation-email-change">Dùng email khác</button>`,footer:'<button class="btn" data-act="activation-later">Để sau</button><button class="btn btn-primary" data-act="email-verify">Xác minh</button>'});
+    // ensure: máy chủ dùng lại mã còn hiệu lực, chỉ tạo mã khi cần.
+    requestEmailCode($('#emailResend'),true);
+  }
+  function emailResendCountdown(){
+    const generation=modalGeneration,loop=++authUi.emailTick;
+    const tick=()=>{
+      const btn=$('#emailResend'),status=$('#emailCodeStatus');if(!btn||generation!==modalGeneration||loop!==authUi.emailTick)return;
+      setTimeout(tick,1000);
+      if(state.busy.has('email-ensure')||state.busy.has('email-resend')){if(status)status.textContent='Đang chuẩn bị mã xác minh…';return;} // guard đang giữ nút
+      const meta=currentEmailMeta(),now=Date.now();
+      if(meta?.emailMask)$('#emailCodeMask').textContent=meta.emailMask;
+      const seconds=meta?.nextAt?Math.max(0,Math.ceil((meta.nextAt-now)/1000)):0;
+      btn.disabled=!meta||seconds>0||state.busy.size>0;
+      btn.textContent=meta?.failed?'Thử lại':seconds?`Gửi lại mã sau ${seconds} giây`:'Gửi lại mã';
+      if(status)status.textContent=!meta?'Đang chuẩn bị mã xác minh…':meta.failed?'Chưa chuẩn bị được mã. Bạn có thể thử lại hoặc để sau.':meta.expiresAt&&meta.expiresAt>now?`Mã gần nhất có hiệu lực đến ${fmtDateTime(new Date(meta.expiresAt).toISOString())}. Chưa thấy email? Kiểm tra thư rác hoặc gửi lại khi được phép.`:meta.expiresAt?'Mã gần nhất đã hết hạn. Hãy gửi lại mã.':'Chưa thấy email? Kiểm tra thư rác hoặc gửi lại khi được phép.';
+    };tick();
+  }
+  async function openEmailLinkModal(){
+    const link=authUi.emailLink;if(!link)return;
+    const dismiss='<button class="btn" data-act="email-link-dismiss">Bỏ qua liên kết</button>';
+    if(!link.preview){
+      // preview chỉ đọc, không tiêu thụ token; mở trang KHÔNG phải là xác nhận.
+      openModal({title:'Xác minh email',dismissible:false,body:'<p role="status">Đang kiểm tra liên kết…</p>',footer:dismiss});
+      try{const p=await api('/passkeys/email/link/preview',{method:'POST',body:{token:link.token}});if(authUi.emailLink!==link)return;link.preview={username:String(p.username||''),emailMask:String(p.emailMask||''),expiresAt:p.expiresAt||null};}
+      catch(e){
+        if(authUi.emailLink!==link||e.silent)return;
+        if(e.status)authUi.emailLink=null; // liên kết sai/hết hạn: bỏ token; lỗi mạng thì giữ để thử lại
+        openModal({title:'Không dùng được liên kết',dismissible:false,body:`<p>${esc(e.message)}</p><p>Bạn vẫn có thể xác minh bằng mã 6 số khi kích hoạt ví.</p>`,footer:e.status?'<button class="btn" data-act="email-link-dismiss">Đã hiểu</button>':dismiss+'<button class="btn btn-primary" data-act="email-link-open">Thử lại</button>'});return;
+      }
+    }
+    const {username,emailMask,expiresAt}=link.preview,current=state.user?.username;
+    const who=`<p>Tài khoản: <b>${accountLabel(username)}</b><br>Email: <b>${esc(emailMask)}</b></p>${expiresAt?`<p class="hint">Liên kết hết hạn lúc ${fmtDateTime(expiresAt)}.</p>`:''}`;
+    if(!state.user||!current||!username)openModal({title:'Xác minh email',dismissible:false,body:`${who}<p>Đăng nhập đúng tài khoản này rồi bấm xác nhận. Chỉ mở liên kết thì email chưa được xác minh.</p>`,footer:dismiss+'<button class="btn btn-primary" data-act="email-link-login">Đăng nhập để tiếp tục</button>'});
+    else if(current&&username&&current.toLowerCase()!==username.toLowerCase())openModal({title:'Liên kết của tài khoản khác',dismissible:false,body:`${who}<p>Bạn đang đăng nhập bằng <b>${accountLabel(current)}</b>. Email sẽ không được xác minh cho tài khoản hiện tại.</p><p>Muốn xác minh cho ${accountLabel(username)}, hãy đăng xuất rồi đăng nhập đúng tài khoản đó.</p>`,footer:dismiss+'<button class="btn btn-primary" data-act="email-link-switch">Đăng xuất để đổi tài khoản</button>'});
+    else openModal({title:'Xác nhận email',dismissible:false,body:`${who}<p>Bấm xác nhận để xác minh email cho phiên đăng nhập này. Việc này không tạo ví hay Passkey.</p>`,footer:dismiss+'<button class="btn btn-primary" data-act="email-link-confirm">Xác nhận email</button>'});
+  }
+  async function verifyEmailUi(btn){
+    const code=$('#emailVerificationCode').value.trim();if(!/^\d{6}$/.test(code))return toast('Hãy nhập đủ 6 chữ số.','err');
+    await guard('verify-email',btn,async()=>{const result=await api('/passkeys/email/verify',{method:'POST',body:{code}});setSession(result.token,result.user);renderChrome();if(authUi.activation)openSetupModal(result.user);else{closeModal();await route();}});
+  }
+  function openLegacyEmailSetup(){
+    openModal({title:'Bổ sung email xác minh',body:`<p>Tài khoản được tạo trước bản nâng cấp. Hãy xác minh email trước khi thiết lập Passkey và mở ví.</p>${authField('legacyEmail','Email','email')}`,footer:'<button class="btn" data-act="activation-later">Để sau</button><button class="btn btn-primary" data-act="legacy-email">Gửi mã xác minh</button>'});
+  }
+  function openDeviceNameModal(callback,{dismissible=true}={}){
+    authUi.nameCallback=callback;
+    openModal({title:'Đặt tên cho Passkey này',dismissible,body:`${authField('deviceNameInput','Tên Passkey','text',suggestedDeviceName())}<p class="hint">Tên giúp bạn nhận biết Passkey; không dùng để xác định danh tính thiết bị.</p>`,footer:`${dismissible?'<button class="btn" data-act="modal-close">Hủy</button>':'<button class="btn" data-act="restart-setup">Tạo lại Passkey</button>'}<button class="btn btn-primary" data-act="device-name-save">Lưu và tiếp tục</button>`});
+    $('#deviceNameInput').maxLength=60;
+  }
+  function showRecoveryCodes(codes){
+    authUi.codes=codes;authUi.codesSaved=false;
+    // Không đóng bằng nền/Escape/nút X: mã chỉ hiện một lần, chỉ "Hoàn tất" hoặc "Để sau" (có cảnh báo) mới rời hộp thoại.
+    openModal({title:'Lưu mã khôi phục',dismissible:false,body:`<p>Nếu mất thiết bị, các mã này giúp bạn khôi phục tài khoản. Mỗi mã chỉ dùng một lần. Chúng tôi sẽ không hiển thị lại.</p><div class="recovery-code-grid">${codes.map(code=>`<code>${esc(code)}</code>`).join('')}</div><div class="row mt-3"><button class="btn" data-act="recovery-codes-download">Tải xuống</button><button class="btn" data-act="recovery-codes-copy">Sao chép</button></div><label class="row mt-3"><input id="recoveryCodesAcknowledged" type="checkbox"> Tôi đã lưu các mã này ở nơi an toàn</label>`,footer:'<button class="btn" data-act="recovery-codes-later">Để sau</button><button class="btn btn-primary" id="recoveryCodesDone" data-act="recovery-codes-done" disabled>Hoàn tất</button>'});
+    $('#recoveryCodesAcknowledged').addEventListener('change',()=>{$('#recoveryCodesDone').disabled=!authUi.codesSaved||!$('#recoveryCodesAcknowledged').checked;});
+  }
+  function codesSaved(){authUi.codesSaved=true;$('#recoveryCodesDone').disabled=!$('#recoveryCodesAcknowledged').checked;}
+  async function upgradeAuthUi(btn,then){
+    await guard('session-upgrade',btn,async()=>{
+      const result=await getAccountGrant('UPGRADE_SESSION');setSession(result.token,result.user);closeModal();renderChrome();if(then)await then();else await route();
+    });
+  }
+  function openRecoveryChoice(){
+    openModal({title:'Mất Passkey?',body:'<p>Nếu còn một Passkey, hãy dùng Passkey đó trên thiết bị khác hoặc qua mã QR của trình duyệt. Nếu mất tất cả, chọn một cách khôi phục bên dưới.</p><div class="stack"><button class="btn btn-primary" data-act="recovery-code-open">Tôi có mã khôi phục</button><button class="btn" data-act="recovery-email-open">Tôi không có mã khôi phục</button></div><p class="hint">Không còn email và mã khôi phục: cần liên hệ hỗ trợ. Tiền trong các đơn ký quỹ vẫn được giữ nguyên.</p>'});
+  }
+  function openRecoveryCode(){
+    if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return toast('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
+    openModal({title:'Khôi phục bằng mã dự phòng',body:`${authField('recoveryCurrentPassword','Mật khẩu hiện tại','password')}${authField('recoveryCode','Mã khôi phục (XXXXX-XXXXX)')}<p class="hint">Mã được dùng một lần. Sau khi tạo Passkey mới, Passkey và các phiên cũ sẽ bị thu hồi.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-code-verify">Xác minh và tiếp tục</button>'});
+  }
+  function openEmailRecoveryRequest(kind='recovery'){
+    authUi.action=kind;
+    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Bạn cần xác nhận email và đợi 24 giờ. Sau khôi phục, chức năng giải ngân bị hạn chế thêm 72 giờ.'}</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">Gửi hướng dẫn</button>'});
+  }
+  function openRecoveryPasskey(emailRecovery){
+    authUi.recoveryEmail=emailRecovery;
+    openModal({title:'Tạo Passkey khôi phục',dismissible:false,body:`<p>Tạo Passkey mới bằng vân tay, khuôn mặt hoặc mã PIN thiết bị. Các Passkey cũ sẽ bị thu hồi khi hoàn tất.</p>${authField('recoveryDeviceName','Tên Passkey','text',suggestedDeviceName())}${emailRecovery?authField('recoveryNewPassword','Mật khẩu mới bắt buộc','password'):''}`,footer:'<button class="btn" data-act="do-logout">Đăng xuất</button><button class="btn btn-primary" data-act="recovery-passkey-create">Tạo Passkey mới</button>'});
+  }
+  async function handleAccountAction(){
+    const hash=location.hash || '';if(!hash.startsWith('#/account-action?'))return;
+    const params=new URLSearchParams(hash.slice(hash.indexOf('?')+1));
+    authUi.action=params.get('purpose');authUi.linkToken=params.get('token');
+    history.replaceState(null,'',location.pathname+location.search+'#/account-action');
+    const kind=authUi.action;
+    if(kind==='verify-email'){
+      // Token chỉ nằm trong bộ nhớ (không lưu storage/log), sống qua đăng nhập/đổi tài khoản tới khi xác nhận hoặc bỏ qua.
+      const token=authUi.linkToken;authUi.linkToken=null;authUi.action=null;
+      if(token){authUi.emailLink={token,preview:null};await openEmailLinkModal();}
+      return;
+    }
+    if(kind==='password-reset'){
+      openModal({title:'Đặt lại mật khẩu',body:authField('resetNewPassword','Mật khẩu mới','password'),footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="reset-password-complete">Đặt lại mật khẩu</button>'});return;
+    }
+    const titles={'recovery-start':'Xác nhận bắt đầu khôi phục','recovery-cancel':'Hủy yêu cầu khôi phục','recovery-finish':'Tiếp tục khôi phục tài khoản'};
+    if(!titles[kind]||!authUi.linkToken)return;
+    openModal({title:titles[kind],body:`<p>${kind==='recovery-start'?'Sau khi xác nhận, thời gian chờ 24 giờ bắt đầu. Trong thời gian này tài khoản không thể giải ngân.':kind==='recovery-cancel'?'Xác nhận hủy yêu cầu khôi phục. Các Passkey hiện có vẫn được giữ.':'Bạn sẽ tạo Passkey mới và đặt mật khẩu mới. Sau khi hoàn tất, các phiên và Passkey cũ bị thu hồi.'}</p>`,footer:'<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-primary" data-act="recovery-link-confirm">Xác nhận</button>'});
+  }
+  async function loadSecurityDetails(){
+    const box=$('#securityDetails');if(!box)return;
+    try{
+      const data=await api('/passkeys/security');if(!box.isConnected)return;
+      const labels={LOGIN_PASSWORD:'Đăng nhập bằng mật khẩu',LOGIN_PASSKEY:'Đăng nhập bằng Passkey',FIRST_PASSKEY_ADDED:'Tạo Passkey đầu tiên',PASSKEY_ADDED:'Thêm Passkey',PASSKEY_REMOVED:'Xóa Passkey',EMAIL_VERIFIED:'Xác minh email',EMAIL_CHANGED:'Đổi email',PASSWORD_CHANGED:'Đổi mật khẩu',PASSWORD_RESET:'Đặt lại mật khẩu',RECOVERY_CODES_REGENERATED:'Tạo lại mã khôi phục',RECOVERY_CODE_USED:'Dùng mã khôi phục',RECOVERY_STARTED:'Bắt đầu khôi phục',RECOVERY_CANCELLED:'Hủy khôi phục',ACCOUNT_RECOVERED:'Hoàn tất khôi phục',RECOVERY_EXPIRED:'Khôi phục hết hạn',PASSKEY_COUNTER_WARNING:'Cảnh báo bộ đếm Passkey'};
+      box.innerHTML=`<div class="card p-5"><h3>Email</h3><p>${data.email?esc(data.email):'Chưa có email'} · ${data.emailVerified?'Đã xác minh':'Chưa xác minh'}</p><button class="btn" data-act="change-email-open">${data.email?'Đổi email':'Thêm email đã xác minh'}</button></div><div class="card p-5"><h3>Mã khôi phục</h3><p>Còn ${Number(data.recoveryCodesRemaining)} mã chưa dùng. ${data.recoveryAcknowledged?'':'Bạn chưa xác nhận lưu mã. Hãy tạo lại và lưu bộ mã mới.'}</p><button class="btn" data-act="recovery-regenerate">Tạo lại mã khôi phục</button><button class="btn btn-ghost" data-act="lost-passkey">Mất Passkey?</button></div><div class="card p-5"><div class="row-between"><h3>Phiên đăng nhập</h3><button class="btn" data-act="sessions-revoke-others">Đăng xuất các phiên khác</button></div>${data.sessions.map(s=>`<div class="border-row"><b>${esc(s.device_name||'Trình duyệt')}</b><p class="hint">${s.auth_method==='passkey'?'Phiên Passkey':s.auth_method==='password'?'Phiên mật khẩu':'Phiên khôi phục'} · Dùng gần nhất ${fmtDateTime(s.last_seen_at)} ${s.current?'· Phiên hiện tại':''}</p>${s.current?'':`<button class="btn btn-sm" data-act="session-revoke" data-id="${esc(s.id)}">Đăng xuất phiên này</button>`}</div>`).join('')}</div><div class="card p-5"><h3>Nhật ký bảo mật gần đây</h3>${data.events.length?data.events.map(e=>`<div class="border-row">${esc(labels[e.action]||'Sự kiện bảo mật')}<span class="hint"> · ${fmtDateTime(e.created_at)}</span></div>`).join(''):'Chưa có sự kiện.'}</div>`;
+    }catch(e){box.textContent=e.message;}
+  }
+  function renderSecurityBanner(){
+    let box=$('#securitySessionBanner');if(!box){box=document.createElement('div');box.id='securitySessionBanner';box.className='wrap';view().before(box);}
+    if(!state.user){box.innerHTML='';return;}
+    if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){
+      box.innerHTML=state.user.emailVerified?'<div class="note mt-3">Email đã xác minh. Ví sẽ được kích hoạt khi bạn bắt đầu nạp tiền hoặc mua hàng.</div>':'<div class="note mt-3">Xác minh email để mở khóa thanh toán. <button class="btn btn-sm" data-act="email-verify-open">Nhập mã xác minh</button></div>';return;
+    }
+    if(!['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){box.innerHTML='';return;}
+    const user=state.user;
+    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'')+(!user.recoveryAcknowledged?'<div class="note note-warning mt-3">Bạn chưa xác nhận lưu mã khôi phục. <a href="#/security">Vào Bảo mật để tạo lại và lưu mã</a>.</div>':'');
+  }
 
   // =====================================================================
   // Trang: Bảo mật tài khoản
@@ -2273,6 +2533,7 @@ const App = (() => {
 
   async function viewSecurity() {
     if (!state.user) return requireLogin('Đăng nhập để quản lý Passkey và mật khẩu.');
+    if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){view().innerHTML=empty('key-round','Bảo mật và kích hoạt ví','Tạo Passkey khi bạn sẵn sàng sử dụng ví. Bạn có thể tiếp tục xem hàng.','<button class="btn btn-primary" data-act="activate-wallet">Kích hoạt ví bằng Passkey</button>');return;}
 
     view().innerHTML = `
       <div class="page">
@@ -2299,7 +2560,9 @@ const App = (() => {
         </div>
       </div>`;
 
-    await loadCredentials();
+    const page=$('#credentialList')?.closest('.page');
+    if(page)page.insertAdjacentHTML('beforeend','<div id="securityDetails" class="stack mt-4"></div>');
+    await Promise.all([loadCredentials(),loadSecurityDetails()]);
   }
 
   async function loadCredentials() {
@@ -2315,11 +2578,13 @@ const App = (() => {
               <div>
                 <b>${esc(c.deviceName)}</b>
                 <div class="muted tiny">
+                  ${c.backedUp==null?'Chưa có thông tin sao lưu':c.backedUp?'Đã được sao lưu':'Chưa ghi nhận bản sao lưu'} · ${c.backupEligible==null?'Chưa có thông tin khả năng sao lưu':c.backupEligible?'Hỗ trợ sao lưu':'Không hỗ trợ sao lưu'}<br>
                   Đăng ký ${esc((c.createdAt || '').slice(0, 10))}
                   ${c.lastUsedAt ? ` · dùng gần nhất ${esc(c.lastUsedAt.slice(0, 10))}` : ' · chưa dùng lần nào'}
                 </div>
               </div>
-              <button class="btn btn-ghost btn-sm" data-act="del-device" data-id="${esc(c.id)}"
+              <button class="btn btn-ghost btn-sm" data-act="rename-device" data-id="${esc(c.id)}" data-name="${esc(c.deviceName)}">Đổi tên</button>
+              <button class="btn btn-ghost btn-sm" data-act="del-device" data-id="${esc(c.id)}" data-name="${esc(c.deviceName)}"
                 ${onlyOne ? 'disabled title="Không thể xoá Passkey cuối cùng"' : ''}>
                 ${ico('x', 15)} Xoá
               </button>
@@ -2328,6 +2593,7 @@ const App = (() => {
             <p class="muted tiny m-s3-0-0">
               Chỉ còn một Passkey nên không xoá được. Nên thêm một thiết bị dự phòng.
             </p>` : ''}
+          ${onlyOne&&credentials[0]?.backedUp===false?'<div class="note note-warning">Passkey này chưa được ghi nhận sao lưu. Hãy thêm một Passkey khác để tránh bị khóa khi mất thiết bị.</div>':''}
         </div>`;
     } catch (e) {
       box.innerHTML = `<p class="muted">Không tải được danh sách: ${esc(e.message)}</p>`;
@@ -2335,10 +2601,7 @@ const App = (() => {
   }
 
   async function addDevice(btn) {
-    const deviceName = prompt('Đặt tên cho thiết bị này (ví dụ: Điện thoại cá nhân)');
-    if (deviceName === null) return;
-
-    await guard('adddev', btn, async () => {
+    openDeviceNameModal(async(deviceName)=>{
       // Phiếu xin TRƯỚC, vì máy chủ kiểm phiếu ngay ở bước xin tuỳ chọn đăng ký — người
       // dùng biết sớm là mình chưa đủ điều kiện, thay vì làm xong mới bị từ chối.
       const reauthGrant = await getCredentialGrant();
@@ -2347,33 +2610,32 @@ const App = (() => {
       });
       const attResp = await webauthn('add-device', () =>
         SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));
-      return api('/passkeys/credentials/verify', {
+      await api('/passkeys/credentials/verify', {
         method: 'POST', body: { registrationSessionId, response: attResp, reauthGrant },
       });
-    }, 'Đã thêm thiết bị mới.');
-
-    await loadCredentials();
+      closeModal();await Promise.all([loadCredentials(),loadSecurityDetails()]);toast('Đã thêm Passkey mới.','ok');
+    });
   }
 
   async function deleteDevice(id, btn) {
     await guard('deldev:' + id, btn, async () => {
-      const reauthGrant = await getCredentialGrant();
+      const reauthGrant = await getAccountGrant('REMOVE_CREDENTIAL',{credentialId:id});
       return api(`/passkeys/credentials/${id}`, { method: 'DELETE', body: { reauthGrant } });
     }, 'Đã xoá thiết bị.');
 
-    await loadCredentials();
+    closeModal();await Promise.all([loadCredentials(),loadSecurityDetails()]);
   }
 
   // ---------- Đổi mật khẩu ----------
   //
-  // Không hỏi mật khẩu cũ mà hỏi Passkey. Mật khẩu cũ là thứ kẻ chiếm được phiên có thể đã
-  // biết; credential thì không. Sau khi đổi, mọi phiên đang mở khác đều bị thu hồi.
+  // Cần cả mật khẩu hiện tại và phiếu Passkey CHANGE_PASSWORD. Sau khi đổi, phiên khác bị thu hồi.
 
   function openChangePasswordModal() {
     openModal({
       title: 'Đổi mật khẩu',
       body: `
         <div class="stack">
+          <div class="field"><label for="currentPassword">Mật khẩu hiện tại</label><input id="currentPassword" type="password" autocomplete="current-password" required></div>
           <div class="field">
             <label for="newPassword">Mật khẩu mới</label>
             <input id="newPassword" type="password" autocomplete="new-password">
@@ -2390,12 +2652,13 @@ const App = (() => {
   }
 
   async function doChangePassword(btn) {
+    const currentPassword=$('#currentPassword').value;
     const newPassword = $('#newPassword').value;
     if (!newPassword) return toast('Nhập mật khẩu mới', 'err');
 
     await guard('chpw', btn, async () => {
       const reauthGrant = await getAccountGrant('CHANGE_PASSWORD');
-      const result = await api('/users/me/password', { method: 'POST', body: { newPassword, reauthGrant } });
+      const result = await api('/users/me/password', { method: 'POST', body: { currentPassword,newPassword, reauthGrant } });
       // Mã phiên cũ vừa bị thu hồi cùng lúc với việc đổi mật khẩu; dùng mã mới máy chủ trả về.
       setSession(result.token, state.user);
       closeModal();
@@ -2640,6 +2903,9 @@ const App = (() => {
     if (!state.user) return requireLogin('Đăng nhập để xem ví của bạn.');
     if (state.user.role === 'ADMIN') {
       return wrongRole('Quản trị viên không phải một bên của giao dịch nên không có ví.');
+    }
+    if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){
+      view().innerHTML=empty('wallet','Kích hoạt ví khi bạn cần','Xác minh email và tạo Passkey để mở ví. Tặng 5.000.000 VND demo khi kích hoạt.','<button class="btn btn-primary" data-act="activate-wallet">Kích hoạt ví &amp; nạp tiền</button><a class="btn" href="#/">Tiếp tục xem hàng</a>');return;
     }
 
     // Cổng nạp tiền nào đang bật là do MÁY CHỦ nói (GET /api/payments/paypal/config); không đoán từ hostname.
@@ -4740,7 +5006,8 @@ const App = (() => {
     'open-change-password': () => openChangePasswordModal(),
     'do-change-password': (el) => doChangePassword(el),
     'add-device': (el) => addDevice(el),
-    'del-device': (el) => deleteDevice(el.dataset.id, el),
+    'del-device': (el) => openModal({title:'Xóa Passkey?',body:`<p>Xóa Passkey <b>${esc(el.dataset.name||'đã chọn')}</b>? Passkey này sẽ không đăng nhập được nữa và các phiên khác sẽ bị đăng xuất.</p>`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-danger" data-act="del-device-confirm" data-id="${esc(el.dataset.id)}">Xóa bằng Passkey</button>`}),
+    'del-device-confirm':(el)=>deleteDevice(el.dataset.id,el),
     'logout': () => logout(),
     'modal-close': () => dismissModal(),
     'reload': () => route(),
@@ -4758,6 +5025,7 @@ const App = (() => {
     'order-tab': (el) => { state.orderTab = el.dataset.tab; route(); },
     'acknowledge': (el) => acknowledgeOrder(el.dataset.id, el),
     'secure': (el) => secureOrder(el.dataset.id, el, el.dataset.then),
+    'secure-confirm':(el)=>confirmSecureOrder(el),
     'pack': (el) => confirmPackedOrder(el.dataset.id),
     'pack-confirm': (el) => packOrder(el.dataset.id, el),
     'shipping-open': (el) => openShipping(el.dataset.id, el),
@@ -4799,11 +5067,71 @@ const App = (() => {
     'notif-open': (el) => openNotification(el),
     'notif-read-all': (el) => readAllNotifications(el),
     'tx-verify-chain': (el) => verifyTxChain(el),
+    'toggle-password':(el)=>{const input=$('#'+el.dataset.target);input.type=input.type==='password'?'text':'password';el.textContent=input.type==='password'?'Hiện mật khẩu':'Ẩn mật khẩu';},
+    'auth-terms':()=>openModal({title:'Điều khoản và quyền riêng tư của bản demo',body:'<p>Enclave là hệ thống mô phỏng phục vụ đồ án. Số dư trong ví không phải tiền gửi ngân hàng và không có chức năng rút tiền thật.</p><p>Email dùng để xác minh, thông báo bảo mật và khôi phục. Khóa công khai Passkey được lưu trên máy chủ; khóa riêng và dữ liệu sinh trắc học được xử lý bởi thiết bị hoặc nhà cung cấp Passkey. Không chia sẻ mật khẩu và mã khôi phục.</p>',footer:'<button class="btn" data-act="open-auth-register">Quay lại đăng ký</button>'}),
+    'copy-site-link':async()=>{try{await navigator.clipboard.writeText(location.origin+location.pathname);toast('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{toast('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
+    'email-verify':verifyEmailUi,
+    'email-resend':(el)=>requestEmailCode(el,false),
+    'legacy-email':async(el)=>{const email=$('#legacyEmail').value;await guard('legacy-email',el,async()=>{const result=await api('/passkeys/email/enroll/request',{method:'POST',body:{email}});state.user.email=email;state.user.emailVerified=false;state.user.accountStatus='BASIC';openEmailVerification({...state.user,...result});});},
+    'device-name-save':async(el)=>{const name=$('#deviceNameInput').value.trim(),callback=authUi.nameCallback;if(!name)return toast('Hãy đặt tên Passkey.','err');await guard('device-name',el,()=>callback(name));},
+    'restart-setup':()=>{authUi.nameCallback=null;openSetupModal(state.user);},
+    'resume-setup':()=>state.user?.authMethod==='recovery'?openRecoveryPasskey(authUi.recoveryEmail):beginActivation('Kích hoạt ví để bắt đầu mua bán.',()=>route()),
+    'activate-wallet':()=>beginActivation('Bạn đang kích hoạt ví để nạp tiền.',()=>route()),
+    'activation-later':()=>{authUi.activation=null;authUi.codes=null;closeModal();},
+    'activation-email-change':()=>openLegacyEmailSetup(),
+    'email-verify-open':()=>{authUi.activation=null;openEmailVerification(state.user);},
+    'recovery-codes-later':(el)=>{
+      // Bấm lần đầu chỉ cảnh báo; không đánh dấu đã lưu. Bấm "Vẫn để sau" mới rời đi (và vẫn tiếp tục kích hoạt nếu đang dở).
+      const body=$('#modalRoot .modal-body');if(!body)return finishActivation();
+      body.querySelector('.recovery-defer-warning')?.remove();
+      body.insertAdjacentHTML('beforeend','<div class="note note-warning mt-3 recovery-defer-warning" role="alert">Các mã này sẽ không được hiển thị lại và chưa được ghi nhận là đã lưu. Nếu để sau, bạn cần vào Bảo mật để tạo bộ mã mới (bộ mã hiện tại sẽ bị thu hồi).</div>');
+      el.dataset.act='recovery-codes-later-confirm';el.textContent='Vẫn để sau';
+    },
+    'recovery-codes-later-confirm':()=>finishActivation(),
+    'email-link-open':()=>openEmailLinkModal(),
+    'email-link-dismiss':()=>{authUi.emailLink=null;closeModal();},
+    'email-link-login':()=>openAuthModal('login'),
+    'email-link-switch':()=>{logout();openEmailLinkModal();},
+    'email-link-confirm':async(el)=>{
+      const link=authUi.emailLink,userId=state.user?.id;if(!link||!userId)return;
+      await guard('email-link-confirm',el,async()=>{
+        const result=await api('/passkeys/email/link/confirm',{method:'POST',body:{token:link.token}});
+        if(!result.verified||!result.user||result.user.id!==userId||result.user.sessionId!==state.user?.sessionId||result.user.authMethod!==state.user?.authMethod)throw new Error('Chưa xác nhận được kết quả xác minh email. Hãy kiểm tra lại trước khi tiếp tục.');
+        if(authUi.emailLink===link)authUi.emailLink=null;
+        // Không có token/phiên mới: chỉ gộp user vào phiên hiện tại.
+        if(result.user&&state.user?.id===userId&&(!result.user.id||result.user.id===userId))state.user={...state.user,...result.user};
+        renderChrome();
+        if(authUi.activation?.userId===userId)openSetupModal(state.user);
+        else openModal({title:'Đã xác minh email',body:`<p>${esc(result.message||'Email đã được xác minh.')}</p>`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});
+      });
+    },
+    'rename-device':(el)=>openDeviceNameModal(async(name)=>{await api('/passkeys/credentials/'+encodeURIComponent(el.dataset.id),{method:'PATCH',body:{deviceName:name}});closeModal();await loadCredentials();}),
+    'upgrade-session':(el)=>upgradeAuthUi(el),
+    'upgrade-and-secure':(el)=>upgradeAuthUi(el,()=>secureOrder(el.dataset.id,null,el.dataset.then)),
+    'forgot-password':()=>openEmailRecoveryRequest('password'),
+    'lost-passkey':openRecoveryChoice,
+    'recovery-code-open':openRecoveryCode,
+    'recovery-email-open':()=>openEmailRecoveryRequest('recovery'),
+    'recovery-email-request':async(el)=>{const email=$('#recoveryEmail').value,kind=authUi.action;await guard('recovery-email',el,async()=>{const result=await api(kind==='password'?'/passkeys/password-reset/request':'/passkeys/recovery/email/request',{method:'POST',body:{email}});openModal({title:'Kiểm tra hộp thư',body:`<p>${esc(result.message)}</p>`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
+    'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
+    'recovery-passkey-create':async(el)=>{const deviceName=$('#recoveryDeviceName').value,newPassword=$('#recoveryNewPassword')?.value;await guard('recovery-create',el,async()=>{const {registrationSessionId,options}=await api('/passkeys/recovery/passkey/options',{method:'POST',body:{}});const response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});await afterSession(result,'Đã khôi phục tài khoản.');});},
+    'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
+    'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');toast('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
+    'recovery-regenerate':async(el)=>{await guard('regenerate-codes',el,async()=>{const reauthGrant=await getAccountGrant('REGENERATE_RECOVERY');const result=await api('/passkeys/recovery-codes/regenerate',{method:'POST',body:{reauthGrant}});showRecoveryCodes(result.recoveryCodes);});},
+    'recovery-codes-copy':async()=>{try{await navigator.clipboard.writeText(authUi.codes.join('\n'));codesSaved();toast('Đã sao chép mã khôi phục.','ok');}catch{toast('Không thể sao chép. Hãy dùng nút Tải xuống.','err');}},
+    'recovery-codes-download':()=>{const blob=new Blob(['Mã khôi phục Enclave — giữ riêng tư, mỗi mã dùng một lần.\n'+authUi.codes.join('\n')],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='enclave-ma-khoi-phuc.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);codesSaved();},
+    'recovery-codes-done':async(el)=>{if(!authUi.codesSaved||!$('#recoveryCodesAcknowledged').checked)return;await guard('ack-codes',el,async()=>{await api('/passkeys/recovery-codes/acknowledge',{method:'POST',body:{}});authUi.codes=null;state.user.recoveryAcknowledged=true;await finishActivation();if(currentHead()==='security')await loadSecurityDetails();});},
+    'sessions-revoke-others':async(el)=>{await guard('sessions-revoke',el,()=>api('/passkeys/sessions/revoke-others',{method:'POST',body:{}}),'Đã đăng xuất các phiên khác.');await loadSecurityDetails();},
+    'session-revoke':async(el)=>{await guard('session-revoke:'+el.dataset.id,el,()=>api('/passkeys/sessions/'+encodeURIComponent(el.dataset.id),{method:'DELETE'}));await loadSecurityDetails();},
+    'change-email-open':()=>openModal({title:'Đổi email đã xác minh',body:authField('newEmail','Email mới','email')+'<p>Cần xác nhận bằng Passkey và mã gửi tới email cũ (nếu đã xác minh) cùng email mới.</p>',footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="change-email-request">Xác nhận bằng Passkey</button>'}),
+    'change-email-request':async(el)=>{const newEmail=$('#newEmail').value;await guard('email-change',el,async()=>{const reauthGrant=await getAccountGrant('CHANGE_EMAIL',{newEmail});const result=await api('/passkeys/email/change/request',{method:'POST',body:{newEmail,reauthGrant}});authUi.emailChange=result.changeId;openModal({title:'Xác minh đổi email',body:(result.oldEmailRequired?authField('oldEmailCode','Mã gửi tới email cũ'):'')+authField('newEmailCode','Mã gửi tới email mới'),footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="change-email-verify">Lưu email mới</button>'});});},
+    'change-email-verify':async(el)=>{const oldCode=$('#oldEmailCode')?.value,newCode=$('#newEmailCode').value;await guard('email-change-verify',el,async()=>{await api('/passkeys/email/change/verify',{method:'POST',body:{changeId:authUi.emailChange,oldCode,newCode}});const me=await api('/users/me');state.user=me.user;closeModal();renderChrome();await loadSecurityDetails();toast('Đã đổi email và thu hồi các phiên khác.','ok');});},
   };
 
   function onDocumentClick(e) {
     const el = e.target.closest('[data-act]');
     if (!el) return;
+    if(el.disabled)return;
     const act = el.dataset.act;
 
     if (act === 'modal-backdrop') {
@@ -4824,6 +5152,11 @@ const App = (() => {
     document.addEventListener('click', onDocumentClick);
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
     window.addEventListener('hashchange', route);
+    // Liên kết email mở khi ứng dụng đang chạy: đọc và gỡ token khỏi URL ngay, như lúc khởi động.
+    window.addEventListener('hashchange', () => { handleAccountAction().catch(() => {}); });
+    window.addEventListener('storage',(event)=>{
+      if(event.key===SIGNED_OUT&&event.newValue==='1'){clearSession();renderChrome();route();}
+    });
     window.addEventListener('pageshow', (event) => {
       if (event.persisted && currentHead() === 'wallet' && !state.paypalCallback) {
         Promise.resolve(resumePaypalAfterBack()).catch(() => {});
@@ -4839,15 +5172,17 @@ const App = (() => {
     // Có thể vừa được PayPal đưa quay lại (?paypal=return|cancel): đọc và dọn query TRƯỚC khi làm gì khác.
     state.paypalCallback = readPaypalCallbackFromUrl();
 
-    // Khôi phục phiên: xác nhận lại token với server thay vì tin localStorage.
-    if (state.token) {
+    // Restore only from the rotating HttpOnly cookie; clear legacy access-token storage.
+    localStorage.removeItem(STORAGE_TOKEN);localStorage.removeItem(STORAGE_USER);
+    view().innerHTML='<div class="page"><div class="card p-5" role="status">Đang khôi phục phiên đăng nhập…</div></div>';
+    await refreshSession();
+    if (state.token && !state.token.startsWith('vrf_')) {
       const epoch = state.sessionEpoch;
       try {
         const me = await api('/users/me');
         if (state.sessionEpoch === epoch) {
           state.user = me.user;
           state.wallet = me.wallet;
-          localStorage.setItem(STORAGE_USER, JSON.stringify(me.user));
         }
       } catch (e) {
         // Phản hồi khởi động cũ không được xoá phiên vừa đăng ký/đăng nhập.
@@ -4860,9 +5195,11 @@ const App = (() => {
     renderChrome();
     await route();
     startShippingWatch();
-    if (state.token && state.user && state.user.accountStatus && state.user.accountStatus !== 'ACTIVE') {
+    if(state.user?.authMethod==='recovery')openRecoveryPasskey(authUi.recoveryEmail);
+    else if (state.token && state.user && state.user.accountStatus && !['BASIC','VERIFIED','ACTIVE','RECOVERING'].includes(state.user.accountStatus)) {
       openSetupModal(state.user);
     }
+    await handleAccountAction();
 
     // Polling thông báo: đủ cho phạm vi đồ án, không cần WebSocket. Chỉ vẽ lại khung khi số
     // chưa đọc thật sự đổi.

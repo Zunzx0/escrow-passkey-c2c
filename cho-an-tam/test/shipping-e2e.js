@@ -114,14 +114,21 @@ async function runTests() {
       VALUES (?,?,?,?,0,'[]','shipping-fixture',?)`).run(crypto.randomUUID(), id, 'credential-' + id, Buffer.from('fixture-only'), now);
     await db.prepare(`INSERT INTO wallets (id,user_id,wallet_type,available_balance,locked_balance,version,created_at,updated_at)
       VALUES (?,?,'USER',?,0,0,?,?)`).run(crypto.randomUUID(), id, balance, now, now);
-    const { sessionId } = await createSession(id);
+    const { sessionId } = await createSession(id,{authMethod:'passkey'});
     return { id, sessionId, token: signAccessToken({ id, username: name, role, account_status: 'ACTIVE', token_version: 0 }, 'full', sessionId) };
   }
   async function securedOrder(buyer, seller, label) {
     const made = await post('', buyer, { sellerId: seller.id, itemName: label, amount: 60000 });
     eq(made.status, 201, label + ': tạo đơn qua router thật');
     const id = made.body.id; allIds.push(id);
-    eq((await post('/' + id + '/secure', buyer, { requestId: crypto.randomUUID() })).status, 200, label + ': khóa tiền qua router thật');
+    // Trusted fixture for shipping tests only. Real signature issuance is covered by auth-redesign-e2e.
+    const {issueGrant,ACTIONS}=require('../src/lib/reauth');
+    const txn=await db.prepare('SELECT * FROM transactions WHERE id=?').get(id);
+    const issuer=await db.prepare('SELECT id FROM passkey_credentials WHERE user_id=?').get(buyer.id);
+    const context=await require('../src/routes/transactions').buildAuthorizationContext(txn,ACTIONS.LOCK,buyer.sessionId);
+    const contextHash=crypto.createHash('sha256').update(JSON.stringify(context)).digest('hex');
+    const grant=await issueGrant({userId:buyer.id,sessionId:buyer.sessionId,transactionId:id,action:ACTIONS.LOCK,credentialId:issuer.id,contextHash});
+    eq((await post('/' + id + '/secure', buyer, { requestId: crypto.randomUUID(),reauthGrant:grant.rawToken })).status, 200, label + ': khóa tiền qua router thật');
     return id;
   }
   const money = async () => ({
@@ -259,7 +266,10 @@ async function runTests() {
     await post('/' + lateId + '/wait-confirm', buyer);
     // Cấp grant fixture có phạm vi thật để kiểm terminal guard, không thay thế test WebAuthn.
     const { issueGrant, ACTIONS } = require('../src/lib/reauth');
-    const grant = await issueGrant({ userId: buyer.id, sessionId: buyer.sessionId, transactionId: lateId, action: ACTIONS.RELEASE });
+    const issuer=await db.prepare('SELECT id FROM passkey_credentials WHERE user_id=? LIMIT 1').get(buyer.id);
+    const context=await require('../src/routes/transactions').buildAuthorizationContext(await db.prepare('SELECT * FROM transactions WHERE id=?').get(lateId),ACTIONS.RELEASE,buyer.sessionId);
+    const contextHash=crypto.createHash('sha256').update(JSON.stringify(context)).digest('hex');
+    const grant = await issueGrant({ userId: buyer.id, sessionId: buyer.sessionId, transactionId: lateId, action: ACTIONS.RELEASE,credentialId:issuer.id,contextHash });
     eq((await post('/' + lateId + '/release', buyer, { requestId: crypto.randomUUID(), reauthGrant: grant.rawToken })).status, 200, 'tất toán qua endpoint giải ngân thật với grant test đúng phạm vi');
     const settledMoney = await money();
     await workers(Date.parse(late.body.shipment.arrivalDueAt) + 120000, 2);

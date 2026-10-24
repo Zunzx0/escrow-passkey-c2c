@@ -209,7 +209,7 @@ function activeAccountHasPasskey(db) {
     'ACTIVE_ACCOUNT_HAS_PASSKEY',
     db.prepare(
       `SELECT u.id, u.username FROM users u
-       WHERE u.account_status = 'ACTIVE'
+       WHERE u.account_status IN ('ACTIVE','RECOVERING')
          AND NOT EXISTS (SELECT 1 FROM passkey_credentials c WHERE c.user_id = u.id)`
     ).all(),
     (u) => `Tài khoản ${u.username} (${u.id}) đang ACTIVE nhưng không còn credential nào`

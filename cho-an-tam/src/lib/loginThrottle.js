@@ -10,12 +10,11 @@
 // và một lần đăng nhập bằng Passkey thành công sẽ gỡ khoá mật khẩu.
 //
 // Khoá áp dụng như nhau cho tên đăng nhập có thật và không có thật, nên phản hồi 429 không tiết
-// lộ tài khoản nào tồn tại. Trạng thái nằm trong bộ nhớ của tiến trình (đủ cho triển khai một
-// tiến trình như hiện tại; nhiều tiến trình thì cần kho dùng chung).
+// lộ tài khoản nào tồn tại. Trạng thái nằm trong DB dùng chung, giữ được sau khởi động lại.
 const MAX_FAILURES = parseInt(process.env.LOGIN_MAX_FAILURES || '5', 10);
 const FAILURE_WINDOW_MS = 15 * 60 * 1000;
-const BASE_LOCK_SECONDS = parseInt(process.env.LOGIN_LOCK_BASE_SECONDS || '60', 10);
-const MAX_LOCK_SECONDS = 15 * 60;
+const BASE_LOCK_SECONDS = parseInt(process.env.LOGIN_LOCK_BASE_SECONDS || '900', 10);
+const MAX_LOCK_SECONDS = 24 * 3600;
 const FORGET_AFTER_MS = 24 * 3600 * 1000;
 
 const entries = new Map();
@@ -34,40 +33,35 @@ function keyOf(username) {
 }
 
 /** Số giây còn bị khoá, hoặc 0 nếu đang được phép thử. */
-function lockedFor(username, now = Date.now()) {
-  const e = entries.get(keyOf(username));
-  if (!e || e.lockedUntil <= now) return 0;
-  return Math.ceil((e.lockedUntil - now) / 1000);
+async function lockedFor(username, now = Date.now()) {
+  const {db}=require('../db');
+  const {hash}=require('./accountSecurity');
+  const e=await db.prepare('SELECT locked_until FROM auth_login_throttles WHERE identity_hash=?').get(hash(keyOf(username)));
+  return e && Number(e.locked_until)>now ? Math.ceil((Number(e.locked_until)-now)/1000) : 0;
 }
 
 /** Ghi một lần sai. Đủ ngưỡng thì khoá, thời gian khoá nhân đôi sau mỗi lần bị khoá lại. */
-function recordFailure(username, now = Date.now()) {
-  sweep(now);
-  const key = keyOf(username);
-  let e = entries.get(key);
-  if (!e || now - e.lastFailureAt > FORGET_AFTER_MS) {
-    e = { failures: [], lockedUntil: 0, lockCount: 0, lastFailureAt: now };
-    entries.set(key, e);
-  }
-  e.lastFailureAt = now;
-  e.failures = e.failures.filter((t) => now - t < FAILURE_WINDOW_MS);
-  e.failures.push(now);
-  if (e.failures.length >= MAX_FAILURES) {
-    e.lockCount += 1;
-    const seconds = Math.min(BASE_LOCK_SECONDS * 2 ** (e.lockCount - 1), MAX_LOCK_SECONDS);
-    e.lockedUntil = now + seconds * 1000;
-    e.failures = [];
-    return { locked: true, seconds };
-  }
-  return { locked: false };
+async function recordFailure(username, now = Date.now()) {
+  const {db}=require('../db'); const {hash}=require('./accountSecurity'); const key=hash(keyOf(username));
+  return db.transaction(async()=>{
+    let e=await db.prepare('SELECT * FROM auth_login_throttles WHERE identity_hash=?').get(key);
+    if (!e || now-Number(e.last_failure_at)>FORGET_AFTER_MS) e={failures:'[]',lock_count:0,locked_until:0};
+    let failures=JSON.parse(e.failures).filter(t=>now-t<FAILURE_WINDOW_MS); failures.push(now);
+    const locked=failures.length>=MAX_FAILURES;
+    const count=e.lock_count+(locked?1:0), seconds=locked ? Math.min(BASE_LOCK_SECONDS*2**Math.min(count-1,20),MAX_LOCK_SECONDS) : 0;
+    await db.prepare('INSERT INTO auth_login_throttles(identity_hash,failures,locked_until,lock_count,last_failure_at) VALUES(?,?,?,?,?) ON CONFLICT(identity_hash) DO UPDATE SET failures=excluded.failures,locked_until=excluded.locked_until,lock_count=excluded.lock_count,last_failure_at=excluded.last_failure_at')
+      .run(key,JSON.stringify(locked?[]:failures),locked?now+seconds*1000:e.locked_until,count,now);
+    return {locked,seconds};
+  })();
 }
 
-function recordSuccess(username) {
-  entries.delete(keyOf(username));
+async function recordSuccess(username) {
+  const {db}=require('../db');const {hash}=require('./accountSecurity');
+  await db.prepare('DELETE FROM auth_login_throttles WHERE identity_hash=?').run(hash(keyOf(username)));
 }
 
-function resetLoginThrottle() {
-  entries.clear();
+async function resetLoginThrottle() {
+  await require('../db').db.prepare('DELETE FROM auth_login_throttles').run();
 }
 
 module.exports = { MAX_FAILURES, lockedFor, recordFailure, recordSuccess, resetLoginThrottle };

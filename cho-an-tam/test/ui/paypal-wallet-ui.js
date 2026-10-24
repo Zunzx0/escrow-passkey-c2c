@@ -18,9 +18,9 @@
  *   N   Phiên: phản hồi muộn sau đăng xuất / đổi tài khoản không tác động phiên mới
  *   Z   Không payout/refund PayPal, không bí mật trong public/ hay localStorage, cô lập mock/PayPal, theo dõi có hạn
  *
- * Cách chạy (cần jsdom — KHÔNG nằm trong package.json; cài không ghi vào package.json):
+ * Cách chạy (jsdom được khóa trong devDependencies):
  *   cd cho-an-tam
- *   npm i --no-save jsdom        # hoặc đặt NODE_PATH tới node_modules đã có jsdom
+ *   npm ci
  *   node test/ui/paypal-wallet-ui.js
  * Cần Node >= 23. Mất khoảng vài phút (có chờ theo dõi thật).
  */
@@ -88,6 +88,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
   const navs = [];
   const pending = new Map();
   const table = { ...routes };
+  let bootstrapRefresh=true;
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/${search}`,
     runScripts: 'outside-only',
@@ -108,7 +109,8 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
       w.fetch = (url, opts = {}) => new Promise((resolve, reject) => {
         const u = new URL(url, ORIGIN);
         const key = `${opts.method || 'GET'} ${u.pathname}`;
-        log.push(key);
+        const startup=bootstrapRefresh&&key==='POST /api/passkeys/session/refresh';
+        if(startup)bootstrapRefresh=false;else log.push(key);
         (bodies[key] = bodies[key] || []).push(opts.body ? JSON.parse(opts.body) : null);
         const abort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
         if (opts.signal) {
@@ -116,16 +118,16 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
           opts.signal.addEventListener('abort', abort);
         }
         const handler = table[key];
-        const r = handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+        const r = startup ? json(200,{token:'tok-'+user.id,user:{...user,authMethod:user.authMethod||'passkey',emailVerified:user.emailVerified??true,recoveryAcknowledged:user.recoveryAcknowledged??true}}) : handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
         if (r === HANG) return;
         Promise.resolve(r).then((x) => {
           if (x === HANG) return;
           const body = x.text !== undefined ? x.text : JSON.stringify(x.body);
-          resolve(new Response(body, { status: x.status, headers: { 'Content-Type': x.type || 'application/json' } }));
+          resolve(new Response(body, { status: x.status, headers: { 'Content-Type': x.type || 'application/json',...x.headers } }));
         }, reject);
       });
       w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'shipping-motion.js', 'app.js']
-        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')).join('\n;\n'));
+        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8').replace('return { init };','window.__authTestSnapshot=()=>({token:state.token,user:state.user}); return { init };')).join('\n;\n'));
     },
   });
   await sleep(700);
@@ -133,6 +135,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
   const d = w.document;
   return {
     w, d, log, bodies, navs, routes: table,
+    authState:()=>w.__authTestSnapshot(),
     toasts: () => [...d.querySelectorAll('#toasts .toast')].map((t) => ({ kind: t.className.replace('toast', '').trim(), text: t.textContent.trim() })),
     clearToasts: () => { d.querySelector('#toasts').innerHTML = ''; },
     click: (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true })),
@@ -151,6 +154,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
 }
 
 const baseRoutes = (user = BUYER, cfg = CFG(true, false)) => ({
+  'POST /api/passkeys/email/resend': () => json(200, {serverNow:new Date().toISOString(),nextRequestAt:new Date(Date.now()+60000).toISOString(),expiresAt:new Date(Date.now()+600000).toISOString(),resendAfterSeconds:60,emailMask:'de***@example.test',message:'Yêu cầu mã đã được tiếp nhận.'}),
   'GET /api/users/me': () => json(200, { user, wallet: WALLET }),
   'GET /api/users/me/seller-request': () => json(200, { request: null }),
   'GET /api/listings/meta': () => json(200, { categories: [], conditions: [], locations: [] }),
@@ -471,7 +475,10 @@ async function main() {
   ok(p.toasts().every((t) => t.kind !== 'ok'), 'CAPTURING: chưa báo thành công');
   p.clearToasts();
   srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString(), resolvedBy: 'WEBHOOK' });
-  await sleep(1300); // lượt theo dõi đầu tiên (1s) thấy SUCCEEDED
+  // The 1s poll may already have read CAPTURING during page bootstrap + the 500ms check.
+  // Wait for observable completion through the next 1.5s poll, not a 1.3s wall-clock guess.
+  const completedBy=Date.now()+5000;
+  while((p.intent()!==null||p.notice()!=='')&&Date.now()<completedBy)await sleep(20);
   ok(p.toasts().filter((t) => t.kind === 'ok' && /Nạp tiền thành công/.test(t.text)).length === 1, 'GET sau capture khớp ý định nói SUCCEEDED: đúng MỘT thông báo thành công');
   ok(p.intent() === null && p.notice() === '', 'Thành công được xác nhận: ý định và thông báo được dọn');
   ok(p.count('GET /api/wallets/me') >= 2, 'Ví được đọc lại từ máy chủ (không tự cộng ở giao diện)');

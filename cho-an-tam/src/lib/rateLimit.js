@@ -1,5 +1,4 @@
-// Giới hạn tần suất trong bộ nhớ (đủ dùng cho một nguyên mẫu nghiên cứu chạy một tiến trình;
-// hệ thống nhiều tiến trình sẽ cần một kho dùng chung như Redis).
+// Giới hạn tần suất lưu trong auth_limits, dùng chung giữa tiến trình và giữ qua restart.
 //
 // Đây là một trong bốn biện pháp chống dò mật khẩu ở mục 2.3.2, và cũng bảo vệ các điểm cuối
 // SINH CHALLENGE — nơi mỗi yêu cầu đều tạo một bản ghi trong cơ sở dữ liệu, nên gửi ồ ạt là
@@ -10,29 +9,15 @@
 // dẫn cụ thể thì mỗi giao dịch có một xô riêng, và kẻ tấn công chỉ cần đổi mã giao dịch là
 // giới hạn mất tác dụng hoàn toàn.
 
-const buckets = new Map();
-
-// Dọn định kỳ để bản đồ không phình vô hạn theo số IP đã từng gọi.
 const SWEEP_EVERY_MS = 5 * 60 * 1000;
-let lastSweep = Date.now();
-
-function sweep(now) {
-  if (now - lastSweep < SWEEP_EVERY_MS) return;
-  lastSweep = now;
-  for (const [key, bucket] of buckets) {
-    if (bucket.resetAt < now) buckets.delete(key);
-  }
-}
 
 /**
  * @param perMinute  số yêu cầu tối đa trong một phút cho mỗi (IP, tuyến)
  * @param name       tên nhóm, để hai tuyến khác nhau có thể dùng chung một xô nếu muốn
  */
 function rateLimit({ perMinute = 10, name = null, identity = null } = {}) {
-  return (req, res, next) => {
-    const now = Date.now();
-    sweep(now);
-
+  return async (req, res, next) => {
+    try {
     // req.route chỉ có sau khi Express khớp tuyến, tức là luôn có ở middleware cấp tuyến.
     const pattern = name || `${req.baseUrl || ''}${(req.route && req.route.path) || req.path}`;
     // `identity` cho phép một tuyến nhạy cảm có thêm xô theo giá trị đã chuẩn hoá, ví dụ
@@ -41,25 +26,19 @@ function rateLimit({ perMinute = 10, name = null, identity = null } = {}) {
     const identityPart = typeof identity === 'function' ? String(identity(req) || '') : '';
     const key = `${req.ip}|${req.method}|${pattern}|${identityPart}`;
 
-    let bucket = buckets.get(key);
-    if (!bucket || bucket.resetAt < now) {
-      bucket = { count: 0, resetAt: now + 60_000 };
-      buckets.set(key, bucket);
-    }
-    bucket.count += 1;
-
-    if (bucket.count > perMinute) {
-      const retryAfter = Math.max(1, Math.ceil((bucket.resetAt - now) / 1000));
+    const retryAfter=await require('./accountSecurity').takeLimit(`route:${key}`,perMinute,60000);
+    if (retryAfter) {
       res.setHeader('Retry-After', String(retryAfter));
       // Ném lỗi thay vì tự trả phản hồi, để middleware lỗi tập trung ghi lại sự kiện an toàn.
       const err = new Error(`Quá nhiều yêu cầu, thử lại sau ${retryAfter} giây.`);
       err.status = 429;
       err.code = 'RATE_LIMITED';
-      err.securityDetail = { limitPerMinute: perMinute, attempts: bucket.count };
+      err.securityDetail = { limitPerMinute: perMinute };
       return next(err);
     }
 
     next();
+    } catch(e) { next(e); }
   };
 }
 
@@ -112,8 +91,9 @@ function probeCounter({ limit, windowMs = 60 * 60 * 1000, name }) {
 }
 
 /** Xoá toàn bộ xô đếm. Chỉ dùng cho kiểm thử. */
-function resetRateLimits() {
-  buckets.clear();
+async function resetRateLimits() {
+  if(process.env.APP_ENV!=='test')throw new Error('RATE_LIMIT_RESET_TEST_ONLY');
+  await require('../db').db.prepare('DELETE FROM auth_limits').run();
 }
 
 module.exports = { rateLimit, probeCounter, resetRateLimits };

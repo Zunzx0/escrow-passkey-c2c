@@ -221,7 +221,7 @@ const DEMO_ITEMS = [
     description: 'Khung nhôm size M, phanh đĩa cơ, 24 tốc độ. Mới bảo dưỡng, thay xích và má phanh.' },
 ];
 
-router.post('/demo-seed', requireAuth, requireRole('SELLER'), async (req, res, next) => {
+router.post('/demo-seed', requireAuth, require('../lib/auth').requireWallet, requireRole('SELLER'), async (req, res, next) => {
   try {
     const now = nowIso();
     const insert = db.prepare(
@@ -268,6 +268,7 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 router.post('/', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
     const input = readListingInput(req.body || {});
+    if(['BASIC','VERIFIED'].includes(req.user.accountStatus))input.visibility='HIDDEN';
 
     const id = uuid();
     const now = nowIso();
@@ -317,6 +318,7 @@ router.patch('/:id', requireAuth, requireRole('SELLER'), async (req, res, next) 
     }
 
     const input = readListingInput(req.body || {}, { partial: true });
+    if(['BASIC','VERIFIED'].includes(req.user.accountStatus))input.visibility='HIDDEN';
     const keys = Object.keys(input);
     if (keys.length === 0) throw new AppError(400, 'VALIDATION_ERROR', 'Không có trường nào để cập nhật');
 

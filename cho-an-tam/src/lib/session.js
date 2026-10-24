@@ -12,6 +12,8 @@ const { db, uuid, nowIso } = require('../db');
 
 const SESSION_IDLE_SECONDS = parseInt(process.env.SESSION_IDLE_SECONDS || String(12 * 3600), 10);
 const SESSION_ABSOLUTE_SECONDS = parseInt(process.env.SESSION_ABSOLUTE_SECONDS || String(7 * 24 * 3600), 10);
+const PASSWORD_SESSION_IDLE_SECONDS = Number(process.env.PASSWORD_SESSION_IDLE_SECONDS || 7200);
+const PASSWORD_SESSION_ABSOLUTE_SECONDS = Number(process.env.PASSWORD_SESSION_ABSOLUTE_SECONDS || 86400);
 const TOUCH_EVERY_MS = 60 * 1000;
 
 const COOKIE_NAME = 'cat_rt';
@@ -24,22 +26,29 @@ function sha256(value) {
 function newRefreshToken() {
   return crypto.randomBytes(32).toString('base64url');
 }
+function describeDevice(ua='') {
+  const os=/Android/i.test(ua)?'Android':/iPhone|iPad/i.test(ua)?'iPhone / iPad':/Windows/i.test(ua)?'Windows':/Mac/i.test(ua)?'Mac':/Linux/i.test(ua)?'Linux':'Thiết bị';
+  const browser=/Edg/i.test(ua)?'Edge':/Firefox/i.test(ua)?'Firefox':/Chrome|CriOS/i.test(ua)?'Chrome':/Safari/i.test(ua)?'Safari':'trình duyệt';
+  return `${os}, ${browser}`;
+}
 
-async function createSession(userId) {
+async function createSession(userId, { authMethod='password', deviceName='' }={}) {
   const id = uuid();
   const refreshToken = newRefreshToken();
   const now = new Date();
   await db.prepare(
-    `INSERT INTO sessions (id, user_id, refresh_hash, created_at, last_seen_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO sessions (id, user_id, refresh_hash, created_at, last_seen_at, expires_at,auth_method,auth_at,device_name)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     userId,
     sha256(refreshToken),
     now.toISOString(),
     now.toISOString(),
-    new Date(now.getTime() + SESSION_ABSOLUTE_SECONDS * 1000).toISOString()
+    new Date(now.getTime() + (authMethod==='passkey' ? SESSION_ABSOLUTE_SECONDS : PASSWORD_SESSION_ABSOLUTE_SECONDS) * 1000).toISOString(),
+    authMethod,now.toISOString(),describeDevice(String(deviceName))
   );
+  await db.prepare('UPDATE users SET auth_last_active_at=? WHERE id=?').run(now.toISOString(),userId);
   return { sessionId: id, refreshToken };
 }
 
@@ -48,7 +57,9 @@ function sessionProblem(row, now = Date.now()) {
   if (!row) return 'NOT_FOUND';
   if (row.revoked_at) return 'REVOKED';
   if (new Date(row.expires_at).getTime() <= now) return 'EXPIRED';
-  if (new Date(row.last_seen_at).getTime() + SESSION_IDLE_SECONDS * 1000 <= now) return 'IDLE';
+  const lifetime=row.auth_method==='passkey'?SESSION_ABSOLUTE_SECONDS:PASSWORD_SESSION_ABSOLUTE_SECONDS;
+  if(Date.parse(row.created_at)+lifetime*1000<=now) return 'EXPIRED';
+  if (new Date(row.last_seen_at).getTime() + (row.auth_method==='passkey' ? SESSION_IDLE_SECONDS : PASSWORD_SESSION_IDLE_SECONDS) * 1000 <= now) return 'IDLE';
   return null;
 }
 
@@ -61,6 +72,7 @@ async function getSession(sessionId) {
 async function touchSession(row) {
   if (Date.now() - new Date(row.last_seen_at).getTime() < TOUCH_EVERY_MS) return;
   await db.prepare('UPDATE sessions SET last_seen_at = ? WHERE id = ? AND revoked_at IS NULL').run(nowIso(), row.id);
+  await db.prepare('UPDATE users SET auth_last_active_at=? WHERE id=?').run(nowIso(),row.user_id);
 }
 
 async function revokeSession(sessionId, reason) {
@@ -78,7 +90,18 @@ async function revokeAllSessions(userId, reason, exceptSessionId = null) {
 /** Đổi mã làm mới lấy mã làm mới mới. Trả { problem } nếu phiên không còn làm mới được. */
 async function rotateRefreshToken(refreshToken) {
   if (!refreshToken) return { problem: 'MISSING' };
+  return db.transaction(async()=>{
   const row = await db.prepare('SELECT * FROM sessions WHERE refresh_hash = ?').get(sha256(refreshToken));
+  if(!row) {
+    const prior=await db.prepare('SELECT session_id,created_at FROM auth_refresh_history WHERE token_hash=?').get(sha256(refreshToken));
+    // Two tabs may submit the old cookie before either receives Set-Cookie. The loser
+    // gets no token/cookie; it may retry with the browser's new cookie. Never let this
+    // immediate conflict destroy the winning session. Older replay still revokes it.
+    const age=prior?Date.now()-Date.parse(prior.created_at):Infinity;
+    if(prior && age>=0 && age<10000 && !sessionProblem(await getSession(prior.session_id)))return {problem:'ROTATED'};
+    if(prior) await revokeSession(prior.session_id,'REFRESH_TOKEN_REUSE');
+    return {problem:prior ? 'REUSED' : 'NOT_FOUND'};
+  }
   const problem = sessionProblem(row);
   if (problem) return { problem };
 
@@ -87,15 +110,29 @@ async function rotateRefreshToken(refreshToken) {
   const changed = (await db
     .prepare('UPDATE sessions SET refresh_hash = ?, last_seen_at = ? WHERE id = ? AND refresh_hash = ? AND revoked_at IS NULL')
     .run(sha256(next), now, row.id, sha256(refreshToken))).changes;
-  // Hai lần làm mới đồng thời bằng cùng một mã: chỉ một lần thắng, lần kia coi như mã đã cũ.
+  // Defensive compare-and-swap; the serialized transaction normally resolves duplicates above.
   if (changed !== 1) return { problem: 'REUSED' };
+  await db.prepare('INSERT INTO auth_refresh_history(token_hash,session_id,created_at) VALUES(?,?,?)').run(sha256(refreshToken),row.id,now);
   return { session: { ...row, last_seen_at: now }, refreshToken: next };
+  })();
+}
+
+async function upgradeSession(sessionId) {
+  const row=await getSession(sessionId);
+  if(sessionProblem(row)) throw new Error('SESSION_NOT_AVAILABLE');
+  await db.prepare("UPDATE sessions SET auth_method='passkey',auth_at=?,last_seen_at=?,expires_at=? WHERE id=? AND revoked_at IS NULL")
+    .run(nowIso(),nowIso(),new Date(Date.parse(row.created_at)+SESSION_ABSOLUTE_SECONDS*1000).toISOString(),sessionId);
 }
 
 async function revokeByRefreshToken(refreshToken, reason) {
   if (!refreshToken) return;
-  await db.prepare('UPDATE sessions SET revoked_at = ?, revoked_reason = ? WHERE refresh_hash = ? AND revoked_at IS NULL')
-    .run(nowIso(), reason, sha256(refreshToken));
+  await db.transaction(async()=>{
+    const tokenHash=sha256(refreshToken);
+    const current=await db.prepare('SELECT id FROM sessions WHERE refresh_hash=?').get(tokenHash);
+    const prior=current?null:await db.prepare('SELECT session_id FROM auth_refresh_history WHERE token_hash=?').get(tokenHash);
+    const id=current?.id || prior?.session_id;
+    if(id)await revokeSession(id,reason);
+  })();
 }
 
 function readCookie(req, name) {
@@ -110,7 +147,7 @@ function readCookie(req, name) {
 
 function cookieAttributes(req) {
   const attrs = [`Path=${COOKIE_PATH}`, 'HttpOnly', 'SameSite=Strict'];
-  if (req.secure) attrs.push('Secure');
+  if (req.secure || process.env.APP_ENV==='production' || process.env.NODE_ENV==='production') attrs.push('Secure');
   return attrs;
 }
 
@@ -139,6 +176,7 @@ module.exports = {
   touchSession,
   revokeSession,
   revokeAllSessions,
+  upgradeSession,
   revokeByRefreshToken,
   rotateRefreshToken,
   setRefreshCookie,

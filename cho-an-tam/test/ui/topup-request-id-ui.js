@@ -66,6 +66,7 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
   const log = [];
   const pending = new Map(); // id hẹn giờ -> số ms
   const table = { 'GET /api/payments/paypal/config': () => json(200, { paypalSandbox: { enabled: false, mode: 'sandbox' }, mockPayments: { enabled: true } }), ...routes };
+  let bootstrapRefresh=true;
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/`,
     runScripts: 'outside-only',
@@ -85,14 +86,15 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
       w.fetch = (url, opts = {}) => new Promise((resolve, reject) => {
         const u = new URL(url, ORIGIN);
         const key = `${opts.method || 'GET'} ${u.pathname}`;
-        log.push(key);
+        const startup=bootstrapRefresh&&key==='POST /api/passkeys/session/refresh';
+        if(startup)bootstrapRefresh=false;else log.push(key);
         const abort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
         if (opts.signal) {
           if (opts.signal.aborted) return abort();
           opts.signal.addEventListener('abort', abort);
         }
         const handler = table[key];
-        const r = handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+        const r = startup ? json(200,{token:'tok-test',user:{...user,authMethod:user.authMethod||'passkey',emailVerified:true,recoveryAcknowledged:true}}) : handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
         if (r === HANG) return;
         Promise.resolve(r).then((x) => {
           if (x === HANG) return;
@@ -101,7 +103,7 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
         }, reject);
       });
       w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'shipping-motion.js', 'app.js']
-        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')).join('\n;\n'));
+        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8').replace('return { init };','window.__authTestSnapshot=()=>({token:state.token,user:state.user}); return { init };')).join('\n;\n'));
     },
   });
   await sleep(600);
@@ -109,6 +111,7 @@ async function openPage({ hash = '#/wallet', user = BUYER, routes = {}, storage 
   const d = w.document;
   return {
     w, d, log, routes: table,
+    authState:()=>w.__authTestSnapshot(),
     toasts: () => [...d.querySelectorAll('#toasts .toast')].map((t) => ({ kind: t.className.replace('toast', '').trim(), text: t.textContent.trim() })),
     clearToasts: () => { d.querySelector('#toasts').innerHTML = ''; },
     click: (el) => el.dispatchEvent(new w.MouseEvent('click', { bubbles: true })),
@@ -247,7 +250,7 @@ async function main() {
   const pollsAtLogout = r4.count('GET /api/payments/p1');
   await sleep(3000);
   ok(r4.count('GET /api/payments/p1') === pollsAtLogout, `Đăng xuất dừng theo dõi (không còn GET /payments/p1 nào sau đó; ${pollsAtLogout} lần trước đó)`);
-  ok(r4.w.localStorage.getItem('cat_token') === null, 'Đăng xuất xoá token');
+  ok(r4.authState().token === null, 'Đăng xuất xoá token');
   r4.close();
 
   // ------------------------------------------------------------------------------------------
@@ -500,7 +503,7 @@ async function main() {
   await sleep(20);
   await logoutUi(p);
   await sleep(600);
-  ok(p.w.localStorage.getItem('cat_token') === null, 'Đã đăng xuất (token đã xoá)');
+  ok(p.authState().token === null, 'Đã đăng xuất (token đã xoá)');
   ok(!p.d.querySelector('.modal') && p.count('GET /mock-provider/checkout/ref1') === 0,
     'POST SUBMITTED đến sau đăng xuất: KHÔNG mở cổng thanh toán, không gọi checkout');
   ok(allowedToasts(p), `Phản hồi cũ không sinh thông báo nào cho phiên mới (${JSON.stringify(p.toasts().map((t) => t.text))})`);
@@ -596,7 +599,7 @@ async function main() {
   await sleep(1000);
   ok(p.bodies.length === 1, 'Request cũ nhận 401: KHÔNG được thử lại bằng token của người dùng mới (chỉ 1 POST)');
   ok(p.count('POST /api/passkeys/session/refresh') === 0, 'Request cũ nhận 401: không kích hoạt làm mới phiên của người dùng mới');
-  ok(p.w.localStorage.getItem('cat_token') === 'tok-' + OTHER.id, 'Người dùng mới vẫn đăng nhập, token nguyên vẹn');
+  ok(p.authState().token === 'tok-' + OTHER.id, 'Người dùng mới vẫn đăng nhập, token nguyên vẹn');
   ok(allowedToasts(p), 'Request cũ nhận 401: không có thông báo hết phiên nào cho người dùng mới');
   p.close();
 
@@ -655,8 +658,8 @@ async function main() {
     'POST /api/passkeys/session/refresh': () => delay(1800, json(200, { token: 'tok-old-refresh', user: BUYER })),
   } });
   p.click(p.btn()); await sleep(40); await logoutUi(p); await loginUi(p, OTHER); await sleep(1600);
-  ok(p.w.localStorage.getItem('cat_token') === 'tok-' + OTHER.id, 'Refresh cũ đến muộn không thay hoặc xoá token mới');
-  ok((JSON.parse(p.w.localStorage.getItem('cat_user') || 'null') || {}).id === OTHER.id, 'Refresh cũ không khôi phục tài khoản trước');
+  ok(p.authState().token === 'tok-' + OTHER.id, 'Refresh cũ đến muộn không thay hoặc xoá token mới');
+  ok((p.authState().user || {}).id === OTHER.id, 'Refresh cũ không khôi phục tài khoản trước');
   ok(p.bodies.length === 1, 'Sau khi chờ refresh, request cũ không gửi lại');
   p.close();
 

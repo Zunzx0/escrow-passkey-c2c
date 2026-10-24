@@ -41,6 +41,8 @@ function startChallengeCleanup({ intervalSeconds, graceSeconds }) {
 
 function startBackgroundJobs() {
   const cfg = backgroundJobConfig();
+  if(process.env.AUTH_BACKGROUND_JOBS!=='0') require('./authJobs').startAuthJobs();
+  require('./orderInspection').startInspectionWorker();
   if (cfg.shippingIntervalMilliseconds > 0) {
     startShippingWorker({ intervalMilliseconds: cfg.shippingIntervalMilliseconds });
   }

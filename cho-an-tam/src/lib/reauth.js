@@ -25,15 +25,21 @@ const { AppError } = require('./errors');
 const REAUTH_TTL_SECONDS = parseInt(process.env.REAUTH_TTL_SECONDS || '120', 10);
 
 const ACTIONS = {
+  LOCK:'LOCK_ESCROW',
   RELEASE: 'RELEASE_ESCROW',
   ADJUDICATE: 'ADJUDICATE',
   MANAGE_CREDENTIAL: 'MANAGE_CREDENTIAL',
   CHANGE_PASSWORD: 'CHANGE_PASSWORD',
+  ADD_CREDENTIAL:'ADD_CREDENTIAL',
+  REMOVE_CREDENTIAL:'REMOVE_CREDENTIAL',
+  REGENERATE_RECOVERY:'REGENERATE_RECOVERY',
+  CHANGE_EMAIL:'CHANGE_EMAIL',
+  UPGRADE_SESSION:'UPGRADE_SESSION',
 };
 
 // Những hành động không gắn với một giao dịch cụ thể; giao diện xin phiếu qua tuyến chung
 // /api/passkeys/reauth/options.
-const ACCOUNT_ACTIONS = new Set([ACTIONS.MANAGE_CREDENTIAL, ACTIONS.CHANGE_PASSWORD]);
+const ACCOUNT_ACTIONS = new Set([ACTIONS.ADD_CREDENTIAL,ACTIONS.REMOVE_CREDENTIAL,ACTIONS.CHANGE_PASSWORD,ACTIONS.REGENERATE_RECOVERY,ACTIONS.CHANGE_EMAIL,ACTIONS.UPGRADE_SESSION]);
 
 const DECISIONS = { REFUND: 'REFUND', RELEASE: 'RELEASE' };
 
@@ -44,7 +50,7 @@ function requireSessionId(sessionId) {
   return sessionId;
 }
 
-async function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash }) {
+async function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash, credentialId, targetId }) {
   requireSessionId(sessionId);
   // Token gốc CSPRNG 32 byte, encode base64url; server chỉ lưu SHA-256 của nó.
   const rawToken = crypto.randomBytes(32).toString('base64url');
@@ -53,8 +59,8 @@ async function issueGrant({ userId, sessionId, transactionId, disputeId, action,
 
   await db.prepare(
     `INSERT INTO reauth_grants
-       (id, user_id, session_id, transaction_id, dispute_id, action, decision, token_hash, context_hash, expires_at, used_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`
+       (id, user_id, session_id, transaction_id, dispute_id, action, decision, token_hash, context_hash, expires_at, used_at,credential_id,target_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL,?,?)`
   ).run(
     uuid(),
     userId,
@@ -65,7 +71,7 @@ async function issueGrant({ userId, sessionId, transactionId, disputeId, action,
     decision || null,
     tokenHash,
     contextHash || null,
-    expiresAt
+    expiresAt,credentialId || null,targetId || null
   );
 
   return { rawToken, expiresAt };
@@ -83,7 +89,7 @@ async function issueGrant({ userId, sessionId, transactionId, disputeId, action,
  * vậy một phiếu cấp cho giao dịch A, hoặc cấp cho quyết định hoàn tiền, đơn giản là không
  * nằm trong tập ứng viên khi người gọi dùng nó cho giao dịch B hoặc cho quyết định giải ngân.
  */
-async function findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken }) {
+async function findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken,targetId }) {
   requireSessionId(sessionId);
   if (!rawToken) return null;
 
@@ -94,13 +100,15 @@ async function findValidGrant({ userId, sessionId, transactionId, disputeId, act
   // `IS ?` nhưng PostgreSQL không nhận, còn dạng đầy đủ này chạy được trên cả hai.
   const candidates = await db
     .prepare(
-      `SELECT * FROM reauth_grants
+      `SELECT * FROM reauth_grants g
        WHERE user_id = ? AND session_id = ? AND action = ? AND used_at IS NULL AND expires_at > ?
          AND transaction_id IS NOT DISTINCT FROM ?
          AND dispute_id IS NOT DISTINCT FROM ?
-         AND decision IS NOT DISTINCT FROM ?`
+         AND decision IS NOT DISTINCT FROM ?
+         AND target_id IS NOT DISTINCT FROM ?
+         AND EXISTS (SELECT 1 FROM passkey_credentials c WHERE c.id=g.credential_id AND c.user_id=g.user_id)`
     )
-    .all(userId, sessionId, action, nowIso(), transactionId || null, disputeId || null, decision || null);
+    .all(userId, sessionId, action, nowIso(), transactionId || null, disputeId || null, decision || null,targetId || null);
 
   return (
     candidates.find((g) => {
@@ -112,17 +120,24 @@ async function findValidGrant({ userId, sessionId, transactionId, disputeId, act
 
 /** Đánh dấu phiếu đã dùng. PHẢI gọi bên trong cùng giao dịch cơ sở dữ liệu với nghiệp vụ. */
 async function markGrantUsed(grantId) {
+  const grant=await db.prepare('SELECT * FROM reauth_grants WHERE id=?').get(grantId);
+  if(!grant?.credential_id || !(await db.prepare('SELECT 1 FROM passkey_credentials WHERE id=? AND user_id=?').get(grant.credential_id,grant.user_id))) throw new AppError(401,'REAUTH_REQUIRED','Passkey cấp phiếu không còn hiệu lực.');
+  if(require('./session').sessionProblem(await require('./session').getSession(grant.session_id))) throw new AppError(401,'REAUTH_REQUIRED','Phiên cấp phiếu đã bị thu hồi hoặc hết hạn.');
+  const actor=await db.prepare('SELECT is_active,account_status FROM users WHERE id=?').get(grant.user_id);
+  if(!actor?.is_active || !['ACTIVE','RECOVERING'].includes(actor.account_status)) throw new AppError(403,'USER_INACTIVE','Tài khoản không thể thực hiện thao tác bảo mật lúc này.');
+  if(grant && [ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(grant.action)) await require('./accountSecurity').assertMoneyAllowed(grant.user_id,grant.action);
   const result = await db
-    .prepare('UPDATE reauth_grants SET used_at = ? WHERE id = ? AND used_at IS NULL')
-    .run(nowIso(), grantId);
+    .prepare('UPDATE reauth_grants SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?')
+    .run(nowIso(), grantId,nowIso());
   if (result.changes !== 1) {
     throw new AppError(401, 'REAUTH_REQUIRED', 'Phiếu uỷ quyền vừa được dùng ở nơi khác');
   }
 }
 
 /** Tra phiếu và ném lỗi nếu không hợp lệ. Không tiêu thụ phiếu. */
-async function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message }) {
-  const grant = await findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken });
+async function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message,targetId }) {
+  if([ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(action)) await require('./accountSecurity').assertMoneyAllowed(userId,action);
+  const grant = await findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken,targetId });
   if (!grant) {
     throw new AppError(
       401,
@@ -130,6 +145,7 @@ async function requireGrant({ userId, sessionId, transactionId, disputeId, actio
       message || 'Thao tác này cần xác thực lại bằng passkey. Phiếu uỷ quyền không hợp lệ hoặc đã hết hạn.'
     );
   }
+  if([ACTIONS.LOCK,ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(action) && !grant.context_hash) throw new AppError(401,'REAUTH_REQUIRED','Phiếu thiếu ngữ cảnh giao dịch. Hãy xác thực lại.');
   return grant;
 }
 
@@ -141,7 +157,7 @@ async function requireGrant({ userId, sessionId, transactionId, disputeId, actio
  * khoảng thời gian giữa lúc ký và lúc lệnh thực sự chạy.
  */
 function assertContextUnchanged(grant, currentContextHash) {
-  if (grant.context_hash && grant.context_hash !== currentContextHash) {
+  if (!grant.context_hash || grant.context_hash !== currentContextHash) {
     throw new AppError(
       409,
       'CONTEXT_MISMATCH',

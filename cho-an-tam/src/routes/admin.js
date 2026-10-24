@@ -1,11 +1,15 @@
 const express = require('express');
 const crypto = require('crypto');
-const { generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+const { generateAuthenticationOptions, verifyAuthenticationResponse:verifyAssertion } = require('@simplewebauthn/server');
 
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth } = require('../lib/auth');
 const { appendAuditLog, verifyChain } = require('../lib/hash');
 const { AppError } = require('../lib/errors');
+async function verifyAuthenticationResponse(options){
+  try{return await verifyAssertion(options);}
+  catch{throw new AppError(400,'VERIFICATION_FAILED','Không xác minh được Passkey. Hồ sơ chưa thay đổi.');}
+}
 const { serializeSellerRequest } = require('./users');
 const {
   ACTIONS,
@@ -172,11 +176,12 @@ router.get('/disputes/:id', async (req, res, next) => {
 
 // Thứ tự khoá trong object này là một phần của giao thức: JSON.stringify giữ nguyên thứ tự
 // chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
-function buildAdjudicationContext(dispute, txn, decision, adminId) {
+function buildAdjudicationContext(dispute, txn, decision, adminId,sessionId=null) {
   return {
     v: 1,
     action: ACTIONS.ADJUDICATE,
     adminId,
+    sessionId,
     disputeId: dispute.id,
     transactionId: txn.id,
     buyerId: txn.buyer_id,
@@ -224,13 +229,15 @@ async function loadOpenDisputeForAdjudication(disputeId, actorId) {
 
 router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, next) => {
   try {
+    await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,ACTIONS.ADJUDICATE);
+    await require('../lib/accountSecurity').assertReauthAvailable(req.user.id);
     const decision = parseDecision((req.body || {}).decision);
     const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id, req.user.id);
 
     const credentials = await db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản quản trị chưa có Passkey');
 
-    const context = buildAdjudicationContext(dispute, txn, decision, req.user.id);
+    const context = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId);
 
     // Không truyền challenge: thư viện tự sinh giá trị ngẫu nhiên bằng nguồn ngẫu nhiên mật
     // mã. Thao tác làm tiền rời khỏi ký quỹ đòi mức xác minh người dùng bắt buộc.
@@ -259,6 +266,8 @@ router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, n
 
 router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, next) => {
   try {
+    await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,ACTIONS.ADJUDICATE);
+    await require('../lib/accountSecurity').assertReauthAvailable(req.user.id,{count:false});
     const { reauthSessionId, response } = req.body || {};
     if (!reauthSessionId || !response) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu reauthSessionId hoặc response');
@@ -285,7 +294,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
     // Đối chiếu ngữ cảnh lần MỘT: dựng lại từ dữ liệu hiện tại rồi so với bản đã lưu lúc
     // phát challenge. Hồ sơ hay giao dịch bị sửa trong lúc chờ ký thì hai bản lệch nhau và
     // yêu cầu bị chặn trước khi phiếu được cấp.
-    const currentContext = buildAdjudicationContext(dispute, txn, decision, req.user.id);
+    const currentContext = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId);
     if (challengeRow.context_data !== JSON.stringify(currentContext)) {
       throw new AppError(409, 'CONTEXT_MISMATCH', 'Nội dung hồ sơ đã thay đổi kể từ lúc bắt đầu xác thực.');
     }
@@ -338,9 +347,11 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
         action: ACTIONS.ADJUDICATE,
         decision,
         contextHash: contextDigest(currentContext),
+        credentialId:credential.id,
       });
     })();
     await reportCounterAnomaly(req, credential, counterCheck);
+    await require('../lib/accountSecurity').clearReauthFailures(req.user.id);
 
     res.json({
       reauthGrant: issued.rawToken,
@@ -349,6 +360,7 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
       signedContext: currentContext,
     });
   } catch (e) {
+    if(['VERIFICATION_FAILED','NO_CREDENTIAL'].includes(e.code)) await require('../lib/accountSecurity').recordReauthFailure(req.user.id);
     next(e);
   }
 });
@@ -377,7 +389,7 @@ async function authorizeAdjudication(req, decision) {
   });
 
   // Đối chiếu ngữ cảnh lần HAI, độc lập với lần ở bước verify.
-  assertContextUnchanged(grant, contextDigest(buildAdjudicationContext(dispute, txn, decision, req.user.id)));
+  assertContextUnchanged(grant, contextDigest(buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId)));
 
   return { dispute, txn, grant };
 }
@@ -409,6 +421,8 @@ router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => 
     const { txn, grant } = await authorizeAdjudication(req, DECISIONS.REFUND);
 
     const runTxn = db.transaction(async () => {
+      const freshTxn=await loadTxnDetail(txn.id);
+      assertContextUnchanged(grant,contextDigest(buildAdjudicationContext(dispute,freshTxn,DECISIONS.REFUND,req.user.id,req.user.sessionId)));
       // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ, là câu lệnh ĐẦU TIÊN của giao dịch: hai lệnh phân
       // xử đua nhau cho cùng một hồ sơ (dù cùng quyết định hay khác quyết định, dù đã qua được
       // bước kiểm `dispute.status !== 'OPEN'` ở ngoài vì đọc trước khi bên thắng commit) thì chỉ
@@ -521,6 +535,8 @@ router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) =>
     const { txn, grant } = await authorizeAdjudication(req, DECISIONS.RELEASE);
 
     const runTxn = db.transaction(async () => {
+      const freshTxn=await loadTxnDetail(txn.id);
+      assertContextUnchanged(grant,contextDigest(buildAdjudicationContext(dispute,freshTxn,DECISIONS.RELEASE,req.user.id,req.user.sessionId)));
       // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ — xem chú thích tương ứng ở /refund phía trên.
       const claimed = await db
         .prepare(`UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_id = ?, admin_decision = 'RELEASE', resolved_at = ?

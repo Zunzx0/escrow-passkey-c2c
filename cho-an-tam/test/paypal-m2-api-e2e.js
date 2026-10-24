@@ -49,7 +49,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A1 — cấu hình công khai không lộ bí mật');
-  resetLimits();
+  await resetLimits();
   const cfgRes = await H.http(B, '/config');
   t.eq(cfgRes.status, 200, 'GET /config: 200 không cần phiên');
   t.ok(cfgRes.body.paypalSandbox.enabled === true && cfgRes.body.mockPayments.enabled === false,
@@ -60,7 +60,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A2 — phiên và quyền: không đăng nhập, quản trị viên chưa chứng minh, người ngoài');
-  resetLimits();
+  await resetLimits();
   t.eq((await H.http(B, '/topup', { method: 'POST', body: { amount: 10000, requestId: 'x-' + uuid() } })).status, 401,
     'topup không có token: 401');
   const adminBad = await H.createAccount(db, { role: 'BUYER', label: 'api-adm-bad', balance: 50000 });
@@ -78,7 +78,7 @@ async function main() {
   t.eq(mine.status, 200, 'người mua tạo được yêu cầu nạp PayPal');
   const sellerTopup = await H.http(B, '/topup', { method: 'POST', token: seller.token, body: { amount: 10000, requestId: 'sel-' + uuid() } });
   t.eq(sellerTopup.status, 200, 'người bán (SELLER) cũng được dùng tuyến nạp như người mua');
-  resetLimits();
+  await resetLimits();
   t.eq((await H.http(B, `/${mine.body.id}/checkout`, { token: other.token })).status, 403,
     'người khác không mở được checkout của người mua');
   t.eq((await H.http(B, `/${mine.body.id}/capture`, { method: 'POST', token: other.token, body: {} })).status, 403,
@@ -87,7 +87,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A3 — nạp: khoá chống lặp, kiểu dữ liệu, phản hồi');
-  resetLimits();
+  await resetLimits();
   const key = 'idem-' + uuid();
   const first = await H.http(B, '/topup', { method: 'POST', token: buyer.token, body: { amount: 20000, requestId: key } });
   t.eq(first.status, 200, 'tạo mới: 200 (không dựa mã này để kết luận đã nạp)');
@@ -112,7 +112,7 @@ async function main() {
   t.ok(checkout.status === 200 && checkout.body.approvalUrl && new URL(checkout.body.approvalUrl).origin === 'https://www.sandbox.paypal.com',
     'checkout trả URL phê duyệt đúng origin sandbox');
   fake.setApprovalHref('https://www.sandbox.paypal.com.attacker.example/checkoutnow?token=x');
-  resetLimits();
+  await resetLimits();
   const unsafe = await H.http(B, '/topup', { method: 'POST', token: buyer.token, body: { amount: 30000, requestId: 'unsafe-' + uuid() } });
   fake.setApprovalHref(null);
   t.ok(unsafe.status >= 500 && unsafe.body.error === 'PAYPAL_RESPONSE_INVALID', 'URL phê duyệt không an toàn: từ chối tạo yêu cầu');
@@ -130,7 +130,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A6 — PayPal từ chối trước khi người mua phê duyệt');
-  resetLimits();
+  await resetLimits();
   fake.approve(first.body.orderId);
   fake.plan('capture',{kind:'status',code:422,payload:{name:'UNPROCESSABLE_ENTITY',details:[{issue:'PAYER_ACTION_REQUIRED'}]},orderPatch:{status:'PAYER_ACTION_REQUIRED',approved:false}});
   const postsBeforeRefusal=fake.countCalls('capture',first.body.orderId);
@@ -150,7 +150,7 @@ async function main() {
   t.eq(fake.countCalls('capture',first.body.orderId),refusalPosts,'worker sau422 chỉ GET không POST capture');
   t.eq((await H.credits(db,first.body.id)).length,0,'worker sau422 không cộng ví');
   fake.approve(first.body.orderId);
-  resetLimits();
+  await resetLimits();
   const approvedCapture = await H.http(B, `/${first.body.id}/capture`, { method: 'POST', token: buyer.token, body: {} });
   t.ok(approvedCapture.status === 200 && approvedCapture.body.status === 'SUCCEEDED' && approvedCapture.body.outcome === 'APPLIED',
     'sau khi phê duyệt: capture thành công một lần');
@@ -161,7 +161,7 @@ async function main() {
   const r429 = await H.http(B, '/topup', { method: 'POST', token: buyer.token, body: { amount: 15000, requestId: 'q429-' + uuid() } });
   fake.approve(r429.body.orderId);
   fake.plan('capture', { kind: 'status', code: 429 });
-  resetLimits();
+  await resetLimits();
   const postsBefore = fake.countCalls('capture', r429.body.orderId);
   const quota = await H.http(B, `/${r429.body.id}/capture`, { method: 'POST', token: buyer.token, body: {} });
   t.ok(quota.status >= 500 && quota.body.error === 'PAYPAL_API_ERROR', 'PayPal 429: lỗi có kiểm soát, không thành công giả');
@@ -172,18 +172,18 @@ async function main() {
 
   // ===================================================================================
   t.section('A8 — giới hạn tần suất của chính ứng dụng');
-  resetLimits();
+  await resetLimits();
   let last = null;
   const callsBefore = fake.calls().length;
   for (let i = 0; i < 11; i++) last = await H.http(B, `/${uuid()}/capture`, { method: 'POST', token: buyer.token, body: {} });
   t.eq(last.status, 429, 'lần thứ 11 trong một phút: 429');
   t.ok(Number(last.headers.get('retry-after')) > 0, '429 có Retry-After');
   t.eq(fake.calls().length - callsBefore, 0, 'các lần bị chặn không tới PayPal (không lệnh nào)');
-  resetLimits();
+  await resetLimits();
 
   // ===================================================================================
   t.section('A9 — webhook: chữ ký không hợp lệ không tất toán; quota webhook');
-  resetLimits();
+  await resetLimits();
   const w = await H.createAccount(db, { label: 'api-web' });
   const wr = await H.http(B, '/topup', { method: 'POST', token: w.token, body: { amount: 16000, requestId: 'wh-' + uuid() } });
   fake.approve(wr.body.orderId);
@@ -193,20 +193,20 @@ async function main() {
   t.eq(badSig.status, 401, 'webhook chữ ký sai: 401');
   t.ok(fake.signatureFailures() - sigFailBefore === 1, 'PayPal xác minh chữ ký một lần và từ chối');
   t.eq((await H.credits(db, wr.body.id)).length, 1, 'đúng một bút toán từ lần thu thật (không do webhook sai)');
-  resetLimits();
+  await resetLimits();
   let webhookLast = null;
   for (let i = 0; i < 61; i++) webhookLast = await fetch(B + '/webhook', { method: 'POST', headers: { 'content-type': 'application/json', ...hdr() }, body: JSON.stringify(evt(wr.body)) });
   t.eq(webhookLast.status, 429, 'webhook quá 60 lần/phút: 429');
   const localRetryAfter=Number(webhookLast.headers.get('retry-after'));
   t.ok(Number.isInteger(localRetryAfter)&&localRetryAfter>=1&&localRetryAfter<=60,'429 local limiter trả Retry-After hợp lệ 1–60 giây (không phải upstream PayPal)');
-  resetLimits();
+  await resetLimits();
 
   // ===================================================================================
   t.section('A10 — cấu hình tắt: không có lệnh gọi mạng nào');
   const disabledRuntime = createPayPalRuntime({ config: { ...cfg, enabled: false }, provider: createSandboxProvider(cfg, { fetchImpl: fake.fetchImpl }) });
   const disabledSrv = await H.startRouter(createPayPalRouter(disabledRuntime));
   try {
-    resetLimits();
+    await resetLimits();
     const callsBeforeOff = fake.calls().length;
     for (const [route, method, token] of [['/topup', 'POST', buyer.token], [`/${first.body.id}/checkout`, 'GET', buyer.token],
       [`/${first.body.id}/capture`, 'POST', buyer.token], ['/webhook', 'POST', undefined]]) {
@@ -218,7 +218,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A11 — lỗi báo cáo SAU commit không báo tiền bị rollback và không cộng lần nữa');
-  resetLimits();
+  await resetLimits();
   const rep = await H.createAccount(db, { label: 'api-report' });
   const rr = await H.http(B, '/topup', { method: 'POST', token: rep.token, body: { amount: 17000, requestId: 'rep-' + uuid() } });
   fake.approve(rr.body.orderId);
@@ -237,7 +237,7 @@ async function main() {
 
   // ===================================================================================
   t.section('A12 — worker đối soát: chỉ GET, không lệnh thu, không bị đói');
-  resetLimits();
+  await resetLimits();
   const wk = await H.createAccount(db, { label: 'api-worker' });
   // Yêu cầu CŨ chưa bao giờ có order (create bị rớt): không được chặn lượt đối soát.
   fake.plan('create', 'drop');

@@ -1,7 +1,7 @@
 const express = require('express');
 
 const { db, uuid, nowIso } = require('../db');
-const { requireAuth } = require('../lib/auth');
+const { requireAuth,requireWallet } = require('../lib/auth');
 const { AppError } = require('../lib/errors');
 const { verifyProviderSignature, isCheckoutEnabled } = require('../lib/mockPaymentProvider');
 const { applyProviderResult, claimSubmission, submitToProvider } = require('../lib/paymentService');
@@ -73,7 +73,7 @@ async function replayExisting(res, existing, amount) {
 // "Nạp tiền" và giữ nguyên khi thử lại). Cùng người dùng + cùng requestId chỉ bao giờ có MỘT yêu
 // cầu: phép kiểm nằm trong cùng giao dịch ghi (tuần tự hoá) với lệnh INSERT, và chỉ mục duy nhất
 // (user_id, client_request_id) là lưới an toàn thứ hai. Không gửi requestId thì giữ hành vi cũ.
-router.post('/topup', requireAuth, async (req, res, next) => {
+router.post('/topup', requireAuth, requireWallet, async (req, res, next) => {
   try {
     if (!isCheckoutEnabled()) throw new AppError(503, 'MOCK_PAYMENTS_DISABLED', 'Cổng thanh toán mô phỏng hiện đã tắt. Vui lòng kiểm tra cấu hình thanh toán hoặc thử lại sau.');
     const amount = parseAmount((req.body || {}).amount);
