@@ -53,14 +53,13 @@ async function main(){
   await click(p,'activate-wallet');p.d.getElementById('emailVerificationCode').value='123456';await click(p,'email-verify');
   const codes=['ABCDE-FGHJK','LMNPQ-RSTUV','WXYZA-BCDEF','GHJKL-MNPQR','STUVW-XYZAB','CDEFG-HJKLM','NPQRS-TUVWX','YZABC-DEFGH'];
   p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'fixture',options:{}});
+  // An old server may still include codes during a rolling deployment; activation must ignore them.
   p.routes['POST /api/passkeys/register/passkey/verify']=()=>json(201,{token:'active-k',scope:'full',user:{...basic,accountStatus:'ACTIVE',emailVerified:true,authMethod:'passkey'},recoveryCodes:codes});
   p.w.SimpleWebAuthnBrowser.startRegistration=async()=>({id:'key'});await click(p,'do-enroll-passkey',240);
   p.d.dispatchEvent(new p.w.KeyboardEvent('keydown',{key:'Escape',bubbles:true}));
-  ok(p.d.querySelectorAll('.recovery-code-grid code').length===8,'Escape cannot discard one-time recovery codes');
-  await click(p,'recovery-codes-later');
-  ok(!!p.d.querySelector('.recovery-code-grid')&&!!p.d.querySelector('.recovery-defer-warning'),'first defer only explains loss of one-time display');
-  await click(p,'recovery-codes-later-confirm',220);
-  ok(!p.d.querySelector('.recovery-code-grid')&&p.count('POST /api/passkeys/recovery-codes/acknowledge')===0,'explicit defer continues without falsely acknowledging saved codes');
+  ok(!p.d.querySelector('.recovery-code-grid'),'activation does not force backup codes even when an older server includes them');
+  ok(!!p.d.getElementById('topupAmount'),'successful activation immediately resumes the original wallet route');
+  ok(p.count('POST /api/passkeys/recovery-codes/acknowledge')===0,'omitting optional backup setup never falsely marks codes saved');
  }finally{p.close();}
  console.log('AUTH VERIFICATION UI: '+checks+' checks passed');
 }

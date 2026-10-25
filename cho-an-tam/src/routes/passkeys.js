@@ -220,7 +220,6 @@ router.post(
       }
       const { deviceName } = JSON.parse(challengeRow.context_data || '{}');
       const now = nowIso();
-      let recoveryCodes;
 
       // Ghi credential, mở ví và kích hoạt tài khoản trong CÙNG một giao dịch cơ sở dữ liệu.
       // Đây là chỗ bất biến "tài khoản ACTIVE luôn có ít nhất một Passkey" được tạo ra: không
@@ -275,7 +274,6 @@ router.post(
 
         await db.prepare('UPDATE passkey_credentials SET backup_eligible=?,backed_up=?,device_name=? WHERE credential_id=?')
           .run(verification.registrationInfo.credentialDeviceType==='multiDevice'?1:0,verification.registrationInfo.credentialBackedUp?1:0,String(req.body.deviceName||deviceName||'Passkey đầu tiên').trim().slice(0,60),credential.id);
-        recoveryCodes=await accountSecurity.generateRecoveryCodes(user.id);
         await upgradeSession(req.user.sessionId);
         await accountSecurity.securityNotice(user.id,'FIRST_PASSKEY_ADDED','Passkey đầu tiên đã được thêm');
 
@@ -325,7 +323,7 @@ router.post(
         type: EVENTS.ACCOUNT_ACTIVATED, outcome: 'ALLOWED', statusCode: 201,
         detail: { accountStatus: 'ACTIVE' },
       });
-      res.status(201).json({...await issueSession(req, res, await loadUserRow(user.id), { sessionId: req.user.sessionId }),recoveryCodes});
+      res.status(201).json(await issueSession(req, res, await loadUserRow(user.id), { sessionId: req.user.sessionId }));
     } catch (e) {
       next(e);
     }

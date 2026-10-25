@@ -149,11 +149,14 @@ async function main(){
   check((await api('/passkeys/session/refresh',{method:'POST',body:{},cookie:trusted.cookie,origin:'https://evil.enclave.example'})).status===403,'untrusted same-site origin cannot refresh cookie');
   check((await api('/passkeys/session/logout',{method:'POST',body:{},cookie:trusted.cookie,origin:'https://evil.enclave.example'})).status===403,'untrusted origin cannot log out cookie session');
   must(await api('/passkeys/session/refresh',{method:'POST',body:{},cookie:trusted.cookie}));
+  const backupOptions=must(await api('/passkeys/reauth/options',{token:active.token,body:{action:'REGENERATE_RECOVERY'}}));
+  const backupGrant=must(await api('/passkeys/reauth/verify',{token:active.token,body:{reauthSessionId:backupOptions.reauthSessionId,response:active.auth.authenticate({rpId:'localhost',origin:base,challenge:backupOptions.options.challenge})}}));
+  active.recoveryCodes=must(await api('/passkeys/recovery-codes/regenerate',{token:active.token,body:{reauthGrant:backupGrant.reauthGrant}})).recoveryCodes;
   const recovery=must(await api('/passkeys/recovery/code',{token:active.token,body:{password,code:active.recoveryCodes[0]}}));
   const recoveryOptions=must(await api('/passkeys/recovery/passkey/options',{token:recovery.token,body:{}}));
   const recoveredKey=createAuthenticator();
   const recovered=must(await api('/passkeys/recovery/passkey/verify',{token:recovery.token,body:{registrationSessionId:recoveryOptions.registrationSessionId,response:recoveredKey.register({rpId:'localhost',origin:base,challenge:recoveryOptions.options.challenge,userHandle:recoveryOptions.options.user.id})}}));
-  check(recovered.recoveryCodes.length===8&&!recovered.recoveryCodes.includes(active.recoveryCodes[1]),'code recovery rotates all remaining recovery codes');
+  check(recovered.recoveryCodes===undefined&&(await db.prepare('SELECT COUNT(*) AS n FROM auth_recovery_codes WHERE user_id=?').get(active.user.id)).n===0,'completed recovery invalidates all old codes without forcing a new set');
   check((await api('/passkeys/recovery/code',{token:recovered.token,body:{password,code:active.recoveryCodes[1]}})).status===400,'unused code from old recovery set is invalid');
   check(!recovered.recoveryRestrictedUntil,'code recovery does not gain the email-only 72-hour restriction');
   let proxyProbe;

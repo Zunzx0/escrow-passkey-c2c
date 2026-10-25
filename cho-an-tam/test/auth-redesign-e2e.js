@@ -46,7 +46,8 @@ async function main(){
   check(a.registrationOptions.user.displayName!==seller.registrationOptions.user.displayName,'Passkey labels distinguish accounts with identical public display names');
   check(a.registrationOptions.user.id!==seller.registrationOptions.user.id&&Buffer.from(a.registrationOptions.user.id,'base64url').length===32,'WebAuthn user handles remain random 32-byte values per account');
   check(seller.registrationOptions.excludeCredentials.length===0,'new account does not exclude another account existing Passkey');
-  check(a.user.authMethod==='passkey'&&a.recoveryCodes.length===8,'activation yields K session and eight one-time recovery codes');
+  check(a.user.authMethod==='passkey'&&a.recoveryCodes===undefined,'activation yields K session without forcing backup codes');
+  check((await db.prepare('SELECT COUNT(*) AS n FROM auth_recovery_codes WHERE user_id=?').get(a.user.id)).n===0,'new account has no unsolicited backup codes');
   check((await db.prepare('SELECT COUNT(*) AS n FROM wallets WHERE user_id=?').get(a.user.id)).n===1,'activation creates exactly one wallet');
   const duplicate=await api('/passkeys/register/account',{body:{email:a.email,username:'different_name',displayName:'Người dùng thử',password}});must(duplicate,201);
   check(duplicate.data.scope===first.data.scope&&duplicate.data.message===first.data.message&&!duplicate.data.token.includes(a.user.id),'existing email gets indistinguishable verification flow');
@@ -127,6 +128,8 @@ async function main(){
   check((await api('/passkeys/session/refresh',{method:'POST',cookie:refresh.cookie})).status===401,'old refresh token reuse detected');
   check((await api('/users/me',{token:rotated.data.token})).status===401,'refresh reuse revokes its session family');
   const rec=await register('recover_test');const pRec=must(await login(rec));
+  const backupGrant=await grant(rec,'REGENERATE_RECOVERY');
+  rec.recoveryCodes=must(await api('/passkeys/recovery-codes/regenerate',{token:rec.token,body:{reauthGrant:backupGrant.reauthGrant}})).recoveryCodes;
   const recovered=await api('/passkeys/recovery/code',{token:pRec.token,body:{password,code:rec.recoveryCodes[0]}});must(recovered);
   check(recovered.data.scope==='recover','recovery code authorizes only restricted recovery session');
   check((await api('/wallets/me',{token:recovered.data.token})).status===403,'recovery session cannot access business actions');
@@ -143,6 +146,7 @@ async function main(){
   check((await db.prepare('SELECT account_status FROM users WHERE id=?').get(rec.user.id)).account_status==='RECOVERING','email confirmation starts recovery waiting period');
   const kp=await passkeyLogin(rec);must(kp);rec.token=kp.data.token;
   check((await db.prepare('SELECT account_status FROM users WHERE id=?').get(rec.user.id)).account_status==='ACTIVE','old Passkey login automatically cancels recovery');
+  await db.prepare('DELETE FROM auth_limits WHERE bucket_key=?').run(sec.hash(`recovery-email-cooldown:${rec.email}`)); // advance the resend interval in this isolated fixture
   must(await api('/passkeys/recovery/email/request',{body:{email:rec.email}}));must(await api('/passkeys/recovery/email/start',{body:{token:await emailLink(rec.email,'Xác nhận yêu cầu')}}));
   const {processAuthMaintenance}=require('../src/lib/authJobs');await processAuthMaintenance();
   check(!(await db.prepare("SELECT 1 FROM auth_links WHERE user_id=? AND purpose='RECOVERY_FINISH'").get(rec.user.id)),'finish token not issued before 24h wait');

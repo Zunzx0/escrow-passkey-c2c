@@ -943,8 +943,10 @@ const App = (() => {
     renderChrome();
     route();
     if(state.recoverAfterLogin){state.recoverAfterLogin=false;openRecoveryCode();return true;}
-    if(result.recoveryCodes?.length) showRecoveryCodes(result.recoveryCodes);
-    else if(authUi.emailLink) await openEmailLinkModal();
+    // Kích hoạt/khôi phục xong thì tiếp tục việc đang làm. Mã dự phòng chỉ
+    // hiển thị khi người dùng chủ động tạo trong Bảo mật, không chen vào đây.
+    if(authUi.emailLink) await openEmailLinkModal();
+    else if(authUi.activation&&state.user.accountStatus==='ACTIVE')await finishActivation();
     return true;
   }
 
@@ -2473,15 +2475,23 @@ const App = (() => {
     });
   }
   function openRecoveryChoice(){
-    openModal({title:'Mất Passkey?',body:'<p>Nếu còn một Passkey, hãy dùng Passkey đó trên thiết bị khác hoặc qua mã QR của trình duyệt. Nếu mất tất cả, chọn một cách khôi phục bên dưới.</p><div class="stack"><button class="btn btn-primary" data-act="recovery-code-open">Tôi có mã khôi phục</button><button class="btn" data-act="recovery-email-open">Tôi không có mã khôi phục</button></div><p class="hint">Không còn email và mã khôi phục: cần liên hệ hỗ trợ. Tiền trong các đơn ký quỹ vẫn được giữ nguyên.</p>'});
+    openEmailRecoveryRequest('recovery');
   }
   function openRecoveryCode(){
     if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return toast('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
     openModal({title:'Khôi phục bằng mã dự phòng',body:`${authField('recoveryCurrentPassword','Mật khẩu hiện tại','password')}${authField('recoveryCode','Mã khôi phục (XXXXX-XXXXX)')}<p class="hint">Mã được dùng một lần. Sau khi tạo Passkey mới, Passkey và các phiên cũ sẽ bị thu hồi.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-code-verify">Xác minh và tiếp tục</button>'});
   }
   function openEmailRecoveryRequest(kind='recovery'){
-    authUi.action=kind;
-    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Bạn cần xác nhận email và đợi 24 giờ. Sau khôi phục, chức năng giải ngân bị hạn chế thêm 72 giờ.'}</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">Gửi hướng dẫn</button>'});
+    authUi.action=kind;authUi.recoveryOtp=null;
+    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục Passkey qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Nhận mã 6 số qua email, sau đó tạo Passkey mới theo hướng dẫn. Sau khi xác nhận mã, yêu cầu chờ 24 giờ để bảo vệ tài khoản; giải ngân bị hạn chế 72 giờ sau khôi phục.'}</p>${kind==='password'?'':'<p class="hint">Nếu Passkey vẫn dùng được trên thiết bị khác, bạn có thể đăng nhập bằng nó. <button class="btn btn-ghost btn-sm" data-act="recovery-code-open">Tôi có mã dự phòng đã lưu</button></p>'}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">${kind==='password'?'Gửi hướng dẫn':'Gửi mã xác nhận'}</button>`});
+  }
+  function openRecoveryEmailCode(result,email){
+    const skew=Date.parse(result.serverNow)-Date.now(),offset=Number.isFinite(skew)?skew:0;
+    const next=Date.parse(result.nextRequestAt)-offset;
+    authUi.recoveryOtp={requestToken:result.requestToken,email,nextAt:Number.isFinite(next)?next:Date.now()+60000};
+    openModal({title:'Nhập mã khôi phục qua email',body:`<p>${esc(result.message)}</p><p>Email: <b>${esc(result.emailMask||email)}</b></p><div class="field"><label for="recoveryEmailCode">Mã xác nhận 6 số</label><input id="recoveryEmailCode" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required></div><p class="hint">Mã có hiệu lực 10 phút. Xác nhận mã sẽ bắt đầu thời gian chờ 24 giờ; tài khoản chưa bị thay đổi khi chỉ gửi mã.</p><button class="btn btn-ghost" data-act="recovery-email-resend" id="recoveryEmailResend" disabled>Gửi lại mã</button>`,footer:'<button class="btn" data-act="recovery-email-open">Đổi email</button><button class="btn btn-primary" data-act="recovery-email-code-verify">Xác nhận khôi phục</button>'});
+    const generation=modalGeneration,context=authUi.recoveryOtp;
+    const tick=()=>{const btn=$('#recoveryEmailResend');if(!btn||generation!==modalGeneration||authUi.recoveryOtp!==context)return;const seconds=Math.max(0,Math.ceil((context.nextAt-Date.now())/1000));btn.textContent=seconds?`Gửi lại mã sau ${seconds} giây`:'Gửi lại mã';btn.disabled=seconds>0||state.busy.size>0;setTimeout(tick,1000);};tick();
   }
   function openRecoveryPasskey(emailRecovery){
     authUi.recoveryEmail=emailRecovery;
@@ -2511,7 +2521,7 @@ const App = (() => {
     try{
       const data=await api('/passkeys/security');if(!box.isConnected)return;
       const labels={LOGIN_PASSWORD:'Đăng nhập bằng mật khẩu',LOGIN_PASSKEY:'Đăng nhập bằng Passkey',FIRST_PASSKEY_ADDED:'Tạo Passkey đầu tiên',PASSKEY_ADDED:'Thêm Passkey',PASSKEY_REMOVED:'Xóa Passkey',EMAIL_VERIFIED:'Xác minh email',EMAIL_CHANGED:'Đổi email',PASSWORD_CHANGED:'Đổi mật khẩu',PASSWORD_RESET:'Đặt lại mật khẩu',RECOVERY_CODES_REGENERATED:'Tạo lại mã khôi phục',RECOVERY_CODE_USED:'Dùng mã khôi phục',RECOVERY_STARTED:'Bắt đầu khôi phục',RECOVERY_CANCELLED:'Hủy khôi phục',ACCOUNT_RECOVERED:'Hoàn tất khôi phục',RECOVERY_EXPIRED:'Khôi phục hết hạn',PASSKEY_COUNTER_WARNING:'Cảnh báo bộ đếm Passkey'};
-      box.innerHTML=`<div class="card p-5"><h3>Email</h3><p>${data.email?esc(data.email):'Chưa có email'} · ${data.emailVerified?'Đã xác minh':'Chưa xác minh'}</p><button class="btn" data-act="change-email-open">${data.email?'Đổi email':'Thêm email đã xác minh'}</button></div><div class="card p-5"><h3>Mã khôi phục</h3><p>Còn ${Number(data.recoveryCodesRemaining)} mã chưa dùng. ${data.recoveryAcknowledged?'':'Bạn chưa xác nhận lưu mã. Hãy tạo lại và lưu bộ mã mới.'}</p><button class="btn" data-act="recovery-regenerate">Tạo lại mã khôi phục</button><button class="btn btn-ghost" data-act="lost-passkey">Mất Passkey?</button></div><div class="card p-5"><div class="row-between"><h3>Phiên đăng nhập</h3><button class="btn" data-act="sessions-revoke-others">Đăng xuất các phiên khác</button></div>${data.sessions.map(s=>`<div class="border-row"><b>${esc(s.device_name||'Trình duyệt')}</b><p class="hint">${s.auth_method==='passkey'?'Phiên Passkey':s.auth_method==='password'?'Phiên mật khẩu':'Phiên khôi phục'} · Dùng gần nhất ${fmtDateTime(s.last_seen_at)} ${s.current?'· Phiên hiện tại':''}</p>${s.current?'':`<button class="btn btn-sm" data-act="session-revoke" data-id="${esc(s.id)}">Đăng xuất phiên này</button>`}</div>`).join('')}</div><div class="card p-5"><h3>Nhật ký bảo mật gần đây</h3>${data.events.length?data.events.map(e=>`<div class="border-row">${esc(labels[e.action]||'Sự kiện bảo mật')}<span class="hint"> · ${fmtDateTime(e.created_at)}</span></div>`).join(''):'Chưa có sự kiện.'}</div>`;
+      box.innerHTML=`<div class="card p-5"><h3>Email</h3><p>${data.email?esc(data.email):'Chưa có email'} · ${data.emailVerified?'Đã xác minh':'Chưa xác minh'}</p><button class="btn" data-act="change-email-open">${data.email?'Đổi email':'Thêm email đã xác minh'}</button></div><div class="card p-5"><h3>Khôi phục tài khoản</h3><p>Khi không dùng được Passkey, nhận mã xác nhận qua email đã xác minh và làm theo hướng dẫn.</p><button class="btn" data-act="lost-passkey">Không dùng được Passkey?</button><details class="mt-3"><summary>Tùy chọn nâng cao: mã dự phòng</summary><p class="hint mt-3">Không bắt buộc. Còn ${Number(data.recoveryCodesRemaining)} mã chưa dùng. Chỉ tạo nếu bạn muốn tự lưu thêm phương án dự phòng.</p><button class="btn" data-act="recovery-regenerate">Tạo bộ mã dự phòng</button></details></div><div class="card p-5"><div class="row-between"><h3>Phiên đăng nhập</h3><button class="btn" data-act="sessions-revoke-others">Đăng xuất các phiên khác</button></div>${data.sessions.map(s=>`<div class="border-row"><b>${esc(s.device_name||'Trình duyệt')}</b><p class="hint">${s.auth_method==='passkey'?'Phiên Passkey':s.auth_method==='password'?'Phiên mật khẩu':'Phiên khôi phục'} · Dùng gần nhất ${fmtDateTime(s.last_seen_at)} ${s.current?'· Phiên hiện tại':''}</p>${s.current?'':`<button class="btn btn-sm" data-act="session-revoke" data-id="${esc(s.id)}">Đăng xuất phiên này</button>`}</div>`).join('')}</div><div class="card p-5"><h3>Nhật ký bảo mật gần đây</h3>${data.events.length?data.events.map(e=>`<div class="border-row">${esc(labels[e.action]||'Sự kiện bảo mật')}<span class="hint"> · ${fmtDateTime(e.created_at)}</span></div>`).join(''):'Chưa có sự kiện.'}</div>`;
     }catch(e){box.textContent=e.message;}
   }
   function renderSecurityBanner(){
@@ -2522,7 +2532,7 @@ const App = (() => {
     }
     if(!['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){box.innerHTML='';return;}
     const user=state.user;
-    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'')+(!user.recoveryAcknowledged?'<div class="note note-warning mt-3">Bạn chưa xác nhận lưu mã khôi phục. <a href="#/security">Vào Bảo mật để tạo lại và lưu mã</a>.</div>':'');
+    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'');
   }
 
   // =====================================================================
@@ -5117,7 +5127,35 @@ const App = (() => {
     'lost-passkey':openRecoveryChoice,
     'recovery-code-open':openRecoveryCode,
     'recovery-email-open':()=>openEmailRecoveryRequest('recovery'),
-    'recovery-email-request':async(el)=>{const email=$('#recoveryEmail').value,kind=authUi.action;await guard('recovery-email',el,async()=>{const result=await api(kind==='password'?'/passkeys/password-reset/request':'/passkeys/recovery/email/request',{method:'POST',body:{email}});openModal({title:'Kiểm tra hộp thư',body:`<p>${esc(result.message)}</p>`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
+    'recovery-email-request':async(el)=>{
+      const email=$('#recoveryEmail').value.trim(),kind=authUi.action,generation=modalGeneration;
+      if(!$('#recoveryEmail').reportValidity())return;
+      await guard('recovery-email',el,async()=>{
+        const result=await api(kind==='password'?'/passkeys/password-reset/request':'/passkeys/recovery/email/request',{method:'POST',body:{email}});
+        if(generation!==modalGeneration)return;
+        if(kind!=='password'&&result.requestToken)return openRecoveryEmailCode(result,email);
+        openModal({title:'Kiểm tra hộp thư',body:`<p>${esc(result.message)}</p>`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});
+      });
+    },
+    'recovery-email-resend':async(el)=>{
+      const context=authUi.recoveryOtp,generation=modalGeneration;if(!context||Date.now()<context.nextAt)return;
+      try{await guard('recovery-email-resend',el,async()=>{
+          const result=await api('/passkeys/recovery/email/request',{method:'POST',body:{email:context.email}});
+          if(generation===modalGeneration&&authUi.recoveryOtp===context)openRecoveryEmailCode(result,context.email);
+        });
+      }catch(e){if(!e?.silent&&authUi.recoveryOtp===context&&e.retryAfter)context.nextAt=Date.now()+e.retryAfter*1000;}
+    },
+    'recovery-email-code-verify':async(el)=>{
+      const context=authUi.recoveryOtp,generation=modalGeneration,input=$('#recoveryEmailCode');
+      if(!context||!input?.reportValidity())return;
+      await guard('recovery-email-code',el,async()=>{
+        const result=await api('/passkeys/recovery/email/verify',{method:'POST',body:{requestToken:context.requestToken,code:input.value}});
+        if(generation!==modalGeneration||authUi.recoveryOtp!==context)return;
+        authUi.recoveryOtp=null;
+        if(state.user){try{const me=await api('/users/me');state.user=me.user;renderChrome();}catch{/* The server already confirmed recovery; a display refresh must not hide that result. */}}
+        openModal({title:'Đã xác nhận yêu cầu khôi phục',body:`<p>${esc(result.message)}</p><p>Có thể tiếp tục từ <b>${fmtDateTime(result.availableAt)}</b>. Hãy kiểm tra email khi đến thời điểm này.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+      });
+    },
     'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
     'recovery-passkey-create':async(el)=>{const deviceName=$('#recoveryDeviceName').value,newPassword=$('#recoveryNewPassword')?.value;await guard('recovery-create',el,async()=>{const {registrationSessionId,options}=await api('/passkeys/recovery/passkey/options',{method:'POST',body:{}});const response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});await afterSession(result,'Đã khôi phục tài khoản.');});},
     'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},

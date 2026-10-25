@@ -6,7 +6,7 @@ const root=path.resolve(__dirname,'..'),tmp=fs.mkdtempSync(path.join(os.tmpdir()
 // Pin one source snapshot so ongoing edits cannot alter modules halfway through startup.
 const snapshot=path.join(tmp,'suite');fs.mkdirSync(path.join(snapshot,'test'),{recursive:true});
 fs.cpSync(path.join(root,'src'),path.join(snapshot,'src'),{recursive:true});
-for(const file of ['auth-redesign-e2e.js','auth-verification-e2e.js','softwareAuthenticator.js','minicbor.js'])fs.copyFileSync(path.join(root,'test',file),path.join(snapshot,'test',file));
+for(const file of ['auth-redesign-e2e.js','auth-verification-e2e.js','email-recovery-e2e.js','softwareAuthenticator.js','minicbor.js'])fs.copyFileSync(path.join(root,'test',file),path.join(snapshot,'test',file));
 const bin=process.env.AUTH_TEST_PG_BIN || 'C:/Program Files/PostgreSQL/17/bin';
 let started=false;
 function command(exe,args){
@@ -55,7 +55,7 @@ async function main(){
   await client.query("INSERT INTO app.wallets(id,user_id,wallet_type,available_balance) VALUES('legacy-auth-wallet','legacy-auth-upgrade','USER',10000)");
   await client.query("INSERT INTO app.wallet_entries(id,wallet_id,request_id,entry_type,available_delta,available_after,locked_after,idempotency_key) VALUES('legacy-auth-entry','legacy-auth-wallet','original','DEMO_TOPUP',10000,10000,0,'legacy-auth-entry')");await client.end();
   const fixtureKey=require('node:crypto').randomBytes(32).toString('hex');
-  for(const suite of ['auth-redesign-e2e.js','auth-verification-e2e.js']){
+  for(const suite of ['auth-redesign-e2e.js','auth-verification-e2e.js','email-recovery-e2e.js']){
     const result=spawnSync(process.execPath,['test/'+suite],{cwd:snapshot,env:{...process.env,AUTH_TEST_PG_URL:url,AUTH_TEST_KEY:fixtureKey,NODE_PATH:path.join(root,'node_modules')},windowsHide:true,encoding:'utf8',timeout:180000,maxBuffer:1024*1024});
     process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');assert.equal(result.status,0,'PostgreSQL '+suite);
   }
