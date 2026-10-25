@@ -20,7 +20,7 @@
     "test:counter": "node test/counter-e2e.js",
     "test:cleanup": "node test/cleanup-e2e.js",
     "test:invariants": "node test/invariants-unit.js",
-    "test:auth": "node test/auth-migration.js && node --test test/auth-keys.test.js test/auth-mail.test.js && node test/auth-redesign-e2e.js && node test/auth-verification-e2e.js && node test/ui/auth-redesign-ui.js && node test/ui/auth-verification-ui.js",
+    "test:auth": "node test/auth-migration.js && node --test test/auth-keys.test.js test/auth-mail.test.js && node test/auth-redesign-e2e.js && node test/auth-verification-e2e.js && node test/email-recovery-e2e.js && node test/ui/auth-redesign-ui.js && node test/ui/auth-verification-ui.js && node test/ui/email-recovery-ui.js",
     "test:auth:postgres": "node test/auth-postgres.js",
     "test:notifications": "node test/notification-e2e.js",
     "test:checkout": "node test/checkout-e2e.js",

@@ -189,27 +189,32 @@ router.post('/recovery/email/request',wrap(async(req,res)=>{
   sec.assertMailConfigured();
   const email=sec.normalizeEmail(req.body.email);
   await sec.enforceLimit(`recovery-ip:${req.ip}`,5,3600);await sec.enforceLimit(`recovery-email:${email}`,3,3600);
-  const user=await db.prepare("SELECT * FROM users WHERE email=? AND email_verified_at IS NOT NULL AND is_active=1 AND account_status IN ('ACTIVE','RECOVERING')").get(email);
-  if(user) await db.transaction(async()=>{
-    const token=await sec.makeLink(user.id,'RECOVERY_START',1800);
-    await sec.queueMail(user,'Xác nhận yêu cầu khôi phục Enclave',`Để bắt đầu thời gian chờ 24 giờ, mở: ${sec.linkUrl('recovery-start',token)}. Liên kết có hiệu lực 30 phút. Chưa có thay đổi nào cho tới khi bạn xác nhận.`,user.email,{expiresAt:sec.after(1800)});
-  })();res.json({message:generic});
+  if(!sec.validEmail(email))throw new AppError(400,'INVALID_EMAIL','Hãy nhập email hợp lệ.');
+  res.json(await require('../lib/emailRecovery').request(email));
+}));
+async function startEmailRecovery(userId,expectedEmail=null){
+    const user=await db.prepare("SELECT * FROM users WHERE id=? AND is_active=1 AND account_status='ACTIVE' AND email_verified_at IS NOT NULL").get(userId);
+    if(!user||(expectedEmail&&user.email!==expectedEmail)) throw new AppError(409,'RECOVERY_UNAVAILABLE','Yêu cầu khôi phục đang tồn tại hoặc tài khoản không khả dụng.');
+    const availableAt=sec.after(Number(process.env.EMAIL_RECOVERY_WAIT_SECONDS||86400)),id=uuid();
+    await db.prepare("INSERT INTO account_recoveries(id,user_id,status,available_at,expires_at,created_at) VALUES(?,?,'WAITING',?,?,?)").run(id,user.id,availableAt,new Date(Date.parse(availableAt)+3600000).toISOString(),nowIso());
+    await db.prepare("UPDATE users SET account_status='RECOVERING',updated_at=? WHERE id=?").run(nowIso(),user.id);
+    await db.prepare("UPDATE auth_links SET used_at=? WHERE user_id=? AND purpose IN ('RECOVERY_START','RECOVERY_EMAIL_OTP') AND used_at IS NULL").run(nowIso(),user.id);
+    const cancel=await sec.makeLink(user.id,'RECOVERY_CANCEL',Number(process.env.EMAIL_RECOVERY_WAIT_SECONDS||86400)+3600,{recoveryId:id});
+    await sec.queueMail(user,'Cảnh báo: đang khôi phục tài khoản Enclave',`Có yêu cầu khôi phục tài khoản. Chỉ có thể tạo Passkey mới sau ${availableAt}. Nếu không phải bạn, hủy tại: ${sec.linkUrl('recovery-cancel',cancel)} hoặc đăng nhập bằng Passkey cũ.`);
+    await sec.audit(user.id,'RECOVERY_STARTED');
+    return {availableAt,message:'Đã xác nhận email và bắt đầu thời gian chờ khôi phục. Chúng tôi sẽ gửi email khi có thể tạo Passkey mới.'};
+}
+router.post('/recovery/email/verify',publicLimiter,wrap(async(req,res)=>{
+  await sec.enforceLimit(`recovery-otp-ip:${req.ip}`,30,600);
+  res.json(await require('../lib/emailRecovery').verify(req.body.requestToken,req.body.code,startEmailRecovery));
 }));
 router.post('/recovery/email/start',wrap(async(req,res)=>{
   await sec.enforceLimit(`recovery-start:${req.ip}`,10,60);
   const result=await db.transaction(async()=>{
     const link=await sec.getLink(req.body.token,'RECOVERY_START');
-    const user=await db.prepare("SELECT * FROM users WHERE id=? AND is_active=1 AND account_status='ACTIVE'").get(link.user_id);
-    if(!user) throw new AppError(409,'RECOVERY_UNAVAILABLE','Yêu cầu khôi phục đang tồn tại hoặc tài khoản không khả dụng.');
     await sec.consumeLink(link);
-    const availableAt=sec.after(Number(process.env.EMAIL_RECOVERY_WAIT_SECONDS||86400)),id=uuid();
-    await db.prepare("INSERT INTO account_recoveries(id,user_id,status,available_at,expires_at,created_at) VALUES(?,?,'WAITING',?,?,?)").run(id,user.id,availableAt,new Date(Date.parse(availableAt)+3600000).toISOString(),nowIso());
-    await db.prepare("UPDATE users SET account_status='RECOVERING',updated_at=? WHERE id=?").run(nowIso(),user.id);
-    const cancel=await sec.makeLink(user.id,'RECOVERY_CANCEL',Number(process.env.EMAIL_RECOVERY_WAIT_SECONDS||86400)+3600,{recoveryId:id});
-    await sec.queueMail(user,'Cảnh báo: đang khôi phục tài khoản Enclave',`Có yêu cầu khôi phục tài khoản. Chỉ có thể tạo Passkey mới sau ${availableAt}. Nếu không phải bạn, hủy tại: ${sec.linkUrl('recovery-cancel',cancel)} hoặc đăng nhập bằng Passkey cũ.`);
-    await sec.audit(user.id,'RECOVERY_STARTED');
-    return {availableAt};
-  })();res.json({...result,message:'Đã bắt đầu thời gian chờ khôi phục. Chúng tôi sẽ gửi email khi đến lúc.'});
+    return startEmailRecovery(link.user_id,JSON.parse(link.context_data).email);
+  })();res.json(result);
 }));
 router.post('/recovery/cancel',publicLimiter,wrap(async(req,res)=>{
   if(req.body.token) {
@@ -228,7 +233,7 @@ async function cancelRecovery(userId,recoveryId=null) {
   const changed=await db.prepare("UPDATE account_recoveries SET status='CANCELLED' WHERE user_id=? AND status IN ('WAITING','READY') AND (CAST(? AS TEXT) IS NULL OR id=?)").run(userId,recoveryId,recoveryId);
   if(changed.changes) {
     await db.prepare("UPDATE users SET account_status='ACTIVE' WHERE id=? AND account_status='RECOVERING'").run(userId);
-    await db.prepare("UPDATE auth_links SET used_at=? WHERE user_id=? AND purpose IN ('RECOVERY_START','RECOVERY_FINISH','RECOVERY_CANCEL') AND used_at IS NULL").run(nowIso(),userId);
+    await db.prepare("UPDATE auth_links SET used_at=? WHERE user_id=? AND purpose IN ('RECOVERY_START','RECOVERY_FINISH','RECOVERY_CANCEL','RECOVERY_EMAIL_OTP') AND used_at IS NULL").run(nowIso(),userId);
     await sec.securityNotice(userId,'RECOVERY_CANCELLED','Yêu cầu khôi phục đã được hủy');
   }
 }
@@ -287,7 +292,6 @@ router.post('/recovery/passkey/verify',requireEnrollAuth,wrap(async(req,res)=>{
   if(!verified.verified) throw new AppError(400,'VERIFICATION_FAILED','Không xác minh được Passkey mới.');
   const info=verified.registrationInfo,c=info.credential;
   const newHash=context.emailRecovery?hashPassword(req.body.newPassword):null;
-  let codes;
   await db.transaction(async()=>{
     await recoveryAuth(req);
     if((await db.prepare('UPDATE auth_challenges SET used_at=? WHERE id=? AND used_at IS NULL AND expires_at>?').run(nowIso(),challenge.id,nowIso())).changes!==1) throw new AppError(400,'CHALLENGE_REPLAY','Challenge đã được dùng.');
@@ -303,11 +307,12 @@ router.post('/recovery/passkey/verify',requireEnrollAuth,wrap(async(req,res)=>{
     await revokeAllSessions(user.id,'ACCOUNT_RECOVERED');
     await db.prepare('UPDATE reauth_grants SET used_at=? WHERE user_id=? AND used_at IS NULL').run(nowIso(),user.id);
     await db.prepare('UPDATE auth_links SET used_at=? WHERE user_id=? AND used_at IS NULL').run(nowIso(),user.id);
-    codes=await sec.generateRecoveryCodes(user.id);
+    await db.prepare('DELETE FROM auth_recovery_codes WHERE user_id=?').run(user.id);
+    await db.prepare('UPDATE users SET recovery_acknowledged=0 WHERE id=?').run(user.id);
     await sec.securityNotice(user.id,'ACCOUNT_RECOVERED','Tài khoản đã được khôi phục; Passkey và các phiên cũ đã bị thu hồi');
   })();
   const fresh=await db.prepare('SELECT * FROM users WHERE id=?').get(user.id);
-  res.json({...await freshSession(req,res,fresh,'passkey'),recoveryCodes:codes,recoveryRestrictedUntil:fresh.recovery_restricted_until});
+  res.json({...await freshSession(req,res,fresh,'passkey'),recoveryRestrictedUntil:fresh.recovery_restricted_until});
 }));
 router.post('/email/change/request',requireAuth,wrap(async(req,res)=>{
   sec.assertMailConfigured();await sec.enforceLimit(`email-change:${req.user.id}`,3,3600);

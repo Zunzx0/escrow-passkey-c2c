@@ -11,8 +11,8 @@ Nguồn yêu cầu: bản thiết kế (3), `Enclave bản sửa đổi kế ho�
 3. Tạo `BASIC`, cấp phiên P để vào chợ ngay; **chưa có ví**. OTP 6 số ngẫu nhiên, HMAC, hạn 10 phút, tối đa 5 lần sai/mã. Trần cứng 20 lần sai/tài khoản trong cửa sổ trượt 24 giờ và khóa OTP ít nhất 1 giờ: phải hết cả hai điều kiện mới mở. Gửi lại cách nhau 60 giây; chung tối đa 5 thư xác minh/giờ/địa chỉ nhận qua mọi tài khoản, giữ nguyên dấu chấm và dấu cộng. Mở lại popup không tự xoay mã, đồng hồ lấy từ máy chủ. Không suy từ phản hồi tiếp nhận rằng thư đã vào hộp thư. BASIC không hoạt động 30 ngày, không có dữ liệu tài chính cần giữ, được dọn.
 4. Xác minh email chuyển sang `VERIFIED`, vẫn chưa có ví. Khi bắt đầu nạp/mua hàng mới mở hộp thoại kích hoạt tại chỗ, có nút Để sau. Chưa xác minh thì nhập OTP; nếu đã xác minh ngay trong phiên này thì đi tiếp tạo Passkey. Phiên mật khẩu mới chưa có bằng chứng hộp thư gần đây phải xác minh lại **khi kích hoạt**, vẫn được xem chợ bình thường. Đây là lớp bảo vệ bổ sung cho lần tạo khóa đầu tiên, không khôi phục luồng ép thiết lập sau đăng ký của bản cũ.
 5. Tạo Passkey có UV và resident key bắt buộc; `user.id` WebAuthn là 32 byte ngẫu nhiên riêng. Máy chủ kiểm challenge, origin, RP ID và chữ ký qua SimpleWebAuthn.
-6. Tên Passkey nhập ngay trong hộp thoại, bỏ trống dùng tên tự động. Trong cùng transaction: ghi credential, kích hoạt ACTIVE, tạo ví/số dư demo nếu đủ điều kiện, lưu băm 8 mã khôi phục, nâng phiên lên K và ghi sự kiện/email chờ gửi. Người mua được tặng 5.000.000 VND demo; ví admin không được tạo.
-7. Hiện 8 mã một lần; nền/Escape không làm mất màn này. Nút xác nhận đã lưu chỉ bật sau tải/sao chép và tích ô; Để sau giải thích mất khả năng xem lại, rồi phải bấm xác nhận để sau. Không đánh dấu đã lưu khi hoãn. Banner nhắc tạo lại mã còn hiện. Thao tác nạp/đặt mua ban đầu tiếp tục tại trang cũ; không lưu token/OTP/mã dự phòng vào localStorage.
+6. Tên Passkey nhập ngay trong hộp thoại, bỏ trống dùng tên tự động. Trong cùng transaction: ghi credential, kích hoạt ACTIVE, tạo ví/số dư demo nếu đủ điều kiện, nâng phiên lên K và ghi sự kiện/email chờ gửi. Không sinh bộ mã dự phòng ở bước này. Người mua được tặng 5.000.000 VND demo; ví admin không được tạo.
+7. Kích hoạt xong tiếp tục thao tác nạp/đặt mua ban đầu tại trang cũ, không có bảng mã hay banner yêu cầu lưu mã. Khôi phục qua email là đường chính. Mã dự phòng chỉ là tùy chọn nâng cao trong Bảo mật, cần Passkey và phiếu G để tạo. Nếu tự chọn tạo, mã vẫn hiện một lần và có bước lưu/xác nhận; không lưu token/OTP/mã dự phòng vào localStorage.
 8. Đăng nhập bằng mật khẩu mở phiên P; Passkey có UV mở phiên K. Có đăng nhập Passkey tự điền nếu trình duyệt hỗ trợ.
    Email chỉ dùng làm định danh đăng nhập sau khi đã xác minh. Trước đó dùng tên đăng nhập duy nhất; không chọn tài khoản BASIC cũ nhất khi nhiều đăng ký dùng chung một email. Đây là sửa bổ sung ngày 25/10 sau khi tái hiện lỗi chọn nhầm tài khoản.
 9. **Bỏ ngưỡng miễn Passkey 500.000/1.000.000 VND của bản cũ.** Mọi lần khóa tiền cần phiếu `LOCK_ESCROW`, kể cả P hoặc K và đơn nhỏ. Kiểm số dư, người bán, trạng thái và giá trước khi mở xác thực OS. Phiếu gắn với phiên, đơn, hai bên, hàng, giá và phiên bản. Kiểm lại lúc thi hành; tiêu thụ phiếu, chiếm tin đăng bằng version, ghi hai chân ledger và khóa tiền cùng transaction.
@@ -36,16 +36,17 @@ Nguồn yêu cầu: bản thiết kế (3), `Enclave bản sửa đổi kế ho�
 
 ### Còn mật khẩu và mã dự phòng
 
-Đăng nhập mật khẩu, nhập lại mật khẩu và một mã dự phòng. Mã được tiêu thụ nguyên tử, gửi thông báo bảo mật; chỉ cấp phiên `recover`, không gọi được chức năng nghiệp vụ. Sau khi tạo Passkey mới có UV, thu hồi Passkey/phiên/G và toàn bộ mã cũ, sinh 8 mã mới hiển thị một lần. Tiền và trạng thái đơn không đổi. Không áp hạn chế 72 giờ của đường email cho đường này. WITHDRAW/ADD_PAYOUT và giới hạn 24 giờ của hai chức năng đó được để đợt sau.
+Đường tùy chọn dành cho người đã tự lưu mã: đăng nhập mật khẩu, nhập lại mật khẩu và một mã dự phòng. Mã được tiêu thụ nguyên tử, gửi thông báo bảo mật; chỉ cấp phiên `recover`, không gọi được chức năng nghiệp vụ. Sau khi tạo Passkey mới có UV, thu hồi Passkey/phiên/G và toàn bộ mã cũ; không ép sinh/lưu bộ mới. Tiền và trạng thái đơn không đổi. Không áp hạn chế 72 giờ của đường email cho đường này. WITHDRAW/ADD_PAYOUT và giới hạn 24 giờ của hai chức năng đó được để đợt sau.
 
 ### Chỉ còn email
 
 - Gửi yêu cầu luôn có phản hồi chung cho email tồn tại và không tồn tại.
-- Liên kết đầu sống 30 phút, dùng một lần; người dùng phải bấm xác nhận mới bắt đầu 24 giờ chờ.
+- Nhập mã 6 số được gửi tới email đã xác minh. Mã 10 phút, tối đa 5 lần sai/mã; giới hạn chung 20 lần sai trong cửa sổ trượt 24 giờ và khóa tối thiểu một giờ. Gửi lại chờ 60 giây, giữ giới hạn theo email/IP và ngân sách người nhận. Yêu cầu gửi mã chưa đổi trạng thái tài khoản.
+- Mã được gắn với ngữ cảnh yêu cầu bí mật trong bộ nhớ trang, tài khoản, email và mục đích. Xác nhận mã chỉ bắt đầu 24 giờ chờ, không cấp phiên đăng nhập/khôi phục hoặc phiếu G. Liên kết đầu sống 30 phút vẫn là đường dự phòng; chỉ POST chủ động mới bắt đầu chờ, và có thể dùng khi OTP ngắn bị khóa. Gửi lại vô hiệu mã/liên kết bắt đầu cũ.
 - RECOVERING khóa giải ngân/phân xử. Có email cảnh báo, nhắc ở mốc 12 giờ và 23 giờ.
 - Đăng nhập bằng Passkey cũ tự hủy khôi phục. Liên kết hủy chỉ hủy đúng yêu cầu tương ứng.
 - Sau thời gian chờ, worker gửi liên kết tiếp tục sống một giờ. Máy chủ vẫn kiểm thời điểm, trạng thái và thời hạn; giao diện không quyết định điều kiện này.
-- Tạo Passkey mới có UV, bắt buộc mật khẩu mới, thu hồi phiên/Passkey/liên kết/G cũ; tạo bộ mã khôi phục mới.
+- Tạo Passkey mới có UV, bắt buộc mật khẩu mới, thu hồi phiên/Passkey/liên kết/G và toàn bộ mã dự phòng cũ; không ép tạo bộ mã mới.
 - Hạn chế giải ngân và phân xử 72 giờ ở **cấp tài khoản**, nên thêm một Passkey khác không bỏ qua được hạn chế.
 - Nếu không hoàn tất trong thời hạn, yêu cầu hết hiệu lực và Passkey cũ được giữ nguyên. Không khóa tiền vô thời hạn vì một yêu cầu khôi phục bỏ dở.
 - Không có cả email lẫn mã dự phòng thì không có khôi phục tự phục vụ. Email bị chiếm lâu dài vẫn là giới hạn của mô hình; thời gian chờ chỉ làm chậm tấn công.
@@ -94,7 +95,7 @@ Tài liệu tích hợp: https://resend.com/docs/api-reference/emails/send-email
 - Migration **11** thêm bảng OTP/quota bền, email gắn với mã và hạn outbox, `user_handle` theo từng credential. Khóa cũ chưa biết handle không bị giả định dùng handle mới của tài khoản; khóa mới có handle được kiểm đúng bản ghi. SQLite cũng thêm cột vào bảng auth đã tồn tại, không chỉ CREATE IF NOT EXISTS.
 - SQLite: dựng lại ràng buộc CHECK có bảo toàn dữ liệu, index, trigger và kiểm khóa ngoại. Có kiểm thử bằng DB cũ đã có trigger quản trị, ví và ledger.
 - Không reset DB, không cộng lại số dư của tài khoản ACTIVE, không tự đánh dấu email cũ là đã xác minh.
-- ACTIVE cũ tiếp tục dùng được; vào Bảo mật để thêm email đã xác minh và tạo mã dự phòng bằng Passkey đang có.
+- ACTIVE cũ tiếp tục dùng được; vào Bảo mật để thêm email đã xác minh. Mã dự phòng là tùy chọn, bộ đã tự lưu vẫn dùng được cho tới khi bị thu hồi hoặc khôi phục hoàn tất.
 - PENDING_EMAIL/PENDING_PASSKEY cũ của người dùng thường chuyển sang BASIC/VERIFIED tương ứng, được vào chợ, vẫn phải xác minh và tạo Passkey trước khi có ví. Trạng thái bootstrap admin được giữ riêng. Tài khoản có ví hoặc lịch sử giao dịch được bảo vệ khỏi dọn nhầm.
 - Giữ luồng bootstrap quản trị có provenance: mật khẩu tạm → đổi mật khẩu → Passkey; không tạo ví admin. Đây là ngoại lệ vận hành cho quản trị cũ, không phải đường đăng ký công khai không email.
 - Cờ sao lưu của credential cũ là chưa biết, không tự suy đoán là chỉ nằm trên thiết bị. Credential mới lưu BE/BS; đăng nhập hợp lệ cập nhật thông tin sao lưu.
@@ -203,11 +204,18 @@ Production dependency không đổi phiên bản. Kiểm thử tại Node 26.4.0
 
 ### Điều kiện trước khi đưa bản auth lên hệ thống chính
 
-1. Xác minh domain gửi tại Resend; cấu hình API key trong Railway secret store, SPF/DKIM và chính sách DMARC theo DNS thật. Không gửi khóa vào chat hoặc commit. Trạng thái cuối người dùng cung cấp là đang chuẩn bị Resend, chưa có bằng chứng gửi thật.
+1. Domain và dịch vụ Resend production đã được cấu hình; bản auth nền đã có bằng chứng người dùng nhận email xác minh/thông báo thêm Passkey. Giữ API key trong Railway secret store, không đưa vào chat/commit. Điều này chưa tự chứng minh nhận email OTP khôi phục mới trên thiết bị thật.
 2. Đặt riêng các khóa HMAC/mail tối thiểu 32 byte; AUTH_PUBLIC_URL cố định HTTPS; giữ khóa cũ khi xoay. Giữ thời gian chính thức, không bật transport test hoặc fault injection trên web công khai.
 3. Xác minh topology proxy thực tế trước bật TRUST_PROXY=1. Bộ kiểm đã chứng minh server trực tiếp bỏ X-Forwarded-For giả; chưa chứng minh cấu hình proxy của nhà cung cấp. Cookie production luôn Secure; vẫn cần thử Set-Cookie/refresh/logout trên hai domain thật. Dùng Session pooler khi cấu hình DB dựa trên search_path theo phiên; chưa nghiệm thu Transaction pooler.
 4. Chụp backup DB đang dùng bằng công cụ của nhà cung cấp, xác nhận khả năng phục hồi trước migration; không xóa/reset DB. Migration được tiến lên; không tự phục hồi backup cũ sau khi có nghiệp vụ tiền mới phát sinh.
 5. Công khai/push mã auth và gộp nhánh sau khi có ủy quyền đúng phạm vi. Đồng ý công khai bản vận chuyển d5d6d27 trước đây không được trình bày thành một lần duyệt mới cho mọi mã auth.
 6. Nghiệm thu thật: hộp thư do chủ hệ thống kiểm soát, Windows Hello, Android Chrome và iOS Safari nếu có thiết bị; hủy/hết hạn Passkey, quay lại từ email trên thiết bị khác, tải lại/đổi tài khoản/hai tab. Không yêu cầu người dùng tự xem cấu hình điện thoại để hệ thống giả thành công.
 
-Hiện trạng: mã và các kiểm tra tự động nêu trên hoàn tất tại checkout làm việc; **chưa triển khai bản auth mới, chưa gửi email thật, chưa có bằng chứng sinh trắc học thiết bị thật**. Tài liệu này không tuyên bố toàn bộ Enclave hoàn hảo hoặc bảo đảm không bao giờ xảy ra lỗi.
+Hiện trạng bản nền ngày 25/10: PR #28 đã triển khai; người dùng xác nhận nhận email, tạo Passkey và đăng nhập thành công bằng mật khẩu lẫn Passkey. Chưa xác định loại thiết bị/phương thức UV. Trạng thái phát hành phần điều chỉnh khôi phục email được ghi ở PR tương ứng; các bảng kiểm cũ là lịch sử, không thay cho nghiệm thu bản này. Tài liệu không tuyên bố toàn bộ Enclave hoàn hảo hoặc bảo đảm không bao giờ xảy ra lỗi.
+
+## 12. Điều chỉnh trải nghiệm khôi phục qua email ngày 25/10/2026
+
+- Theo yêu cầu mới, bỏ bước lưu mã sau kích hoạt và sau khôi phục; không buộc người dùng chuẩn bị hoặc nhớ nơi lưu mã. Mã dự phòng cũ không tự bị hủy chỉ vì cập nhật phần mềm. Hoàn tất khôi phục hoặc chủ động tạo lại mới vô hiệu bộ cũ.
+- Không đổi schema, khóa bí mật hoặc thời gian 24 giờ chờ / 1 giờ hoàn tất / 72 giờ hạn chế sau đường email. Không biến OTP email thành Passkey hoặc quyền giao dịch.
+- Kiểm tra mới: SQLite auth 96, verification 47, email recovery 24; PostgreSQL 98 + 47 + 24; UI auth 31, verification 20, email recovery 15; migration/key/outbox/cookie đạt. Các bộ dùng DB/mail/bộ xác thực riêng cho kiểm thử, không phải bằng chứng email khôi phục và sinh trắc học trên thiết bị thật.
+- `POST /passkeys/recovery/email/request` trả ngữ cảnh yêu cầu và metadata thời hạn chung, không trả OTP hay tiết lộ tài khoản. `POST /passkeys/recovery/email/verify` nhận `requestToken` và `code`, chỉ trả thời điểm được tiếp tục nếu hợp lệ. Gửi sai được ghi bền trước trả lỗi; mã và liên kết bắt đầu chỉ thành công một lần kể cả có yêu cầu đồng thời.
