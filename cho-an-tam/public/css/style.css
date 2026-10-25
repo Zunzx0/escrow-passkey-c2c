@@ -729,6 +729,12 @@ table.data th.num, table.data td.num { text-align: right; }
 
 /* ---------------------------------------------------------------- màn hình hẹp */
 
+/* iOS tự zoom khi ô nhập nhỏ hơn 16px nhận focus. Giữ cỡ chữ dễ đọc cả
+   khi điện thoại xoay ngang; không khóa thao tác pinch-to-zoom của người dùng. */
+@media (max-width: 860px), (any-pointer: coarse) {
+  input, select, textarea { font-size: max(16px, 1em); }
+}
+
 @media (max-width: 1080px) {
   .cat-grid { grid-template-columns: repeat(5, 1fr); }
   .cat:nth-child(5n) { border-right: 0; }

@@ -643,9 +643,9 @@ const App = (() => {
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
-        <div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true">
+        <div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
           <div class="modal-head">
-            <h2>${esc(title)}</h2>
+            <h2 id="modalTitle">${esc(title)}</h2>
             ${dismissible ? `<button class="icon-btn" data-act="modal-close" aria-label="Đóng">${ico('x', 18)}</button>` : ''}
           </div>
           <div class="modal-body">${body}</div>
@@ -653,7 +653,12 @@ const App = (() => {
         </div>
       </div>`;
     const firstInput = root.querySelector('input, select, textarea');
-    if (firstInput) firstInput.focus();
+    // Chuyển OTP → Passkey có ô tên tùy chọn: tự focus ô này trên iPhone
+    // sẽ mở lại bàn phím và có thể zoom viewport trước hộp thoại hệ điều hành.
+    // Thiết bị cảm ứng focus hộp thoại có tên để vẫn hỗ trợ trình đọc màn hình.
+    const touchDevice = isMobileBrowser() || (typeof window.matchMedia === 'function' && window.matchMedia('(any-pointer: coarse)').matches);
+    const focusTarget = firstInput && !touchDevice ? firstInput : root.querySelector('[role="dialog"]');
+    focusTarget?.focus({ preventScroll: true });
     return root;
   }
 
