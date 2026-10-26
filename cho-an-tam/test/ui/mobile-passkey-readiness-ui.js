@@ -41,6 +41,27 @@ async function main(){
   p.d.getElementById('activationDeviceName').focus();
   ok(p.d.activeElement.id==='activationDeviceName','optional Passkey name remains editable when selected');
  }finally{p.close();}
+ // Safari chỉ mở Face ID khi create() chạy ngay trong lượt chạm: options phải có sẵn trước khi chạm.
+ p=await page({ua:iphone});
+ try{
+  let n=0;p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'pre-'+(++n),options:{}});
+  await register(p);await sleep(120);
+  ok(p.count('POST /api/passkeys/register/passkey/options')===1,'activation screen prefetches registration options before the tap');
+  const used=[];
+  p.w.SimpleWebAuthnBrowser.startRegistration=async({optionsJSON})=>{used.push(optionsJSON);const e=new Error('denied');e.name='NotAllowedError';throw e;};
+  p.click(p.d.querySelector('[data-act="do-enroll-passkey"]'));
+  ok(used.length===1,'tap calls WebAuthn synchronously, with no network wait inside the user gesture');
+  await sleep(220);
+  ok(p.d.querySelector('#modalRoot .operation-error')&&p.count('POST /api/passkeys/register/passkey/verify')===0,'denied ceremony shows an error and never verifies');
+  ok(p.count('POST /api/passkeys/register/passkey/options')===2,'failed ceremony prefetches fresh options for the next tap');
+  const verified=[];
+  p.routes['POST /api/passkeys/register/passkey/verify']=(opts)=>{verified.push(JSON.parse(opts.body));return json(400,{error:'VERIFICATION_FAILED',message:'x'});};
+  p.w.SimpleWebAuthnBrowser.startRegistration=async()=>{used.push(1);return {id:'cred'};};
+  p.click(p.d.querySelector('[data-act="do-enroll-passkey"]'));
+  ok(used.length===2,'retry tap is synchronous too');
+  await sleep(220);
+  ok(verified[0]?.registrationSessionId==='pre-2','verify uses the prefetched registration session, each one only once');
+ }finally{p.close();}
  p=await page({ua:ipadDesktop,coarse:true});
  try{await register(p);ok(p.d.activeElement.getAttribute('role')==='dialog','touch tablet with a desktop user agent avoids automatic input focus');}finally{p.close();}
  p=await page({ua:desktop});

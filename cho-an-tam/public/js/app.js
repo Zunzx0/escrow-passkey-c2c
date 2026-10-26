@@ -428,6 +428,8 @@ const App = (() => {
         if(body && inModal && generation===modalGeneration) {
           body.querySelector('.operation-error')?.remove();
           const message=document.createElement('div');message.className='note note-danger operation-error';message.setAttribute('role','alert');message.textContent=e.message;body.prepend(message);
+          // Trên điện thoại modal thường đã cuộn xuống tới nút bấm: không cuộn lên thì lỗi nằm khuất, người dùng tưởng "không có gì xảy ra".
+          message.scrollIntoView?.({block:'nearest'});
         } else toast(e.message, 'err');
       }
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
@@ -919,6 +921,31 @@ const App = (() => {
       console.error('[passkey-readiness:setup]', error);
       renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
+    if (!bootstrap) prefetchEnrollOptions();
+  }
+
+  // Safari trên iPhone chỉ mở Face ID/Touch ID khi navigator.credentials.create() chạy ngay trong
+  // lượt chạm. Chạm xong mới chờ mạng lấy options (preflight CORS + POST tới API) thì Safari từ chối
+  // thầm bằng NotAllowedError, không hiện hộp thoại nào. Vì vậy options được lấy sẵn lúc mở màn kích
+  // hoạt, để lúc chạm gọi WebAuthn luôn mà không await gì trước đó. Mỗi bộ options chỉ dùng một lần.
+  // Tuổi tối đa thấp hơn CHALLENGE_TTL_SECONDS mặc định (300s) của máy chủ.
+  const ENROLL_PREFETCH_MAX_AGE_MS = 240000;
+  let enrollPrefetch = null;
+
+  function prefetchEnrollOptions() {
+    const slot = { epoch: state.sessionEpoch, at: Date.now(), value: null };
+    enrollPrefetch = slot;
+    api('/passkeys/register/passkey/options', { method: 'POST', body: {} })
+      .then((prepared) => { slot.value = prepared; })
+      // Lấy sẵn thất bại thì lúc chạm sẽ gọi lại theo đường thường và báo lỗi ở đó.
+      .catch(() => { if (enrollPrefetch === slot) enrollPrefetch = null; });
+  }
+
+  function takeEnrollOptions() {
+    const slot = enrollPrefetch;
+    enrollPrefetch = null;
+    if (!slot || !slot.value || slot.epoch !== state.sessionEpoch || Date.now() - slot.at > ENROLL_PREFETCH_MAX_AGE_MS) return null;
+    return slot.value;
   }
 
   /**
@@ -976,12 +1003,18 @@ const App = (() => {
     }
     await guard('enroll', btn, async () => {
       const deviceName=$('#activationDeviceName')?.value.trim()||suggestedDeviceName();
-      let prepared;
-      try{prepared=await api('/passkeys/register/passkey/options',{method:'POST',body:{}});}
-      catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
+      // Có options lấy sẵn thì KHÔNG được await gì trước startRegistration (xem prefetchEnrollOptions).
+      let prepared=takeEnrollOptions();
+      if(!prepared){
+        try{prepared=await api('/passkeys/register/passkey/options',{method:'POST',body:{}});}
+        catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
+      }
       const {registrationSessionId,options}=prepared;
-      const attResp = await webauthn('enroll', () =>
-        SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));
+      let attResp;
+      try{attResp = await webauthn('enroll', () =>
+        SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));}
+      // Lần thử sau cũng phải có options sẵn, nếu không iPhone lại bị chặn y như vậy.
+      catch(e){prefetchEnrollOptions();throw e;}
       let result;
       // Bằng chứng email có thể hết hạn trong lúc người dùng ở hộp thoại hệ điều hành: quay lại bước email,
       // giữ nguyên authUi.activation và KHÔNG tự mở lại hộp thoại Passkey.
