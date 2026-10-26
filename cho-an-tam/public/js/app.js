@@ -862,6 +862,7 @@ const App = (() => {
     }
     if(tab==='login') {
       panel.insertAdjacentHTML('beforeend','<div class="row mt-3"><button class="btn btn-ghost btn-sm" data-act="forgot-password">Quên mật khẩu</button><button class="btn btn-ghost btn-sm" data-act="lost-passkey">Mất Passkey?</button></div>');
+      prefetchOptions('login', '/passkeys/login/options');
       startConditionalLogin();
     }
   }
@@ -921,30 +922,30 @@ const App = (() => {
       console.error('[passkey-readiness:setup]', error);
       renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
-    if (!bootstrap) prefetchEnrollOptions();
+    if (!bootstrap) prefetchOptions('enroll', '/passkeys/register/passkey/options');
   }
 
-  // Safari trên iPhone chỉ mở Face ID/Touch ID khi navigator.credentials.create() chạy ngay trong
-  // lượt chạm. Chạm xong mới chờ mạng lấy options (preflight CORS + POST tới API) thì Safari từ chối
-  // thầm bằng NotAllowedError, không hiện hộp thoại nào. Vì vậy options được lấy sẵn lúc mở màn kích
-  // hoạt, để lúc chạm gọi WebAuthn luôn mà không await gì trước đó. Mỗi bộ options chỉ dùng một lần.
-  // Tuổi tối đa thấp hơn CHALLENGE_TTL_SECONDS mặc định (300s) của máy chủ.
-  const ENROLL_PREFETCH_MAX_AGE_MS = 240000;
-  let enrollPrefetch = null;
+  // Safari trên iPhone chỉ mở Face ID/Touch ID khi navigator.credentials.create()/get() chạy ngay
+  // trong lượt chạm. Chạm xong mới chờ mạng lấy options (preflight CORS + POST tới API) thì Safari
+  // từ chối thầm bằng NotAllowedError, không hiện hộp thoại nào. Vì vậy options được lấy sẵn lúc mở
+  // màn hình, để lúc chạm gọi WebAuthn luôn mà không await gì trước đó. Mỗi bộ options chỉ dùng một
+  // lần. Tuổi tối đa thấp hơn hạn challenge 300s của máy chủ.
+  const PREFETCH_MAX_AGE_MS = 240000;
+  const webauthnPrefetch = {};
 
-  function prefetchEnrollOptions() {
+  function prefetchOptions(key, path) {
     const slot = { epoch: state.sessionEpoch, at: Date.now(), value: null };
-    enrollPrefetch = slot;
-    api('/passkeys/register/passkey/options', { method: 'POST', body: {} })
+    webauthnPrefetch[key] = slot;
+    api(path, { method: 'POST', body: {} })
       .then((prepared) => { slot.value = prepared; })
       // Lấy sẵn thất bại thì lúc chạm sẽ gọi lại theo đường thường và báo lỗi ở đó.
-      .catch(() => { if (enrollPrefetch === slot) enrollPrefetch = null; });
+      .catch(() => { if (webauthnPrefetch[key] === slot) delete webauthnPrefetch[key]; });
   }
 
-  function takeEnrollOptions() {
-    const slot = enrollPrefetch;
-    enrollPrefetch = null;
-    if (!slot || !slot.value || slot.epoch !== state.sessionEpoch || Date.now() - slot.at > ENROLL_PREFETCH_MAX_AGE_MS) return null;
+  function takePrefetched(key) {
+    const slot = webauthnPrefetch[key];
+    delete webauthnPrefetch[key];
+    if (!slot || !slot.value || slot.epoch !== state.sessionEpoch || Date.now() - slot.at > PREFETCH_MAX_AGE_MS) return null;
     return slot.value;
   }
 
@@ -1003,8 +1004,8 @@ const App = (() => {
     }
     await guard('enroll', btn, async () => {
       const deviceName=$('#activationDeviceName')?.value.trim()||suggestedDeviceName();
-      // Có options lấy sẵn thì KHÔNG được await gì trước startRegistration (xem prefetchEnrollOptions).
-      let prepared=takeEnrollOptions();
+      // Có options lấy sẵn thì KHÔNG được await gì trước startRegistration (xem prefetchOptions).
+      let prepared=takePrefetched('enroll');
       if(!prepared){
         try{prepared=await api('/passkeys/register/passkey/options',{method:'POST',body:{}});}
         catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
@@ -1014,7 +1015,7 @@ const App = (() => {
       try{attResp = await webauthn('enroll', () =>
         SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));}
       // Lần thử sau cũng phải có options sẵn, nếu không iPhone lại bị chặn y như vậy.
-      catch(e){prefetchEnrollOptions();throw e;}
+      catch(e){prefetchOptions('enroll','/passkeys/register/passkey/options');throw e;}
       let result;
       // Bằng chứng email có thể hết hạn trong lúc người dùng ở hộp thoại hệ điều hành: quay lại bước email,
       // giữ nguyên authUi.activation và KHÔNG tự mở lại hộp thoại Passkey.
@@ -1048,9 +1049,14 @@ const App = (() => {
 
   async function doLoginPasskey(btn) {
     await guard('login', btn, async () => {
-      const { authenticationSessionId, options } = await api('/passkeys/login/options', { method: 'POST' });
-      const assertion = await webauthn('login', () =>
-        SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
+      // Như doEnrollPasskey: dùng options lấy sẵn để get() chạy ngay trong lượt chạm trên iPhone.
+      const prepared = takePrefetched('login') || await api('/passkeys/login/options', { method: 'POST' });
+      const { authenticationSessionId, options } = prepared;
+      let assertion;
+      try {
+        assertion = await webauthn('login', () =>
+          SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
+      } catch (e) { prefetchOptions('login', '/passkeys/login/options'); throw e; }
       const result = await api('/passkeys/login/verify', {
         method: 'POST', body: { authenticationSessionId, response: assertion },
       });
@@ -2529,6 +2535,7 @@ const App = (() => {
   function openRecoveryPasskey(emailRecovery){
     authUi.recoveryEmail=emailRecovery;
     openModal({title:'Tạo Passkey khôi phục',dismissible:false,body:`<p>Tạo Passkey mới bằng vân tay, khuôn mặt hoặc mã PIN thiết bị. Các Passkey cũ sẽ bị thu hồi khi hoàn tất.</p>${authField('recoveryDeviceName','Tên Passkey','text',suggestedDeviceName())}${emailRecovery?authField('recoveryNewPassword','Mật khẩu mới bắt buộc','password'):''}`,footer:'<button class="btn" data-act="do-logout">Đăng xuất</button><button class="btn btn-primary" data-act="recovery-passkey-create">Tạo Passkey mới</button>'});
+    prefetchOptions('recovery','/passkeys/recovery/passkey/options');
   }
   async function handleAccountAction(){
     const hash=location.hash || '';if(!hash.startsWith('#/account-action?'))return;
@@ -5190,7 +5197,7 @@ const App = (() => {
       });
     },
     'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
-    'recovery-passkey-create':async(el)=>{const deviceName=$('#recoveryDeviceName').value,newPassword=$('#recoveryNewPassword')?.value;await guard('recovery-create',el,async()=>{const {registrationSessionId,options}=await api('/passkeys/recovery/passkey/options',{method:'POST',body:{}});const response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});await afterSession(result,'Đã khôi phục tài khoản.');});},
+    'recovery-passkey-create':async(el)=>{const deviceName=$('#recoveryDeviceName').value,newPassword=$('#recoveryNewPassword')?.value;await guard('recovery-create',el,async()=>{const {registrationSessionId,options}=takePrefetched('recovery')||await api('/passkeys/recovery/passkey/options',{method:'POST',body:{}});let response;try{response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));}catch(e){prefetchOptions('recovery','/passkeys/recovery/passkey/options');throw e;}const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});await afterSession(result,'Đã khôi phục tài khoản.');});},
     'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
     'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');toast('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
     'recovery-regenerate':async(el)=>{await guard('regenerate-codes',el,async()=>{const reauthGrant=await getAccountGrant('REGENERATE_RECOVERY');const result=await api('/passkeys/recovery-codes/regenerate',{method:'POST',body:{reauthGrant}});showRecoveryCodes(result.recoveryCodes);});},

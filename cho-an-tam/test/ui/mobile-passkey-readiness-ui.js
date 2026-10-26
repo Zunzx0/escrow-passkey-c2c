@@ -62,6 +62,38 @@ async function main(){
   await sleep(220);
   ok(verified[0]?.registrationSessionId==='pre-2','verify uses the prefetched registration session, each one only once');
  }finally{p.close();}
+ // Đăng nhập bằng Passkey: get() cũng phải chạy ngay trong lượt chạm.
+ p=await page({ua:iphone});
+ try{
+  let n=0;p.routes['POST /api/passkeys/login/options']=()=>json(200,{authenticationSessionId:'login-'+(++n),options:{}});
+  p.click(p.d.querySelector('[data-act="auth-tab"][data-tab="login"]'));await sleep(150);
+  const before=p.count('POST /api/passkeys/login/options');
+  ok(before>=1,'login tab prefetches authentication options before the tap');
+  const used=[];
+  p.w.SimpleWebAuthnBrowser.startAuthentication=async({useBrowserAutofill})=>{if(useBrowserAutofill)return new Promise(()=>{});used.push(1);const e=new Error('denied');e.name='NotAllowedError';throw e;};
+  p.click(p.d.querySelector('[data-act="do-login-passkey"]'));
+  ok(used.length===1,'Passkey login tap calls WebAuthn synchronously');
+  await sleep(220);
+  ok(p.count('POST /api/passkeys/login/options')===before+1&&p.count('POST /api/passkeys/login/verify')===0,'failed login prefetches fresh options and never verifies');
+  p.click(p.d.querySelector('[data-act="do-login-passkey"]'));
+  ok(used.length===2,'login retry tap is synchronous too');
+ }finally{p.close();}
+ // Tạo Passkey khôi phục sau liên kết email: create() cũng phải chạy ngay trong lượt chạm.
+ p=await page({ua:iphone});
+ try{
+  p.routes['POST /api/passkeys/recovery/email/authorize']=()=>json(200,{token:'recover-token',scope:'recover',recoveryMethod:'EMAIL',user:{id:'flow',displayName:'Mobile Test',role:'BUYER',accountStatus:'RECOVERING',emailVerified:true}});
+  let n=0;p.routes['POST /api/passkeys/recovery/passkey/options']=()=>json(200,{registrationSessionId:'rec-'+(++n),options:{}});
+  p.w.location.hash='#/account-action?purpose=recovery-finish&token=link-token';await sleep(200);
+  p.click(p.d.querySelector('[data-act="recovery-link-confirm"]'));await sleep(250);
+  ok(p.count('POST /api/passkeys/recovery/passkey/options')===1,'recovery Passkey screen prefetches registration options');
+  const used=[];
+  p.w.SimpleWebAuthnBrowser.startRegistration=async()=>{used.push(1);const e=new Error('denied');e.name='NotAllowedError';throw e;};
+  p.d.getElementById('recoveryNewPassword').value='MatKhau-Moi-2026!';
+  p.click(p.d.querySelector('[data-act="recovery-passkey-create"]'));
+  ok(used.length===1,'recovery Passkey tap calls WebAuthn synchronously');
+  await sleep(220);
+  ok(p.count('POST /api/passkeys/recovery/passkey/options')===2&&p.count('POST /api/passkeys/recovery/passkey/verify')===0,'failed recovery ceremony prefetches again and never verifies');
+ }finally{p.close();}
  p=await page({ua:ipadDesktop,coarse:true});
  try{await register(p);ok(p.d.activeElement.getAttribute('role')==='dialog','touch tablet with a desktop user agent avoids automatic input focus');}finally{p.close();}
  p=await page({ua:desktop});
