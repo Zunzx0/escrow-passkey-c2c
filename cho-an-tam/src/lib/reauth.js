@@ -52,6 +52,11 @@ function requireSessionId(sessionId) {
 
 async function issueGrant({ userId, sessionId, transactionId, disputeId, action, decision, contextHash, credentialId, targetId }) {
   requireSessionId(sessionId);
+  // A restriction can start while the authenticator prompt is open. Check again
+  // before issuance, as well as at lookup and atomic consumption during settlement.
+  if ([ACTIONS.LOCK, ACTIONS.RELEASE, ACTIONS.ADJUDICATE].includes(action)) {
+    await require('./accountSecurity').assertMoneyAllowed(userId, action);
+  }
   // Token gốc CSPRNG 32 byte, encode base64url; server chỉ lưu SHA-256 của nó.
   const rawToken = crypto.randomBytes(32).toString('base64url');
   const tokenHash = crypto.createHash('sha256').update(rawToken, 'utf8').digest('hex');
@@ -125,7 +130,7 @@ async function markGrantUsed(grantId) {
   if(require('./session').sessionProblem(await require('./session').getSession(grant.session_id))) throw new AppError(401,'REAUTH_REQUIRED','Phiên cấp phiếu đã bị thu hồi hoặc hết hạn.');
   const actor=await db.prepare('SELECT is_active,account_status FROM users WHERE id=?').get(grant.user_id);
   if(!actor?.is_active || !['ACTIVE','RECOVERING'].includes(actor.account_status)) throw new AppError(403,'USER_INACTIVE','Tài khoản không thể thực hiện thao tác bảo mật lúc này.');
-  if(grant && [ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(grant.action)) await require('./accountSecurity').assertMoneyAllowed(grant.user_id,grant.action);
+  if(grant && [ACTIONS.LOCK,ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(grant.action)) await require('./accountSecurity').assertMoneyAllowed(grant.user_id,grant.action);
   const result = await db
     .prepare('UPDATE reauth_grants SET used_at = ? WHERE id = ? AND used_at IS NULL AND expires_at > ?')
     .run(nowIso(), grantId,nowIso());
@@ -136,7 +141,7 @@ async function markGrantUsed(grantId) {
 
 /** Tra phiếu và ném lỗi nếu không hợp lệ. Không tiêu thụ phiếu. */
 async function requireGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken, message,targetId }) {
-  if([ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(action)) await require('./accountSecurity').assertMoneyAllowed(userId,action);
+  if([ACTIONS.LOCK,ACTIONS.RELEASE,ACTIONS.ADJUDICATE].includes(action)) await require('./accountSecurity').assertMoneyAllowed(userId,action);
   const grant = await findValidGrant({ userId, sessionId, transactionId, disputeId, action, decision, rawToken,targetId });
   if (!grant) {
     throw new AppError(

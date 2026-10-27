@@ -28,6 +28,9 @@ const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const { onDisputeResolved } = require('../lib/notifications');
 const { isProvenAdmin, UNVERIFIED_ADMIN_ROLE } = require('../lib/adminProvenance');
 const { settleListing } = require('../lib/listingLifecycle');
+const {transitionOrder,settleOrder}=require('../lib/orderLifecycle');
+const {serializeShipping,loadShipping}=require('../lib/orderShipping');
+const media=require('../lib/mediaService');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
 // challenge đều ghi một bản ghi vào cơ sở dữ liệu.
@@ -87,6 +90,8 @@ function serializeTxn(t) {
     status: t.status,
     escrowStatus: t.escrow_status,
     version: t.version,
+    inspectedAt:t.inspected_at||null,inspectedBy:t.inspected_by||null,
+    receivedConfirmedAt:t.received_confirmed_at||null,receivedConfirmedBy:t.received_confirmed_by||null,
     listingId: t.listing_id || null,
     listingImage: t.listing_image || null,
     buyerName: t.buyer_name || null,
@@ -114,7 +119,12 @@ function serializeDispute(d) {
     transactionId: d.transaction_id,
     createdBy: d.created_by,
     createdByName: d.created_by_name || null,
-    openedBy: d.created_by === d.buyer_id ? 'BUYER' : 'SELLER',
+    openedBy:d.opened_by|| (d.created_by===d.buyer_id?'BUYER':'SELLER'),
+    type:d.type,
+    revision:d.revision,
+    buyerNeverConfirmedReceipt:!!d.buyer_never_confirmed_receipt,
+    evidenceDueAt:d.evidence_due_at||require('../lib/orderPolicy').afterHours(d.created_at,72),
+    adminDueAt:d.admin_due_at||require('../lib/orderPolicy').afterHours(d.created_at,168),
     reason: d.reason,
     status: d.status,
     adminId: d.admin_id,
@@ -127,7 +137,7 @@ function serializeDispute(d) {
 const DISPUTE_SELECT = `
   SELECT d.*, u.display_name AS created_by_name, t.buyer_id AS buyer_id
   FROM disputes d
-  JOIN users u ON u.id = d.created_by
+  LEFT JOIN users u ON u.id = d.created_by
   JOIN transactions t ON t.id = d.transaction_id
 `;
 
@@ -150,8 +160,50 @@ router.get('/disputes/:id', async (req, res, next) => {
   try {
     const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
     if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
-    res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
+    const transaction=serializeTxn(await loadTxnDetail(dispute.transaction_id));
+    transaction.shipping=dispute.admin_id===req.user.id?serializeShipping(await loadShipping(dispute.transaction_id)):null;
+    const messages=await db.prepare('SELECT id,actor_id AS "actorId",message,created_at AS "createdAt" FROM dispute_messages WHERE dispute_id=? ORDER BY created_at,id').all(dispute.id);
+    // Photos and evidence are listed only for the independent admin who claimed this case;
+    // an unclaimed viewer gets empty arrays and the image routes answer 404 to them.
+    transaction.images=await media.orderImagesFor({id:dispute.transaction_id,buyer_id:transaction.buyerId,seller_id:transaction.sellerId,listing_id:transaction.listingId,status:transaction.status,escrow_status:transaction.escrowStatus},req.user);
+    res.json({dispute:serializeDispute(dispute),transaction,messages,imageEvidence:await media.imageEvidence(dispute,req.user)});
   } catch (e) {
+    next(e);
+  }
+});
+
+// Address access is limited to the independent admin who explicitly claims the case.
+router.post('/disputes/:id/claim',async(req,res,next)=>{
+  try{
+    await db.transaction(async()=>{
+      const d=await db.prepare('SELECT * FROM disputes WHERE id=?').get(req.params.id);
+      if(!d)throw new AppError(404,'DISPUTE_NOT_FOUND');
+      const txn=await db.prepare('SELECT * FROM transactions WHERE id=?').get(d.transaction_id);
+      assertIndependentAdjudicator(txn,req.user.id);
+      if(d.status!=='OPEN')throw new AppError(409,'DISPUTE_NOT_OPEN','Hồ sơ đã được xử lý.');
+      if(d.admin_id===req.user.id)return;
+      if(d.admin_id)throw new AppError(409,'DISPUTE_ASSIGNED','Hồ sơ đã có quản trị viên phụ trách.');
+      await transitionOrder(txn,{});
+      const r=await db.prepare("UPDATE disputes SET admin_id=?,revision=revision+1 WHERE id=? AND admin_id IS NULL AND status='OPEN' AND revision=?").run(req.user.id,d.id,d.revision);
+      if(r.changes!==1)throw new AppError(409,'DISPUTE_ASSIGNED','Hồ sơ vừa được tiếp nhận ở nơi khác.');
+      await appendAuditLog(db,{
+        transactionId:txn.id,
+        actorId:req.user.id,
+        action:'DISPUTE_CLAIMED',
+        oldStatus:txn.status,
+        newStatus:txn.status,
+        eventData:{
+          disputeId:d.id
+        }
+      });
+    })();
+    const d=await db.prepare(`${DISPUTE_SELECT} WHERE d.id=?`).get(req.params.id),transaction=serializeTxn(await loadTxnDetail(d.transaction_id));
+    transaction.shipping=serializeShipping(await loadShipping(d.transaction_id));
+    transaction.images=await media.orderImagesFor({id:d.transaction_id,buyer_id:transaction.buyerId,seller_id:transaction.sellerId,listing_id:transaction.listingId,status:transaction.status,escrow_status:transaction.escrowStatus},req.user);
+    res.json({
+      dispute:serializeDispute(d),transaction,imageEvidence:await media.imageEvidence(d,req.user)
+    });
+  } catch(e){
     next(e);
   }
 });
@@ -178,7 +230,8 @@ router.get('/disputes/:id', async (req, res, next) => {
 // chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
 function buildAdjudicationContext(dispute, txn, decision, adminId,sessionId=null) {
   return {
-    v: 1,
+    v: 2,
+    orderVersion:txn.version,disputeRevision:dispute.revision||0,disputeType:dispute.type||null,
     action: ACTIONS.ADJUDICATE,
     adminId,
     sessionId,
@@ -394,215 +447,56 @@ async function authorizeAdjudication(req, decision) {
   return { dispute, txn, grant };
 }
 
-router.post('/disputes/:id/refund', sensitiveLimiter, async (req, res, next) => {
-  try {
-    const { requestId } = req.body || {};
-    if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
-
-    const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
-    if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
-    const parties = await db.prepare('SELECT buyer_id, seller_id FROM transactions WHERE id = ?').get(dispute.transaction_id);
-    if (!parties) throw new AppError(404, 'TRANSACTION_NOT_FOUND');
-    assertIndependentAdjudicator(parties, req.user.id);
-    if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
-
-    const fingerprint = fingerprintRequest({
-      actorId: req.user.id,
-      action: 'ADMIN_REFUND',
-      transactionId: dispute.transaction_id,
-      amount: null,
-    });
-    const escrowLegKey = `refund:${requestId}:escrow`;
-    if (await checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
+async function adjudicate(req,decision) {
+  const {
+    requestId
+  }
+  =req.body||{};
+  if(typeof requestId!=='string'||!requestId||requestId.length>128||requestId.trim()!==requestId||/[\u0000-\u001f\u007f]/u.test(requestId))throw new AppError(400,'VALIDATION_ERROR','Thiếu mã yêu cầu hợp lệ.');
+  let txn;
+  await db.transaction(async()=>{
+    const {
+      dispute,current
     }
-
-    // Sáu điều kiện của lệnh phân xử, gồm cả phiếu uỷ quyền ràng buộc đúng quyết định REFUND.
-    const { txn, grant } = await authorizeAdjudication(req, DECISIONS.REFUND);
-
-    const runTxn = db.transaction(async () => {
-      const freshTxn=await loadTxnDetail(txn.id);
-      assertContextUnchanged(grant,contextDigest(buildAdjudicationContext(dispute,freshTxn,DECISIONS.REFUND,req.user.id,req.user.sessionId)));
-      // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ, là câu lệnh ĐẦU TIÊN của giao dịch: hai lệnh phân
-      // xử đua nhau cho cùng một hồ sơ (dù cùng quyết định hay khác quyết định, dù đã qua được
-      // bước kiểm `dispute.status !== 'OPEN'` ở ngoài vì đọc trước khi bên thắng commit) thì chỉ
-      // một request đổi được status. Trước đây hồ sơ chỉ được bảo vệ GIÁN TIẾP qua version check
-      // của applyTransactionStatus (hoặc tình cờ qua CHECK constraint của ví) — đúng nhưng mong
-      // manh: bên thua vẫn kịp sửa ví trước khi bị rollback, và lỗi trả về là CONSTRAINT_VIOLATION
-      // mơ hồ thay vì một lý do rõ ràng. Chốt chặn riêng ở đây làm bên thua dừng lại NGAY, trước
-      // khi chạm tới ví.
-      const claimed = await db
-        .prepare(`UPDATE disputes SET status = 'RESOLVED_REFUND', admin_id = ?, admin_decision = 'REFUND', resolved_at = ?
-                   WHERE id = ? AND status = 'OPEN'`)
-        .run(req.user.id, nowIso(), dispute.id);
-      if (claimed.changes !== 1) {
-        throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp đã được xử lý ở nơi khác');
-      }
-
-      // Đọc ví BÊN TRONG giao dịch: ví ký quỹ dùng chung cho mọi đơn, đọc ở ngoài thì một thao
-      // tác khác chen vào giữa lúc đọc và lúc ghi sẽ làm version cũ, gây xung đột giả.
-      const escrowWallet = await getEscrowWallet();
-      const buyerWallet = await getUserWallet(txn.buyer_id);
-      const updated = await applyOrderedWalletUpdates([
-        { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
-        { wallet: buyerWallet, availableDelta: txn.amount, lockedDelta: 0 },
-      ], 'admin-refund');
-      await insertWalletEntry({
-        walletId: escrowWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_REFUND_DEBIT',
-        availableDelta: 0,
-        lockedDelta: -txn.amount,
-        walletAfter: updated.get(escrowWallet.id),
-        idempotencyKey: escrowLegKey,
-        requestFingerprint: fingerprint,
-        description: 'Admin hoàn tiền từ Escrow',
-      });
-      await insertWalletEntry({
-        walletId: buyerWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_REFUND_CREDIT',
-        availableDelta: txn.amount,
-        lockedDelta: 0,
-        walletAfter: updated.get(buyerWallet.id),
-        idempotencyKey: `refund:${requestId}:buyer`,
-        requestFingerprint: fingerprint,
-        description: 'Người mua nhận hoàn tiền',
-      });
-
-      await applyTransactionStatus(txn, { status: 'REFUNDED', escrowStatus: 'REFUNDED' });
-
-      // Tiền đã về người mua thì sản phẩm mở bán lại — cùng giao dịch, nên rollback ở bất kỳ
-      // bước nào phía sau cũng đưa tin đăng về LOCKED cùng với tiền.
-      await settleListing(txn, 'REFUND');
-
-      // Tiêu thụ phiếu trong CÙNG giao dịch cơ sở dữ liệu thực hiện việc chuyển tiền, nên
-      // không có khoảnh khắc nào phiếu vừa còn hiệu lực vừa đã được dùng.
-      await markGrantUsed(grant.id);
-
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'ADMIN_REFUND',
-        oldStatus: 'DISPUTED',
-        newStatus: 'REFUNDED',
-        eventData: { amount: txn.amount, requestId, disputeId: dispute.id, decision: 'REFUND' },
-      });
+    =await (async()=>{
+      const d=await db.prepare(`${DISPUTE_SELECT} WHERE d.id=?`).get(req.params.id);
+      if(!d)throw new AppError(404,'DISPUTE_NOT_FOUND');
+      const t=await loadTxnDetail(d.transaction_id);
+      assertIndependentAdjudicator(t,req.user.id);
+      return {
+        dispute:d,current:t
+      };
+    })();
+    txn=current;
+    const key=`${decision==='REFUND'?'refund':'release'}:${txn.id}:debit`,entry=await db.prepare('SELECT request_id FROM wallet_entries WHERE idempotency_key=?').get(key);
+    if(dispute.status===`RESOLVED_${decision}`&&entry?.request_id===requestId)return;
+    const authorized=await authorizeAdjudication(req,decision);
+    await settleOrder(txn,{
+      decision,actorId:req.user.id,requestId,grant:authorized.grant,dispute:authorized.dispute,finalStatus:decision==='REFUND'?'REFUNDED':'RELEASED',reason:decision==='REFUND'?'admin_refund':null,action:decision==='REFUND'?'ADMIN_REFUND':'ADMIN_RELEASE'
     });
-    await runTxn();
-    await onDisputeResolved(txn, 'REFUND');
-
-    await logSecurityEvent(req, {
-      type: EVENTS.ADMIN_ADJUDICATION, outcome: 'ALLOWED', statusCode: 200,
-      detail: { decision: 'REFUND', transactionId: txn.id, disputeId: dispute.id },
-    });
-
-    const updatedDispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
-    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(await loadTxnDetail(txn.id)) });
-  } catch (e) {
+  })();
+  await onDisputeResolved(txn,decision);
+  await logSecurityEvent(req,{
+    type:EVENTS.ADMIN_ADJUDICATION,outcome:'ALLOWED',statusCode:200,detail:{
+      decision,transactionId:txn.id,disputeId:req.params.id
+    }
+  });
+  const d=await db.prepare(`${DISPUTE_SELECT} WHERE d.id=?`).get(req.params.id);
+  return {
+    dispute:serializeDispute(d),transaction:serializeTxn(await loadTxnDetail(txn.id))
+  };
+}
+router.post('/disputes/:id/refund',sensitiveLimiter,async(req,res,next)=>{
+  try{
+    res.json(await adjudicate(req,DECISIONS.REFUND));
+  } catch(e){
     next(e);
   }
 });
-
-router.post('/disputes/:id/release', sensitiveLimiter, async (req, res, next) => {
-  try {
-    const { requestId } = req.body || {};
-    if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
-
-    const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(req.params.id);
-    if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND');
-    const parties = await db.prepare('SELECT buyer_id, seller_id FROM transactions WHERE id = ?').get(dispute.transaction_id);
-    if (!parties) throw new AppError(404, 'TRANSACTION_NOT_FOUND');
-    assertIndependentAdjudicator(parties, req.user.id);
-    if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Dispute phải OPEN');
-
-    const fingerprint = fingerprintRequest({
-      actorId: req.user.id,
-      action: 'ADMIN_RELEASE',
-      transactionId: dispute.transaction_id,
-      amount: null,
-    });
-    const escrowLegKey = `release:${requestId}:escrow`;
-    if (await checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json({ dispute: serializeDispute(dispute), transaction: serializeTxn(await loadTxnDetail(dispute.transaction_id)) });
-    }
-
-    // Sáu điều kiện của lệnh phân xử, gồm cả phiếu uỷ quyền ràng buộc đúng quyết định RELEASE.
-    // Một phiếu cấp cho hướng hoàn tiền KHÔNG lọt qua đây, vì decision nằm trong mệnh đề WHERE
-    // của phép tra phiếu.
-    const { txn, grant } = await authorizeAdjudication(req, DECISIONS.RELEASE);
-
-    const runTxn = db.transaction(async () => {
-      const freshTxn=await loadTxnDetail(txn.id);
-      assertContextUnchanged(grant,contextDigest(buildAdjudicationContext(dispute,freshTxn,DECISIONS.RELEASE,req.user.id,req.user.sessionId)));
-      // Tiêu thụ hồ sơ tranh chấp NGUYÊN TỬ — xem chú thích tương ứng ở /refund phía trên.
-      const claimed = await db
-        .prepare(`UPDATE disputes SET status = 'RESOLVED_RELEASE', admin_id = ?, admin_decision = 'RELEASE', resolved_at = ?
-                   WHERE id = ? AND status = 'OPEN'`)
-        .run(req.user.id, nowIso(), dispute.id);
-      if (claimed.changes !== 1) {
-        throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp đã được xử lý ở nơi khác');
-      }
-
-      // Đọc ví BÊN TRONG giao dịch, cùng lý do như ở lệnh hoàn tiền.
-      const escrowWallet = await getEscrowWallet();
-      const sellerWallet = await getUserWallet(txn.seller_id);
-      const updated = await applyOrderedWalletUpdates([
-        { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
-        { wallet: sellerWallet, availableDelta: txn.amount, lockedDelta: 0 },
-      ], 'admin-release');
-      await insertWalletEntry({
-        walletId: escrowWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_RELEASE_DEBIT',
-        availableDelta: 0,
-        lockedDelta: -txn.amount,
-        walletAfter: updated.get(escrowWallet.id),
-        idempotencyKey: escrowLegKey,
-        requestFingerprint: fingerprint,
-        description: 'Admin giải ngân từ Escrow',
-      });
-      await insertWalletEntry({
-        walletId: sellerWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_RELEASE_CREDIT',
-        availableDelta: txn.amount,
-        lockedDelta: 0,
-        walletAfter: updated.get(sellerWallet.id),
-        idempotencyKey: `release:${requestId}:seller`,
-        requestFingerprint: fingerprint,
-        description: 'Người bán nhận giải ngân do Admin quyết định',
-      });
-
-      await applyTransactionStatus(txn, { status: 'RELEASED', escrowStatus: 'RELEASED' });
-      await settleListing(txn, 'RELEASE');
-
-      await markGrantUsed(grant.id);
-
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'ADMIN_RELEASE',
-        oldStatus: 'DISPUTED',
-        newStatus: 'RELEASED',
-        eventData: { amount: txn.amount, requestId, disputeId: dispute.id, decision: 'RELEASE' },
-      });
-    });
-    await runTxn();
-    await onDisputeResolved(txn, 'RELEASE');
-
-    await logSecurityEvent(req, {
-      type: EVENTS.ADMIN_ADJUDICATION, outcome: 'ALLOWED', statusCode: 200,
-      detail: { decision: 'RELEASE', transactionId: txn.id, disputeId: dispute.id },
-    });
-
-    const updatedDispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(dispute.id);
-    res.json({ dispute: serializeDispute(updatedDispute), transaction: serializeTxn(await loadTxnDetail(txn.id)) });
-  } catch (e) {
+router.post('/disputes/:id/release',sensitiveLimiter,async(req,res,next)=>{
+  try{
+    res.json(await adjudicate(req,DECISIONS.RELEASE));
+  } catch(e){
     next(e);
   }
 });
@@ -764,3 +658,5 @@ router.get('/security-events', async (req, res) => {
 });
 
 module.exports = router;
+
+module.exports.buildAdjudicationContext=buildAdjudicationContext;

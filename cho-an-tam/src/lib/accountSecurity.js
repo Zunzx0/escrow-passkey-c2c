@@ -122,9 +122,9 @@ function assertEnrollmentProof(user,auth) {
 }
 async function assertMoneyAllowed(userId,action) {
   const user=await db.prepare('SELECT account_status,recovery_restricted_until,is_active FROM users WHERE id=?').get(userId);
-  if(!user?.is_active || user.account_status==='SUSPENDED') throw new AppError(403,'USER_INACTIVE','Tài khoản đã bị khóa.');
+  if(!user?.is_active || !['ACTIVE','RECOVERING'].includes(user.account_status)) throw new AppError(403,'USER_INACTIVE','Tài khoản chưa sẵn sàng thực hiện giao dịch tiền.');
   if (user?.account_status==='RECOVERING' || (user?.recovery_restricted_until && Date.parse(user.recovery_restricted_until)>Date.now())) {
-    throw new AppError(403,'RECOVERY_MONEY_RESTRICTED','Tài khoản đang trong thời gian bảo vệ sau yêu cầu khôi phục. Chưa thể giải ngân hoặc phân xử tiền.');
+    throw new AppError(403,'RECOVERY_MONEY_RESTRICTED','Tài khoản đang trong thời gian bảo vệ sau yêu cầu khôi phục. Chưa thể khóa tiền thanh toán, giải ngân hoặc phân xử tiền. Các thao tác nhận hàng, kiểm hàng, báo vấn đề và nhận hoàn tiền vẫn được phép.');
   }
 }
 async function assertReauthAvailable(userId,{count=true}={}) {

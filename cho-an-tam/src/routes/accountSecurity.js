@@ -274,9 +274,9 @@ router.post('/recovery/passkey/options',requireEnrollAuth,wrap(async(req,res)=>{
   const context=await recoveryAuth(req);await sec.enforceLimit(`recovery-options:${req.user.id}`,5,60);
   const user=await db.prepare('SELECT * FROM users WHERE id=?').get(req.user.id);
   const options=await generateRegistrationOptions({rpName:'Enclave',rpID:RP_ID,...await sec.registrationIdentity(user,{replaceExisting:true}),attestationType:'none',authenticatorSelection:{residentKey:'required',userVerification:'required'}});
-  const id=uuid();
-  await db.prepare("INSERT INTO auth_challenges(id,user_id,challenge,purpose,context_data,expires_at) VALUES(?,?,?,'REGISTRATION',?,?)").run(id,user.id,options.challenge,JSON.stringify({...context,recoverySessionId:req.user.sessionId,userHandle:options.user.id}),sec.after(300));
-  res.json({registrationSessionId:id,options});
+  const id=uuid(),expiresAt=sec.after(300);
+  await db.prepare("INSERT INTO auth_challenges(id,user_id,challenge,purpose,context_data,expires_at) VALUES(?,?,?,'REGISTRATION',?,?)").run(id,user.id,options.challenge,JSON.stringify({...context,recoverySessionId:req.user.sessionId,userHandle:options.user.id}),expiresAt);
+  res.json({registrationSessionId:id,options,expiresAt});
 }));
 router.post('/recovery/passkey/verify',requireEnrollAuth,wrap(async(req,res)=>{
   await recoveryAuth(req);await sec.enforceLimit(`recovery-verify:${req.user.id}`,10,60);

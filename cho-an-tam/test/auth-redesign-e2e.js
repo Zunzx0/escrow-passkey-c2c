@@ -12,6 +12,7 @@ if(pgUrl){const url=new URL(pgUrl);assert.equal(url.hostname,'127.0.0.1');assert
 Object.assign(process.env,{APP_ENV:'test',NODE_ENV:'test',DATABASE_URL:pgUrl,DB_PATH:path.join(tmp,'test.db'),DOTENV_CONFIG_PATH:path.join(tmp,'absent.env'),JWT_SECRET:secret,PAYMENT_WEBHOOK_SECRET:secret,AUTH_SECRET_PEPPER:secret,AUTH_SECRET_PEPPER_KEYS:JSON.stringify({fixture:secret}),AUTH_SECRET_PEPPER_KEY_ID:'fixture',AUTH_MAIL_ENCRYPTION_KEY:secret,AUTH_MAIL_ENCRYPTION_KEYS:JSON.stringify({fixture:secret}),AUTH_MAIL_KEY_ID:'fixture',AUTH_EMAIL_TRANSPORT:'test',AUTH_PUBLIC_URL:'https://enclave.example/',AUTH_BACKGROUND_JOBS:'0',RECONCILE_INTERVAL_SECONDS:'0',CHALLENGE_CLEANUP_INTERVAL_SECONDS:'0',SHIPPING_WORKER_INTERVAL_MS:'0',RATE_LIMIT_AUTH_PER_MINUTE:'1000',AUTH_REGISTER_PER_IP_HOUR:'1000',REAUTH_REQUESTS_PER_MINUTE:'1000'});
 let server,logs='',base,db,sec,checks=0;
 const password='MatKhau-Rieng-2026!';
+const shipping={recipientName:'Người nhận kiểm thử',phone:'0912345678',address:'Số 10 đường Kiểm Thử',ward:'Phường Một',district:'Quận Một',province:'Hà Nội'};
 const {createAuthenticator}=require('./softwareAuthenticator');
 function check(value,message){assert.ok(value,message);checks++;console.log('PASS '+message);}
 async function port(){const s=net.createServer();await new Promise(r=>s.listen(0,'127.0.0.1',r));const p=s.address().port;await new Promise(r=>s.close(r));return p;}
@@ -28,7 +29,15 @@ async function passkeyLogin(user){const opt=must(await api('/passkeys/login/opti
 async function grant(user,action,details={},token=user.token){const opt=must(await api('/passkeys/reauth/options',{token,body:{action,...details}}));const response=user.auth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true});return must(await api('/passkeys/reauth/verify',{token,body:{reauthSessionId:opt.reauthSessionId,response}}));}
 async function lockGrant(user,id,token=user.token){const opt=must(await api('/transactions/'+id+'/reauth/options',{token,body:{action:'LOCK_ESCROW'}}));return must(await api('/transactions/'+id+'/reauth/verify',{token,body:{reauthSessionId:opt.reauthSessionId,response:user.auth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true})}}));}
 async function secure(user,id,token=user.token){const g=await lockGrant(user,id,token);return api('/transactions/'+id+'/secure',{token,body:{requestId:crypto.randomUUID(),reauthGrant:g.reauthGrant}});}
-async function order(seller,buyer,price){const listing=must(await api('/listings',{token:seller.token,body:{title:'Sản phẩm thử '+crypto.randomBytes(3).toString('hex'),description:'Hàng mô phỏng kiểm thử',price,category:'DIEN_TU',condition:'GOOD',location:'Hà Nội'}}),201);return must(await api('/transactions/orders',{token:buyer.token,body:{listingId:listing.id}}),201);}
+async function order(seller,buyer,price){const listing=must(await api('/listings',{token:seller.token,body:{title:'Sản phẩm thử '+crypto.randomBytes(3).toString('hex'),description:'Hàng mô phỏng kiểm thử',price,category:'DIEN_TU',condition:'GOOD',location:'Hà Nội'}}),201);return must(await api('/transactions/orders',{token:buyer.token,body:{listingId:listing.id,shipping,requestId:crypto.randomUUID()}}),201);}
+async function deliver(seller,buyer,id){
+  must(await api('/transactions/'+id+'/acknowledge',{token:seller.token,body:{}}));
+  must(await api('/transactions/'+id+'/pack',{token:seller.token,body:{}}),201);
+  const shipment=await db.prepare('SELECT * FROM shipments WHERE transaction_id=?').get(id);
+  // Inject the carrier clock only in this isolated fixture. The public API has no skip switch.
+  await require('../src/lib/shipping').reconcileShipping({now:Date.parse(shipment.arrival_due_at)});
+  must(await api('/transactions/'+id+'/wait-confirm',{token:buyer.token,body:{}}));
+}
 async function main(){
   base='http://localhost:'+await port();await start();({db}=require('../src/db'));sec=require('../src/lib/accountSecurity');await db.ready;
   const baselineWallets=(await db.prepare('SELECT COUNT(*) AS n FROM wallets WHERE user_id IS NOT NULL').get()).n;
@@ -54,6 +63,9 @@ async function main(){
   check((await api('/passkeys/email/verify',{token:duplicate.data.token,body:{code:await otp(a.email)}})).status===400,'duplicate-email flow cannot authorize existing account');
   const p=await login(a);must(p);check(p.data.user.authMethod==='password','password creates P session');
   const high=await order(seller,{...a,token:p.data.token},500001);
+  const invalidShipping=await api('/transactions/orders',{token:p.data.token,body:{listingId:high.listingId,requestId:crypto.randomUUID(),shipping:{...shipping,phone:'123'}}});
+  check(invalidShipping.status===400&&!!invalidShipping.data.details?.fields?.phone,'production error middleware exposes the server-authored shipping field error');
+  check(!JSON.stringify(invalidShipping.data).includes(shipping.address),'shipping validation errors do not echo submitted private address values');
   const before=must(await api('/wallets/me',{token:p.data.token})).availableBalance;
   check((await api('/transactions/'+high.id+'/secure',{token:p.data.token,body:{requestId:crypto.randomUUID()}})).data.error==='REAUTH_REQUIRED','P session cannot lock any amount without G');
   check(must(await api('/wallets/me',{token:p.data.token})).availableBalance===before,'missing grant leaves wallet unchanged');
@@ -114,9 +126,9 @@ async function main(){
   check((await api('/passkeys/email/change/verify',{token:a.token,body:{changeId:requestedEmail.changeId,oldCode:'wrong',newCode}})).status===400,'email change requires code from old mailbox');
   must(await api('/passkeys/email/change/verify',{token:a.token,body:{changeId:requestedEmail.changeId,oldCode,newCode}}));a.email=newEmail;
   check(must(await api('/users/me',{token:a.token})).user.email===newEmail,'both mailbox proofs complete email change');
-  must(await api('/transactions/'+high.id+'/acknowledge',{token:seller.token,body:{}}));
-  must(await api('/transactions/'+high.id+'/ship',{token:seller.token,body:{}}));
-  must(await api('/transactions/'+high.id+'/wait-confirm',{token:a.token,body:{}}));
+  await deliver(seller,a,high.id);
+  check((await api('/transactions/'+high.id+'/reauth/options',{token:a.token,body:{}})).data.error==='INSPECTION_REQUIRED','receipt alone cannot authorize release before inspection');
+  must(await api('/transactions/'+high.id+'/inspected',{token:a.token,body:{}}));
   async function releaseGrant(){const opt=must(await api('/transactions/'+high.id+'/reauth/options',{token:a.token,body:{}}));const response=a.auth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge});return must(await api('/transactions/'+high.id+'/reauth/verify',{token:a.token,body:{reauthSessionId:opt.reauthSessionId,response}}));}
   const noContext=await releaseGrant();
   await db.prepare('UPDATE reauth_grants SET context_hash=NULL WHERE token_hash=?').run(sec.hash(noContext.reauthGrant));
@@ -178,8 +190,9 @@ async function main(){
   check(!(await db.prepare('SELECT 1 FROM wallets WHERE user_id=?').get(admin.user.id)),'administrator activation never creates a wallet');
   for(const decision of ['REFUND','RELEASE']){
     const t=await order(seller,a,25000);must(await secure(a,t.id));
-    must(await api('/transactions/'+t.id+'/acknowledge',{token:seller.token,body:{}}));must(await api('/transactions/'+t.id+'/ship',{token:seller.token,body:{}}));must(await api('/transactions/'+t.id+'/wait-confirm',{token:a.token,body:{}}));
+    await deliver(seller,a,t.id);
     const d=must(await api('/transactions/'+t.id+'/dispute',{token:a.token,body:{reason:'Hàng thử không đúng mô tả, yêu cầu quản trị phân xử.'}}),201).dispute;
+    must(await api('/admin/disputes/'+d.id+'/claim',{token:admin.token,body:{}}));
     const opt=must(await api('/admin/disputes/'+d.id+'/reauth/options',{token:admin.token,body:{decision}}));
     const signed=must(await api('/admin/disputes/'+d.id+'/reauth/verify',{token:admin.token,body:{reauthSessionId:opt.reauthSessionId,response:adminAuth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge})}}));
     const other=decision==='REFUND'?'release':'refund';
@@ -221,16 +234,14 @@ async function main(){
   await db.prepare("UPDATE users SET account_status='ACTIVE' WHERE id=?").run(locked.user.id);
   const invariantResult=await require('../src/lib/invariants').checkInvariants();check(invariantResult.ok,'all nine money/account invariants hold after auth and concurrency scenarios');
   const lateOrder=await order(seller,daily,4000);must(await secure(daily,lateOrder.id));
-  must(await api('/transactions/'+lateOrder.id+'/acknowledge',{token:seller.token,body:{}}));
-  must(await api('/transactions/'+lateOrder.id+'/ship',{token:seller.token,body:{}}));
-  must(await api('/transactions/'+lateOrder.id+'/wait-confirm',{token:daily.token,body:{}}));
+  await deliver(seller,daily,lateOrder.id);
   await db.prepare('UPDATE transactions SET inspection_due_at=? WHERE id=?').run(new Date(Date.now()-1000).toISOString(),lateOrder.id);
   const balances=JSON.stringify(await db.prepare('SELECT id,available_balance,locked_balance FROM wallets ORDER BY id').all());
   const {expireInspections}=require('../src/lib/orderInspection');await Promise.all([expireInspections(),expireInspections()]);
   check((await db.prepare('SELECT status FROM transactions WHERE id=?').get(lateOrder.id)).status==='DISPUTED','inspection timeout opens dispute instead of automatically releasing');
   check((await db.prepare('SELECT COUNT(*) AS n FROM disputes WHERE transaction_id=?').get(lateOrder.id)).n===1,'parallel inspection workers open only one dispute');
   check(JSON.stringify(await db.prepare('SELECT id,available_balance,locked_balance FROM wallets ORDER BY id').all())===balances,'inspection expiry does not move any balance');
-  check((await api('/transactions/'+lateOrder.id+'/reauth/options',{token:daily.token,body:{}})).status===409,'disputed order cannot authorize release');
+  check((await api('/transactions/'+lateOrder.id+'/reauth/options',{token:daily.token,body:{}})).status===409,'inspection timeout still cannot authorize release before explicit inspection');
   const expiring=await register('expire_test');
   const beforeExpiry=await db.prepare('SELECT password_hash FROM users WHERE id=?').get(expiring.user.id);
   const oldKeys=await db.prepare('SELECT credential_id FROM passkey_credentials WHERE user_id=? ORDER BY credential_id').all(expiring.user.id);

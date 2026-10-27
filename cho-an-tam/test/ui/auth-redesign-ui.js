@@ -30,11 +30,12 @@ async function main(){
   await click(p,'activation-later');ok(!p.d.querySelector('#modalRoot .modal')&&p.w.location.hash==='#/wallet','defer activation closes popup and keeps route');
   await click(p,'activate-wallet');
   const verified={...basic,accountStatus:'VERIFIED',emailVerified:true};
+  // The API exists when the activation dialog opens, so it can prepare before the tap.
+  p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'reg-one',options:{}});
   p.routes['POST /api/passkeys/email/verify']=()=>json(200,{token:'verified-test',scope:'full',user:verified});
   fill(p,'emailVerificationCode','123456');await click(p,'email-verify');
   ok(!!p.d.querySelector('[data-act="do-enroll-passkey"]')&&!!p.d.getElementById('activationDeviceName'),'verified account sees inline device name and Passkey button');
   ok(/5.000.000/.test(p.d.getElementById('modalRoot').textContent),'activation labels demo balance gift');
-  p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'reg-one',options:{}});
   p.w.SimpleWebAuthnBrowser.startRegistration=async()=>({id:'new-key'});
   let promptUsed=false;p.w.prompt=()=>{promptUsed=true;throw new Error('native prompt forbidden');};
   const codes=['ABCDE-FGHJK','LMNPQ-RSTUV','WXYZA-BCDEF','GHJKL-MNPQR','STUVW-XYZAB','CDEFG-HJKLM','NPQRS-TUVWX','YZABC-DEFGH'];

@@ -27,7 +27,8 @@ const CSP = [
   "default-src 'self'",
   "script-src 'self'",
   "style-src 'self'",
-  "img-src 'self' data:",
+  // blob: only for object URLs of in-page previews/authorized fetched images; no external hosts.
+  "img-src 'self' data: blob:",
   "font-src 'self' data:",
   "connect-src 'self'",
   "base-uri 'none'",

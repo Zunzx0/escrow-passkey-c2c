@@ -50,6 +50,7 @@ const App = (() => {
   };
 
   const ROLE_LABEL = { BUYER: 'Người mua', SELLER: 'Người bán', ADMIN: 'Quản trị viên' };
+  const passkeyPreparations = new Map();
 
   // Ánh xạ trạng thái của lõi Escrow sang ngôn ngữ nghiệp vụ mua bán.
   // `tone` là class Tag của DS — Tag luôn viền, không bao giờ tô đặc.
@@ -62,6 +63,7 @@ const App = (() => {
     RELEASED:     { label: 'Hoàn tất theo phân xử',        tone: 'tag-success' },
     REFUNDED:     { label: 'Đã hoàn tiền',                 tone: 'tag-success' },
     DISPUTED:     { label: 'Đang tranh chấp',              tone: 'tag-danger' },
+    CANCELLED:    { label: 'Đã hủy',                      tone: '' },
   };
 
   const ESCROW_UI = {
@@ -181,6 +183,265 @@ const App = (() => {
   // Gốc địa chỉ của API, do js/config.js quyết định: '' khi giao diện và API cùng một máy chủ,
   // https://api.enclave.id.vn khi giao diện chạy trên Vercel.
   const API_BASE = window.ENCLAVE_API_BASE || '';
+
+  const MEDIA_LIMIT = 6, MEDIA_INPUT_BYTES = 5 * 1024 * 1024;
+  const MEDIA_TYPES = new Set(['image/jpeg','image/png','image/webp']);
+  let mediaDraft = null, mediaOverlay = null, mediaObserver = null, mediaIntersection = null;
+  const mediaImageNodes = new Map(), mediaControllers = new Set();
+
+  function approvedImages(images) {
+    return Array.isArray(images) ? images.filter(image => image && typeof image.id === 'string' && /^[0-9a-f-]{36}$/i.test(image.id)).slice(0,12) : [];
+  }
+  function mediaFrame(image, alt, cls = '') {
+    if (!approvedImages([image]).length) return '';
+    return `<span class="media-frame ${cls}"><img data-media-id="${esc(image.id)}" alt="${esc(alt || 'Ảnh được tải lên')}" loading="lazy" decoding="async"><span class="media-load-note" role="status">Đang tải ảnh…</span></span>`;
+  }
+  async function mediaRequest(path, {method='GET',file,controller=new AbortController()} = {}, retried=false) {
+    const epoch=state.sessionEpoch,headers={};
+    if(state.token)headers.Authorization='Bearer '+state.token;
+    if(file)headers['Content-Type']=file.type;
+    mediaControllers.add(controller);
+    let timedOut=false;
+    const timer=setTimeout(()=>{timedOut=true;controller.abort();},apiTimeoutMs());
+    try {
+      const response=await fetch(API_BASE+'/api'+path,{method,headers,body:file,credentials:'include',signal:controller.signal});
+      if(epoch!==state.sessionEpoch)throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
+      if(!response.ok) {
+        const data=await response.json().catch(()=>({}));
+        if(response.status===401&&data.error==='UNAUTHENTICATED'&&!retried&&await refreshSession()) {
+          if(epoch!==state.sessionEpoch)throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
+          return mediaRequest(path,{method,file,controller},true);
+        }
+        const error=new Error(apiErrorMessage(response.status,data));error.code=data.error;error.status=response.status;throw error;
+      }
+      const result=method==='GET'?await response.blob():await response.json();
+      if(epoch!==state.sessionEpoch)throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
+      if(method==='GET'&&(!MEDIA_TYPES.has(result.type)||result.size>512*1024))throw new Error('Máy chủ trả ảnh không đúng định dạng hoặc kích thước cho phép.');
+      return result;
+    } catch(error) {
+      if(epoch!==state.sessionEpoch)throw Object.assign(error,{silent:true});
+      if(error.code||error.status||error.silent)throw error;
+      if(error.name==='AbortError'||error instanceof TypeError||/fetch|network|connection/i.test(error.message))throw connectionError(method,timedOut);
+      throw error;
+    } finally {clearTimeout(timer);mediaControllers.delete(controller);}
+  }
+  function cleanupMediaImages(all=false) {
+    for(const [image,item] of mediaImageNodes)if(all||!image.isConnected) {
+      item.controller?.abort();if(item.url)URL.revokeObjectURL(item.url);mediaIntersection?.unobserve(image);mediaImageNodes.delete(image);
+      if(all){image.removeAttribute('src');delete image.dataset.mediaState;}
+    }
+  }
+  async function loadMediaImage(image) {
+    if(!image.isConnected||mediaImageNodes.has(image)||image.dataset.mediaState==='error')return;
+    const item={epoch:state.sessionEpoch,controller:new AbortController(),url:null};mediaImageNodes.set(image,item);image.dataset.mediaState='loading';
+    try {
+      const blob=await mediaRequest('/media/images/'+encodeURIComponent(image.dataset.mediaId),{controller:item.controller});
+      if(!image.isConnected||item.epoch!==state.sessionEpoch||mediaImageNodes.get(image)!==item)return;
+      item.url=URL.createObjectURL(blob);image.src=item.url;image.dataset.mediaState='ready';
+      const note=image.parentElement.querySelector('.media-load-note');if(note)note.hidden=true;
+    } catch(error) {
+      if(!image.isConnected||item.epoch!==state.sessionEpoch||error.silent)return;
+      image.dataset.mediaState='error';image.alt='Không tải được ảnh';
+      const note=image.parentElement.querySelector('.media-load-note');if(note)note.textContent='Không tải được ảnh. Mở ảnh để thử lại.';
+    }
+  }
+  function scanMediaImages() {
+    cleanupMediaImages();
+    document.querySelectorAll('img[data-media-id]').forEach(image=>{
+      if(mediaImageNodes.has(image)||image.dataset.mediaState==='error')return;
+      if(mediaIntersection)mediaIntersection.observe(image);else loadMediaImage(image);
+    });
+  }
+  function startMediaObserver() {
+    if(typeof IntersectionObserver==='function')mediaIntersection=new IntersectionObserver(entries=>entries.forEach(entry=>{if(entry.isIntersecting){mediaIntersection.unobserve(entry.target);loadMediaImage(entry.target);}}),{rootMargin:'250px'});
+    mediaObserver=new MutationObserver(scanMediaImages);mediaObserver.observe(document.body,{childList:true,subtree:true});scanMediaImages();
+  }
+  function disposeMediaDraft() {
+    if(mediaDraft){mediaDraft.controller?.abort();for(const item of mediaDraft.items)if(item.preview){URL.revokeObjectURL(item.preview);item.preview=null;}}
+    mediaDraft=null;
+  }
+  function mediaPickerHTML(purpose) {
+    const evidence=purpose==='EVIDENCE';
+    return `<section class="media-picker field span-2"><label for="mediaFiles">${evidence?'Ảnh bằng chứng (không bắt buộc)':'Ảnh thực tế của sản phẩm (khuyến khích)'}</label><p class="hint">${evidence?'Ảnh tình trạng, đóng gói, nhận hoặc trả hàng liên quan đến hồ sơ. Chỉ các bên và quản trị viên đã nhận xử lý được xem.':'Chụp chính món hàng, phụ kiện và các vết xước hoặc lỗi đang có; không dùng ảnh lấy từ website khác. Ảnh đầu tiên là ảnh bìa.'}</p><input id="mediaFiles" type="file" accept="image/jpeg,image/png,image/webp" multiple><p class="hint">JPEG, PNG hoặc WebP · tối đa 5 MiB/ảnh · chọn tối đa 6 ảnh. Máy chủ kiểm tra và xử lý ảnh trước khi lưu.</p><div id="mediaSelection" class="media-selection"></div><p id="mediaUploadStatus" class="hint" role="status"></p></section>`;
+  }
+  function beginMediaDraft(purpose, transactionId, images=[]) {
+    disposeMediaDraft();mediaDraft={purpose,transactionId,epoch:state.sessionEpoch,generation:modalGeneration,dirty:false,changed:false,controller:null,uploading:false,submitting:false,items:approvedImages(images).map(image=>({key:newRequestId(),image,status:'stored',file:null,preview:null,error:''}))};renderMediaSelection();
+  }
+  function mediaDraftAlive(draft) {return draft&&mediaDraft===draft&&draft.epoch===state.sessionEpoch&&draft.generation===modalGeneration;}
+  function mediaDraftBusy(draft=mediaDraft) {return !!(draft?.uploading||draft?.submitting);}
+  function renderMediaSelection() {
+    const draft=mediaDraft,box=$('#mediaSelection');if(!draft||!box)return;
+    box.innerHTML=draft.items.map((item,index)=>`<figure class="media-selected ${item.error?'has-error':''}">${item.preview?`<button type="button" class="media-preview" data-act="media-preview" data-key="${esc(item.key)}" ${mediaDraftBusy(draft)?'disabled':''}><img src="${esc(item.preview)}" alt="Xem trước ${esc(item.file?.name)}"></button>`:item.image?`<button type="button" class="media-preview" data-act="media-view" data-media-id="${esc(item.image.id)}" data-created="${esc(item.image.createdAt||'')}" ${mediaDraftBusy(draft)?'disabled':''}>${mediaFrame(item.image,'Ảnh đã lưu')}</button>`:'<span class="media-file-icon">'+ico('image',24)+'</span>'}<figcaption><b>${esc(item.file?.name||'Ảnh đã lưu')}</b>${draft.purpose==='LISTING'&&index===0?'<span class="tag">Ảnh bìa</span>':''}<span class="small ${item.error?'text-danger':'muted'}" role="status">${esc(item.error||(item.status==='uploading'?'Đang tải…':item.status==='stored'?'Đã tải lên'+(item.image?.createdAt?' lúc '+fmtDateTime(item.image.createdAt):''):'Chưa tải lên'))}</span></figcaption><div class="row">${draft.purpose==='LISTING'&&index>0?`<button type="button" class="btn btn-sm" data-act="media-cover" data-key="${esc(item.key)}" ${mediaDraftBusy(draft)?'disabled':''}>Đặt làm ảnh bìa</button><button type="button" class="btn btn-sm" data-act="media-move" data-dir="-1" data-key="${esc(item.key)}" aria-label="Chuyển ảnh ${index+1} lên trước" ${mediaDraftBusy(draft)?'disabled':''}>Lên</button>`:''}${draft.purpose==='LISTING'&&index<draft.items.length-1?`<button type="button" class="btn btn-sm" data-act="media-move" data-dir="1" data-key="${esc(item.key)}" aria-label="Chuyển ảnh ${index+1} xuống sau" ${mediaDraftBusy(draft)?'disabled':''}>Xuống</button>`:''}<button type="button" class="btn btn-sm" data-act="media-remove" data-key="${esc(item.key)}" ${mediaDraftBusy(draft)?'disabled':''}>Xóa khỏi lựa chọn</button></div></figure>`).join('');
+  }
+  function validateMediaItems(draft) {
+    draft.items.forEach((item,index)=>{
+      item.validation='';
+      if(index>=MEDIA_LIMIT)item.validation='Chỉ được chọn tối đa 6 ảnh. Hãy xóa ảnh dư.';
+      else if(item.file&&!MEDIA_TYPES.has(item.file.type))item.validation='Định dạng không hỗ trợ. Chọn JPEG, PNG hoặc WebP.';
+      else if(item.file&&(!item.file.size||item.file.size>MEDIA_INPUT_BYTES))item.validation='Ảnh phải có dữ liệu và không vượt quá 5 MiB.';
+      if(item.validation)item.error=item.validation;else if(item.error===item.previousValidation)item.error='';
+      item.previousValidation=item.validation;
+    });
+    renderMediaSelection();return !draft.items.some(item=>item.validation);
+  }
+  function selectMediaFiles(input) {
+    const draft=mediaDraft;if(!mediaDraftAlive(draft)||mediaDraftBusy(draft))return;
+    for(const file of Array.from(input.files||[])) {
+      const valid=MEDIA_TYPES.has(file.type)&&file.size>0&&file.size<=MEDIA_INPUT_BYTES&&draft.items.length<MEDIA_LIMIT;
+      draft.items.push({key:newRequestId(),requestId:newRequestId(),file,preview:valid?URL.createObjectURL(file):null,image:null,status:'selected',error:''});
+    }
+    input.value='';draft.dirty=true;draft.changed=true;validateMediaItems(draft);
+  }
+  function removeSelectedMedia(key) {
+    const draft=mediaDraft;if(!mediaDraftAlive(draft)||mediaDraftBusy(draft))return;
+    const item=draft.items.find(item=>item.key===key);if(!item)return;
+    if(item.preview)URL.revokeObjectURL(item.preview);draft.items=draft.items.filter(other=>other!==item);draft.dirty=true;draft.changed=true;validateMediaItems(draft);
+  }
+  /** Đổi thứ tự ảnh sản phẩm; vị trí 0 là ảnh bìa. dir: -1 lên, +1 xuống, 'cover' đưa lên đầu. */
+  function moveSelectedMedia(key, dir) {
+    const draft=mediaDraft;if(!mediaDraftAlive(draft)||mediaDraftBusy(draft)||draft.purpose!=='LISTING')return;
+    const from=draft.items.findIndex(item=>item.key===key);if(from<0)return;
+    const to=dir==='cover'?0:from+Number(dir);if(!Number.isInteger(to)||to<0||to>=draft.items.length||to===from)return;
+    const [item]=draft.items.splice(from,1);draft.items.splice(to,0,item);draft.dirty=true;draft.changed=true;validateMediaItems(draft);
+  }
+  const mediaPause = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+  async function lookupMediaUpload(item) {
+    try { return await api('/media/uploads/' + encodeURIComponent(item.requestId)); }
+    catch (error) {
+      if (error.silent) throw error;
+      // FAILED is a known failed attempt: retry the same bytes with the same requestId.
+      if (error.status === 410 && error.code === 'MEDIA_UPLOAD_FAILED') { item.uncertain=false; return null; }
+      if (error.status === 404) return null;
+      throw error;
+    }
+  }
+  /** Tải một ảnh bằng POST nhị phân thô; mất kết nối thì đối soát bằng cùng requestId, không tải trùng. */
+  async function settleMediaUpload(draft, item) {
+    if (item.blocked) throw Object.assign(new Error('Mã tải ảnh đã gắn với nội dung khác. Hãy xóa tệp này khỏi lựa chọn rồi chọn lại để tạo lượt tải mới.'), {code:'MEDIA_REQUEST_REUSED'});
+    let result = item.uncertain ? await lookupMediaUpload(item) : null;
+    if (!result) {
+      const query = new URLSearchParams({ purpose: draft.purpose, requestId: item.requestId });
+      if (draft.transactionId) query.set('transactionId', draft.transactionId);
+      draft.controller = new AbortController();
+      try { result = await mediaRequest('/media/uploads?' + query, { method: 'POST', file: item.file, controller: draft.controller }); }
+      catch (error) {
+        if (!mediaDraftAlive(draft)) throw Object.assign(new Error('Ảnh của phiên cũ'), { silent: true });
+        if (!(error.unknownOutcome || error.code === 'MEDIA_UPLOAD_IN_PROGRESS')) throw error;
+        item.uncertain = true;
+        result = await lookupMediaUpload(item).catch(lookupError => { if (lookupError.silent) throw lookupError; return null; });
+        if (!result) throw error;
+      } finally { draft.controller = null; }
+    }
+    const configuredPoll = window.ENCLAVE_MEDIA_POLL_MS;
+    const pollMs = configuredPoll !== undefined && Number.isFinite(Number(configuredPoll)) && Number(configuredPoll) >= 0 ? Number(configuredPoll) : 1000;
+    for (let polls = 0; result && result.status === 'UPLOADING'; polls++) {
+      item.uncertain = true;
+      if (polls >= 8) throw Object.assign(new Error('Ảnh vẫn đang được máy chủ xử lý. Ảnh và mã tải được giữ; hãy bấm gửi lại sau ít giây để kiểm tra, không tải trùng.'), { code: 'MEDIA_PENDING' });
+      await mediaPause(pollMs);
+      if (!mediaDraftAlive(draft)) throw Object.assign(new Error('Ảnh của phiên cũ'), { silent: true });
+      result = await lookupMediaUpload(item);
+      if (!result) throw Object.assign(new Error('Chưa rõ ảnh đã được lưu hay chưa. Lựa chọn được giữ; bấm gửi lại để kiểm tra.'), { code: 'MEDIA_PENDING' });
+    }
+    return result;
+  }
+  async function uploadSelectedMedia() {
+    const draft=mediaDraft;if(!draft)return [];
+    if(!mediaDraftAlive(draft))throw Object.assign(new Error('Lựa chọn ảnh của màn hình cũ'),{silent:true});
+    if(!validateMediaItems(draft))throw new Error('Hãy sửa hoặc xóa các tệp đang báo lỗi trước khi gửi.');
+    draft.uploading=true;
+    try {
+      for(let index=0;index<draft.items.length;index++) {
+        const item=draft.items[index];if(item.image)continue;
+        item.error='';item.status='uploading';renderMediaSelection();
+        const status=$('#mediaUploadStatus');if(status)status.textContent=`Đang tải ảnh ${index+1}/${draft.items.length}. Vui lòng chờ, chưa đóng cửa sổ.`;
+        try {
+          const result=await settleMediaUpload(draft,item);
+          if(!mediaDraftAlive(draft))throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
+          if(!approvedImages([result]).length||result.purpose!==draft.purpose||result.uploadedBy!==state.user?.id||(result.status&&!['STAGED','ATTACHED'].includes(result.status)))throw new Error('Phản hồi tải ảnh không khớp. Hãy kiểm tra lại trước khi gửi.');
+          item.image=result;item.status='stored';item.uncertain=false;renderMediaSelection();
+        } catch(error) {
+          if(error.silent||!mediaDraftAlive(draft))throw Object.assign(error,{silent:true});
+          if(error.code==='MEDIA_UPLOAD_EXPIRED'){item.requestId=newRequestId();item.uncertain=false;}
+          if(error.code==='MEDIA_REQUEST_REUSED'){
+            item.blocked=true;
+            error.message='Mã tải ảnh đã gắn với nội dung khác. Hãy xóa tệp này khỏi lựa chọn rồi chọn lại để tạo lượt tải mới.';
+          }
+          item.error=error.code==='MEDIA_STORAGE_UNAVAILABLE'?'Lưu trữ ảnh chưa sẵn sàng. Nội dung được giữ để bạn thử lại.':error.message;item.status='error';
+          const failedStatus=$('#mediaUploadStatus');if(failedStatus)failedStatus.textContent='Chưa gửi được ảnh. Nội dung và các ảnh đã chọn vẫn được giữ; hãy bấm gửi lại.';
+          throw error;
+        }
+      }
+      const status=$('#mediaUploadStatus');if(status)status.textContent=draft.items.length?'Ảnh đã tải lên. Đang lưu nội dung…':'';
+      return draft.items.map(item=>item.image.id);
+    } finally {draft.uploading=false;draft.controller=null;if(mediaDraftAlive(draft))renderMediaSelection();}
+  }
+  /** Tải ảnh còn thiếu rồi trả imageIds để gửi kèm; undefined (bỏ trường) khi không có thay đổi để máy chủ giữ nguyên ảnh cũ. */
+  async function mediaIdsForSubmit({ editing = false } = {}) {
+    const draft = mediaDraft;
+    const ids = await uploadSelectedMedia();
+    if (!draft) return undefined;
+    if (editing && !draft.changed) return undefined;
+    if (!ids.length && !draft.changed) return undefined;
+    return ids;
+  }
+  function mediaSubmissionAlive(scope) {
+    return scope.epoch===state.sessionEpoch&&scope.generation===modalGeneration&&scope.hash===location.hash;
+  }
+  /** One lock spans binary uploads and the final attachment write. Navigation may leave a write
+   * committed on the server, but its response must never replace a newer screen or dialog. */
+  async function submitMediaForm(key,btn,request,{editing=false,successMsg}={}) {
+    if(state.busy.has(key)||mediaDraftBusy())return null;
+    const scope={epoch:state.sessionEpoch,generation:modalGeneration,hash:location.hash};
+    const draft=mediaDraft;
+    await guard(key,btn,async()=>{
+      try {
+        if(draft){draft.submitting=true;renderMediaSelection();}
+        const imageIds=await mediaIdsForSubmit({editing});
+        if(!mediaSubmissionAlive(scope)||(draft&&!mediaDraftAlive(draft)))throw Object.assign(new Error('Nội dung của màn hình cũ'),{silent:true});
+        const result=await request(imageIds);
+        if(!mediaSubmissionAlive(scope)||(draft&&!mediaDraftAlive(draft)))throw Object.assign(new Error('Phản hồi của màn hình cũ'),{silent:true});
+        return result;
+      } catch(error) {
+        if(!mediaSubmissionAlive(scope))error.silent=true;
+        throw error;
+      } finally {
+        if(draft){draft.submitting=false;if(mediaDraftAlive(draft))renderMediaSelection();}
+      }
+    },successMsg);
+    return scope;
+  }
+  async function finishMediaForm(scope,notice) {
+    if(!scope||!mediaSubmissionAlive(scope))return;
+    closeModal();
+    const generation=modalGeneration;
+    await route();
+    if(scope.epoch!==state.sessionEpoch||scope.hash!==location.hash||generation!==modalGeneration)return;
+    openModal(notice);
+  }
+  function openMediaOverlay(body,kind='viewer') {
+    closeMediaOverlay();const root=$('#modalRoot');
+    const node=document.createElement('div');node.className='media-overlay';node.dataset.kind=kind;node.setAttribute('role',kind==='discard'?'alertdialog':'dialog');node.setAttribute('aria-modal','true');node.tabIndex=-1;
+    node.innerHTML=body;mediaOverlay={node,previous:document.activeElement};root.appendChild(node);lockModalScroll();node.focus({preventScroll:true});
+  }
+  function closeMediaOverlay() {
+    if(!mediaOverlay)return;const old=mediaOverlay;mediaOverlay=null;old.node.remove();cleanupMediaImages();
+    if(!$('#modalRoot .modal-backdrop'))unlockModalScroll();old.previous?.isConnected&&old.previous.focus({preventScroll:true});
+  }
+  const MEDIA_NOTICE='Ảnh do người dùng cung cấp. Ảnh không chứng minh danh tính, tính xác thực hay thời điểm chụp; mốc thời gian chỉ là lúc tải lên.';
+  function mediaTime(createdAt) {return createdAt?`Tải lên lúc ${fmtDateTime(createdAt)}`:'Chưa có mốc thời gian tải lên';}
+  function viewMedia(id, createdAt) {
+    if(mediaDraftBusy())return;
+    if(!approvedImages([{id}]).length)return;
+    openMediaOverlay(`<div class="media-viewer"><div class="row-between"><h2>Xem ảnh đã tải lên</h2><button class="btn" data-act="media-overlay-close">Đóng ảnh</button></div>${mediaFrame({id},'Ảnh trong hồ sơ hoặc tin đăng')}<p class="small">${esc(mediaTime(createdAt))}</p><p class="hint">${MEDIA_NOTICE}</p></div>`);
+  }
+  function previewSelectedMedia(key) {
+    if(mediaDraftBusy())return;
+    const item=mediaDraft?.items.find(item=>item.key===key);if(!item?.preview)return;
+    openMediaOverlay(`<div class="media-viewer"><div class="row-between"><h2>Xem trước ảnh đã chọn</h2><button class="btn" data-act="media-overlay-close">Đóng ảnh</button></div><img src="${esc(item.preview)}" alt="${esc(item.file?.name)}"><p class="hint">Ảnh mới chọn chưa được gửi lên máy chủ.</p></div>`);
+  }
+  function confirmDiscardMedia() {
+    openMediaOverlay('<div class="media-discard"><h2>Bỏ các thay đổi và ảnh đang chọn?</h2><p>Nội dung và lựa chọn trong cửa sổ này sẽ bị bỏ. Ảnh tải tạm chưa gắn vào tin hoặc hồ sơ sẽ không được công khai.</p><div class="row"><button class="btn" data-act="media-overlay-close">Tiếp tục chỉnh sửa</button><button class="btn btn-danger" data-act="media-discard-confirm">Bỏ và đóng</button></div></div>','discard');
+  }
 
   // Access token sống ngắn; khi hết hạn thì xin token mới bằng cookie làm mới (HttpOnly, trang
   // không đọc được). Nhiều request cùng gặp 401 thì chỉ làm mới một lần.
@@ -388,6 +649,7 @@ const App = (() => {
       const err = new Error(apiErrorMessage(res.status, data));
       err.code = data.error;
       err.status = res.status;
+      err.fieldErrors = data.fieldErrors || data.fields || data.details?.fields || data.details?.fieldErrors;
       // 429: số giây phải chờ nằm ở header Retry-After (API khác origin cần expose header này).
       const retryAfter = Number(res.headers.get('Retry-After'));
       if (res.status === 429 && Number.isFinite(retryAfter) && retryAfter > 0) err.retryAfter = Math.ceil(retryAfter);
@@ -396,14 +658,29 @@ const App = (() => {
     return data;
   }
 
+  function prefersReducedMotion() {
+    return typeof window.matchMedia==='function'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  }
+
   function toast(message, kind = 'info') {
     const glyph = kind === 'ok' ? 'circle-check' : kind === 'err' ? 'circle-alert' : 'info';
     const box = $('#toasts');
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
-    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>`;
+    el.setAttribute('role',kind==='err'?'alert':'status');
+    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>`+
+      `<button type="button" class="toast-x" aria-label="Đóng thông báo">${ico('x',16)}</button>`;
+    let autoTimer;
+    const leave=()=>{
+      if(!el.isConnected||el.hasAttribute('data-leaving'))return;
+      clearTimeout(autoTimer);
+      if(prefersReducedMotion()){el.remove();return;}
+      el.setAttribute('data-leaving','');
+      setTimeout(()=>el.remove(),200);
+    };
+    el.querySelector('.toast-x').addEventListener('click',leave);
     box.appendChild(el);
-    setTimeout(() => el.remove(), kind === 'err' ? 8000 : 5000);
+    autoTimer=setTimeout(leave,kind==='err'?8000:5000);
   }
 
   /** Bọc một handler async: khoá nút, hiện spinner, bắt lỗi thành toast. */
@@ -414,8 +691,12 @@ const App = (() => {
     const generation=modalGeneration;
     const inModal=btn?.closest?.('.modal');
     const oldDismissible=modalDismissible;
-    const controls=inModal?Array.from(inModal.querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled})):[];
+    const controls=inModal?Array.from(inModal.querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled}))
+      : key === 'order' && btn?.closest('.pd-buy') ? Array.from(btn.closest('.pd-buy').querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled}))
+      : btn?.dataset?.id && /^(prepare-secure:|secure:|ack:|pack:|wc:|release:|inspect:|dispute:|cancel-order:|shipping-address:|relist:|adm:)/.test(key)
+        ? Array.from(document.querySelectorAll('button[data-id]')).filter(el=>el.dataset.id===btn.dataset.id).map(el=>({el,disabled:el.disabled})) : [];
     if(inModal) {modalDismissible=false;controls.forEach(({el})=>{el.disabled=true;});}
+    else controls.forEach(({el})=>{el.disabled=true;});
     if (btn) { btn.disabled = true; btn.innerHTML = ico('loader-circle', 17, 'spin') + ' Đang xử lý…'; }
     try {
       const result = await fn();
@@ -428,11 +709,12 @@ const App = (() => {
         if(body && inModal && generation===modalGeneration) {
           body.querySelector('.operation-error')?.remove();
           const message=document.createElement('div');message.className='note note-danger operation-error';message.setAttribute('role','alert');message.textContent=e.message;body.prepend(message);
+          message.scrollIntoView?.({block:'nearest',behavior:'auto'});
         } else toast(e.message, 'err');
       }
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
       // một thao tác sẽ lại bị từ chối.
-      if (e && e.code === 'DISPUTE_NOT_OPEN') {
+      if (e && !e.silent && generation===modalGeneration && e.code === 'DISPUTE_NOT_OPEN') {
         closeModal();
         Promise.resolve(route()).catch(() => { /* lỗi tải lại đã được báo ở nơi khác */ });
       }
@@ -440,7 +722,9 @@ const App = (() => {
     } finally {
       state.busy.delete(key);
       if(inModal && generation===modalGeneration) {modalDismissible=oldDismissible;controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});}
+      if(!inModal) controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});
       if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = original; }
+      refreshPasskeyPreparationControls();
     }
   }
 
@@ -636,9 +920,48 @@ const App = (() => {
   // dẫn người dùng tới một màn hình trống rồi lỗi 403.
   let modalDismissible = true;
   let modalGeneration = 0;
+  let modalScrollState = null;
+
+  function lockModalScroll() {
+    if (modalScrollState) return;
+    const body = document.body, html = document.documentElement;
+    const properties = ['position', 'top', 'left', 'right', 'width', 'overflow', 'padding-right'];
+    const saved = (style, name) => [style.getPropertyValue(name), style.getPropertyPriority(name)];
+    modalScrollState = {
+      x: window.scrollX || 0, y: window.scrollY || 0,
+      body: properties.map(name => [name, ...saved(body.style, name)]),
+      overflow: saved(html.style, 'overflow'),
+    };
+    // Fixed body also prevents iOS from scrolling the page behind a long dialog.
+    // Preserve the desktop scrollbar gutter without disabling touch or pinch zoom.
+    const gutter = Math.max(0, window.innerWidth - html.clientWidth);
+    const padding = parseFloat(window.getComputedStyle(body).paddingRight) || 0;
+    body.style.position = 'fixed';
+    body.style.top = `-${modalScrollState.y}px`;
+    body.style.left = '0';
+    body.style.right = '0';
+    body.style.width = '100%';
+    body.style.overflow = 'hidden';
+    if (gutter) body.style.paddingRight = `${padding + gutter}px`;
+    html.style.overflow = 'hidden';
+  }
+
+  function unlockModalScroll() {
+    if (!modalScrollState) return;
+    const saved = modalScrollState;
+    modalScrollState = null;
+    for (const [name, value, priority] of saved.body) {
+      if (value) document.body.style.setProperty(name, value, priority);
+      else document.body.style.removeProperty(name);
+    }
+    const html = document.documentElement;
+    if (saved.overflow[0]) html.style.setProperty('overflow', ...saved.overflow);
+    else html.style.removeProperty('overflow');
+    window.scrollTo(saved.x, saved.y);
+  }
 
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
-    closeModal();
+    closeModal({ keepScrollLock: true });
     modalDismissible = dismissible;
     const root = $('#modalRoot');
     root.innerHTML = `
@@ -652,6 +975,7 @@ const App = (() => {
           ${footer ? `<div class="modal-foot">${footer}</div>` : ''}
         </div>
       </div>`;
+    lockModalScroll();
     const firstInput = root.querySelector('input, select, textarea');
     // Chuyển OTP → Passkey có ô tên tùy chọn: tự focus ô này trên iPhone
     // sẽ mở lại bàn phím và có thể zoom viewport trước hộp thoại hệ điều hành.
@@ -662,11 +986,17 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() {
+  function closeModal({ keepScrollLock = false } = {}) {
+    disposeMediaDraft();
+    if(mediaOverlay){mediaOverlay.node.remove();mediaOverlay=null;}
+    clearPasskeyPreparations();
+    SimpleWebAuthnBrowser.WebAuthnAbortService?.cancelCeremony();
     modalGeneration++;
     if (window.EnclaveShippingMotion) window.EnclaveShippingMotion.stop();
     state.shippingModalId = null;
     $('#modalRoot').innerHTML = '';
+    cleanupMediaImages();
+    if (!keepScrollLock) unlockModalScroll();
     modalDismissible = true;
     state.paypalAbandonConfirmation = null;
   }
@@ -674,7 +1004,9 @@ const App = (() => {
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
   // dismissible. closeModal() trần vẫn dùng cho đường lập trình (đổi modal, hoàn tất đăng nhập).
   function dismissModal() {
-    if(!modalDismissible)return;
+    if(mediaOverlay){closeMediaOverlay();return;}
+    if(!modalDismissible||mediaDraftBusy())return;
+    if(mediaDraft?.dirty){confirmDiscardMedia();return;}
     if(authUi.codes && authUi.activation){finishActivation().catch(e=>toast(e.message,'err'));return;}
     authUi.activation=null;authUi.codes=null;closeModal();
   }
@@ -691,6 +1023,8 @@ const App = (() => {
     state.token = token;
     state.user = user;
     if (fresh) {
+      clearPasskeyPreparations();
+      orderIntents.clear();
       state.sessionEpoch++;
       resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
       stopShippingWatch();
@@ -699,6 +1033,9 @@ const App = (() => {
   }
 
   function clearSession() {
+    disposeMediaDraft();for(const controller of mediaControllers)controller.abort();cleanupMediaImages(true);
+    clearPasskeyPreparations();
+    orderIntents.clear();
     authUi.codes=null;authUi.nameCallback=null;authUi.linkToken=null;authUi.activation=null;authUi.lock=null;
     stopShippingWatch();
     state.token = null;
@@ -794,6 +1131,8 @@ const App = (() => {
 
   let authTabGeneration=0;
   function switchAuthTab(tab) {
+    clearPasskeyPreparations();
+    SimpleWebAuthnBrowser.WebAuthnAbortService?.cancelCeremony();
     authTabGeneration++;
     const title=$('#modalRoot .modal-head h2');if(title)title.textContent=tab==='login'?'Đăng nhập':'Tạo tài khoản Enclave';
     document.querySelectorAll('#authTabs button').forEach((b) => b.classList.toggle('active', b.dataset.tab === tab));
@@ -860,6 +1199,7 @@ const App = (() => {
     }
     if(tab==='login') {
       panel.insertAdjacentHTML('beforeend','<div class="row mt-3"><button class="btn btn-ghost btn-sm" data-act="forgot-password">Quên mật khẩu</button><button class="btn btn-ghost btn-sm" data-act="lost-passkey">Mất Passkey?</button></div>');
+      preparePasskeyOptions('login');
       startConditionalLogin();
     }
   }
@@ -919,6 +1259,63 @@ const App = (() => {
       console.error('[passkey-readiness:setup]', error);
       renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
+    if (!bootstrap) preparePasskeyOptions('enroll');
+  }
+
+  // Prepare before the next tap so a delayed API response is not between that tap
+  // and the WebAuthn call. This avoids relying on browser gesture propagation;
+  // it does not prove that a particular iOS device/provider will complete it.
+  const PASSKEY_PREPARATION = {
+    enroll:{path:'/passkeys/register/passkey/options',act:'do-enroll-passkey',busy:'enroll'},
+    login:{path:'/passkeys/login/options',act:'do-login-passkey',busy:'login'},
+    recovery:{path:'/passkeys/recovery/passkey/options',act:'recovery-passkey-create',busy:'recovery-create'},
+  };
+  function ceremonyScope() {return {epoch:state.sessionEpoch,modal:modalGeneration,tab:authTabGeneration};}
+  function currentCeremony(scope) {return scope.epoch===state.sessionEpoch&&scope.modal===modalGeneration&&scope.tab===authTabGeneration;}
+  function assertCurrentCeremony(scope) {
+    if(!currentCeremony(scope))throw Object.assign(new Error('Thao tác của màn hình cũ'),{silent:true,stale:true});
+  }
+  function clearPasskeyPreparations() {
+    for(const slot of passkeyPreparations.values())clearTimeout(slot.timer);
+    passkeyPreparations.clear();
+  }
+  function refreshPasskeyPreparationControls() {
+    for(const [key,slot] of passkeyPreparations) {
+      if(!currentCeremony(slot.scope)||!slot.button.isConnected)continue;
+      const config=PASSKEY_PREPARATION[key];
+      const ready=!!slot.value&&Date.now()<slot.expiresAt;
+      slot.button.disabled=slot.pending||state.busy.has(config.busy);
+      slot.button.innerHTML=slot.pending?ico('loader-circle',17,'spin')+' Đang chuẩn bị Passkey…':ready?slot.label:ico('refresh-cw',17)+' Chuẩn bị Passkey lại';
+      slot.status.textContent=slot.pending?'Đang chuẩn bị xác thực. Khi sẵn sàng, hãy chạm nút Passkey.':ready?'Đã sẵn sàng. Chạm nút để mở xác thực của thiết bị.':slot.error?.message||'Thông tin xác thực đã hết hạn. Hãy chuẩn bị lại rồi chạm nút lần nữa.';
+    }
+  }
+  function preparePasskeyOptions(key) {
+    const config=PASSKEY_PREPARATION[key],old=passkeyPreparations.get(key);
+    if(old&&currentCeremony(old.scope)&&(old.pending||old.value&&Date.now()<old.expiresAt))return;
+    if(old)clearTimeout(old.timer);
+    const button=$(`[data-act="${config.act}"]`);if(!button)return;
+    let status=$('#'+key+'PasskeyPreparation');
+    if(!status){status=document.createElement('p');status.id=key+'PasskeyPreparation';status.className='hint';status.setAttribute('role','status');button.insertAdjacentElement('afterend',status);}
+    const slot={scope:ceremonyScope(),at:Date.now(),button,status,label:button.dataset.passkeyLabel||button.innerHTML,pending:true,value:null,error:null,expiresAt:0};
+    button.dataset.passkeyLabel=slot.label;passkeyPreparations.set(key,slot);refreshPasskeyPreparationControls();
+    api(config.path,{method:'POST',body:{}}).then(value=>{
+      if(passkeyPreparations.get(key)!==slot||!currentCeremony(slot.scope)||!button.isConnected)return;
+      slot.pending=false;
+      const supplied=Date.parse(value.expiresAt),timeout=Number(value.options?.timeout);
+      slot.expiresAt=Math.min(slot.at+240000,Number.isFinite(supplied)?supplied-5000:Infinity,Number.isFinite(timeout)&&timeout>0?slot.at+Math.max(1000,timeout-5000):Infinity);
+      if(Date.now()<slot.expiresAt)slot.value=value;
+      slot.timer=setTimeout(()=>{if(passkeyPreparations.get(key)===slot){slot.value=null;refreshPasskeyPreparationControls();}},Math.max(1,slot.expiresAt-Date.now()));
+      refreshPasskeyPreparationControls();
+    }).catch(error=>{
+      if(passkeyPreparations.get(key)!==slot||!currentCeremony(slot.scope)||!button.isConnected||error.silent)return;
+      slot.pending=false;slot.error=error;refreshPasskeyPreparationControls();
+      if(key==='enroll'&&error.code==='EMAIL_VERIFICATION_REQUIRED')reopenEmailStep();
+    });
+  }
+  function takePreparedPasskey(key) {
+    const slot=passkeyPreparations.get(key);
+    if(!slot||!currentCeremony(slot.scope)||!slot.value||Date.now()>=slot.expiresAt){preparePasskeyOptions(key);return null;}
+    clearTimeout(slot.timer);passkeyPreparations.delete(key);return slot.value;
   }
 
   /**
@@ -974,20 +1371,21 @@ const App = (() => {
       toast('Phiên thiết lập đã hết hạn. Hãy đăng nhập lại để tiếp tục gắn Passkey.', 'info');
       return;
     }
+    const scope=ceremonyScope(),prepared=takePreparedPasskey('enroll');
+    if(!prepared)return; // Prepare now; a separate tap starts the ceremony.
     await guard('enroll', btn, async () => {
       const deviceName=$('#activationDeviceName')?.value.trim()||suggestedDeviceName();
-      let prepared;
-      try{prepared=await api('/passkeys/register/passkey/options',{method:'POST',body:{}});}
-      catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
       const {registrationSessionId,options}=prepared;
-      const attResp = await webauthn('enroll', () =>
-        SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));
-      let result;
-      // Bằng chứng email có thể hết hạn trong lúc người dùng ở hộp thoại hệ điều hành: quay lại bước email,
-      // giữ nguyên authUi.activation và KHÔNG tự mở lại hộp thoại Passkey.
-      try{result=await api('/passkeys/register/passkey/verify',{method:'POST',body:{registrationSessionId,response:attResp,deviceName}});}
-      catch(e){if(e.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();throw e;}
-      await afterSession(result,`Đã kích hoạt ví cho ${result.user.displayName}.`);
+      try {
+        const attResp = await webauthn('enroll', () => SimpleWebAuthnBrowser.startRegistration({ optionsJSON: options }));
+        assertCurrentCeremony(scope);
+        const result=await api('/passkeys/register/passkey/verify',{method:'POST',body:{registrationSessionId,response:attResp,deviceName}});
+        assertCurrentCeremony(scope);await afterSession(result,`Đã kích hoạt ví cho ${result.user.displayName}.`);
+      } catch(error) {
+        if(!currentCeremony(scope))throw Object.assign(error,{silent:true});
+        if(error.code==='EMAIL_VERIFICATION_REQUIRED')return reopenEmailStep();
+        preparePasskeyOptions('enroll');throw error;
+      }
     });
   }
 
@@ -1014,14 +1412,19 @@ const App = (() => {
   }
 
   async function doLoginPasskey(btn) {
+    const scope=ceremonyScope(),prepared=takePreparedPasskey('login');
+    if(!prepared)return;
     await guard('login', btn, async () => {
-      const { authenticationSessionId, options } = await api('/passkeys/login/options', { method: 'POST' });
-      const assertion = await webauthn('login', () =>
-        SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
-      const result = await api('/passkeys/login/verify', {
-        method: 'POST', body: { authenticationSessionId, response: assertion },
-      });
-      await afterSession(result, `Xin chào ${result.user.displayName}`);
+      try {
+        const {authenticationSessionId,options}=prepared;
+        const assertion=await webauthn('login',()=>SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options}));
+        assertCurrentCeremony(scope);
+        const result=await api('/passkeys/login/verify',{method:'POST',body:{authenticationSessionId,response:assertion}});
+        assertCurrentCeremony(scope);await afterSession(result,`Xin chào ${result.user.displayName}`);
+      } catch(error) {
+        if(!currentCeremony(scope))throw Object.assign(error,{silent:true});
+        preparePasskeyOptions('login');throw error;
+      }
     });
   }
 
@@ -1220,18 +1623,30 @@ const App = (() => {
 
   function shortId(id) { return String(id || '').slice(0, 8).toUpperCase(); }
 
-  /**
-   * Ảnh sản phẩm. Hệ thống chưa có chức năng tải ảnh lên (README — hạn chế đã biết), nên hiện ô
-   * giữ chỗ trung tính theo ngành hàng, như cách các chợ hiển thị tin chưa có ảnh.
-   */
+  /** Chỉ hiển thị ảnh đã qua API media; không tải URL tùy ý trong trường image cũ. */
   function productImage(l, { sold = false, size = 56, tinted = true } = {}) {
     const label = sold ? listingStatus(l).label : '';
     const tintClass = tinted ? categoryTintClass(l && l.category) : '';
-    return `<div class="pimg ${tintClass} ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''} aria-hidden="true">${ico(categoryIcon(l && l.category), size)}</div>`;
+    const image=approvedImages(l?.images)[0];
+    if(image)return `<div class="pimg media-product ${sold?'is-sold':''}" ${sold?`data-label="${esc(label)}"`:''}>${mediaFrame(image,l?.title||l?.itemName||'Ảnh sản phẩm do người bán tải lên')}</div>`;
+    return `<div class="pimg ${tintClass} ${sold ? 'is-sold' : ''}" ${sold ? `data-label="${esc(label)}"` : ''}>${ico(categoryIcon(l && l.category), size)}<span class="pimg-cap">Chưa có ảnh</span></div>`;
+  }
+
+  function listingGallery(l) {
+    const images=approvedImages(l.images);
+    if(!images.length)return productImage(l,{sold:l.isSold,size:110});
+    return `<div class="media-gallery"><div id="listingPhotoHero"><button class="media-gallery-main" data-act="media-view" data-media-id="${esc(images[0].id)}" data-created="${esc(images[0].createdAt||'')}">${mediaFrame(images[0],l.title)}</button></div><p id="listingPhotoTime" class="small muted">${esc(mediaTime(images[0].createdAt))}</p><div class="media-thumbnails">${images.map((image,index)=>`<button class="media-thumb ${index===0?'active':''}" data-act="media-gallery-select" data-media-id="${esc(image.id)}" data-created="${esc(image.createdAt||'')}" aria-label="Xem ảnh ${index+1}" aria-pressed="${index===0?'true':'false'}">${mediaFrame(image,'Ảnh '+(index+1))}</button>`).join('')}</div><p class="hint">Ảnh do người bán cung cấp, ảnh đầu tiên là ảnh bìa. ${MEDIA_NOTICE}</p></div>`;
+  }
+  function selectGalleryImage(button) {
+    const box=$('#listingPhotoHero');if(!box||!approvedImages([{id:button.dataset.mediaId}]).length)return;
+    box.innerHTML=`<button class="media-gallery-main" data-act="media-view" data-media-id="${esc(button.dataset.mediaId)}" data-created="${esc(button.dataset.created||'')}">${mediaFrame({id:button.dataset.mediaId},'Ảnh sản phẩm đã chọn')}</button>`;
+    const time=$('#listingPhotoTime');if(time)time.textContent=mediaTime(button.dataset.created);
+    document.querySelectorAll('.media-thumbnails .media-thumb').forEach(item=>{const selected=item===button;item.classList.toggle('active',selected);item.setAttribute('aria-pressed',String(selected));});
   }
 
   /** Trạng thái của một tin đăng theo góc nhìn người mua. */
   function listingStatus(l) {
+    if (l.status === 'PENDING_SELLER_REVIEW') return { label: 'Chờ kiểm tra trước khi bán lại', tone: 'tag-warning' };
     if (l.visibility === 'HIDDEN') return { label: 'Đang ẩn', tone: '' };
     if (l.isSold) {
       return ['COMPLETED', 'RELEASED'].includes(l.soldStatus)
@@ -1400,6 +1815,7 @@ const App = (() => {
   }
 
   function statusTag(t) {
+    if (t.status === 'WAIT_CONFIRM' && t.receivedConfirmedBy === 'SYSTEM') return '<span class="tag tag-warning">Chờ kiểm hàng · hệ thống mở thời hạn</span>';
     if (t.status === 'SECURED' && t.shipment && t.shipment.status === 'PICKUP_PENDING') {
       return '<span class="tag tag-info">Chờ xe lấy hàng</span>';
     }
@@ -1417,7 +1833,7 @@ const App = (() => {
     return `<span class="tag ${tone}">${ico('shield-check', 12)} ${esc(ESCROW_UI[t.escrowStatus] || t.escrowStatus)}</span>`;
   }
 
-  // Sáu bước của một giao dịch ký quỹ — cùng một mô hình cho thanh tiến trình rút gọn ở danh
+  // Các mốc của giao dịch ký quỹ — cùng một mô hình cho thanh tiến trình rút gọn ở danh
   // sách đơn và cho dòng thời gian đầy đủ ở trang chi tiết.
   //   "Người bán xác nhận" là MỐC sự kiện (seller_ack_at), không phải trạng thái máy.
   const TX_STEPS = [
@@ -1426,26 +1842,34 @@ const App = (() => {
     { key: 'ACK', label: 'Người bán xác nhận đơn', actions: ['SELLER_ACKNOWLEDGED'] },
     { key: 'SHIPPED', label: 'Đã bàn giao cho vận chuyển', actions: ['SELLER_SHIPPED', 'SIMULATED_CARRIER_PICKED_UP'] },
     { key: 'RECEIVED', label: 'Người mua đã nhận hàng', actions: ['BUYER_RECEIVED_PACKAGE'] },
+    { key: 'INSPECTED', label: 'Người mua đã kiểm hàng', actions: ['BUYER_INSPECTED', 'BUYER_INSPECTED_PACKAGE'] },
     { key: 'DONE', label: 'Hoàn tất', actions: ['ESCROW_RELEASED', 'ADMIN_RELEASE', 'ADMIN_REFUND'] },
   ];
 
-  /** Số bước đã hoàn thành theo trạng thái hiện tại. */
-  function stepsDone(t) {
-    switch (t.status) {
-      case 'CREATED': return 1;
-      case 'SECURED': return t.sellerAckAt ? 3 : 2;
-      case 'SHIPPING': return 4;
-      case 'WAIT_CONFIRM': case 'DISPUTED': return 5;
-      case 'COMPLETED': case 'RELEASED': case 'REFUNDED': return 6;
-      default: return 1;
+  // A financial result is not evidence that all delivery/inspection milestones happened.
+  function orderMilestone(t, key, logs = []) {
+    const seen = actions => logs.some(log => actions.includes(log.action));
+    switch (key) {
+      case 'CREATED': return true;
+      case 'LOCKED': return ['LOCKED','FROZEN','RELEASED','REFUNDED'].includes(t.escrowStatus) || seen(['ESCROW_LOCKED']);
+      case 'ACK': return !!t.sellerAckAt || seen(['SELLER_ACKNOWLEDGED']);
+      case 'SHIPPED': return !!t.shipment?.pickedUpAt || seen(['SELLER_SHIPPED','SIMULATED_CARRIER_PICKED_UP']);
+      case 'RECEIVED': return !!t.receivedConfirmedAt || seen(['BUYER_RECEIVED_PACKAGE','SYSTEM_RECEIPT_WINDOW_STARTED']);
+      case 'INSPECTED': return !!t.inspectedAt || seen(['BUYER_INSPECTED']);
+      case 'DONE': return ['COMPLETED','RELEASED','REFUNDED','CANCELLED'].includes(t.status);
+      case 'DISPUTE': return !!t.dispute && t.dispute.status !== 'OPEN';
+      default: return false;
     }
   }
 
   function progressBar(t) {
-    const done = stepsDone(t);
-    return `<div class="progress" title="${esc(TX_STEPS[Math.min(done, TX_STEPS.length) - 1].label)}">${TX_STEPS.map((s, i) => {
-      let cls = i < done ? 'done' : '';
-      if (i === done && done < TX_STEPS.length) cls = t.status === 'DISPUTED' ? 'failed' : 'current';
+    const terminal = DONE_STATUSES.includes(t.status);
+    const current = TX_STEPS.findIndex(step => !orderMilestone(t,step.key));
+    const next = TX_STEPS[Math.max(0,current)];
+    const label = next.key === 'RECEIVED' && t.receivedConfirmedBy === 'SYSTEM' ? 'Hệ thống mở thời hạn kiểm hàng — chưa có xác nhận nhận kiện của người mua' : next.label;
+    return `<div class="progress" title="${esc(terminal ? nextStepText(t,true) : label)}">${TX_STEPS.map((s, i) => {
+      let cls = orderMilestone(t,s.key) ? 'done' : '';
+      if (!terminal && i === current) cls = t.status === 'DISPUTED' ? 'failed' : 'current';
       return `<span class="${cls}"></span>`;
     }).join('')}</div>`;
   }
@@ -1462,11 +1886,14 @@ const App = (() => {
         if (t.shipment && t.shipment.status === 'IN_TRANSIT') return 'Enclave Delivery đang vận chuyển · tiền vẫn ở ký quỹ';
         if (!t.shipment) return isBuyer ? 'Bấm "Xác nhận đã nhận hàng" khi kiện hàng tới' : 'Chờ người mua nhận hàng';
         return isBuyer ? 'Kiện hàng đã đến · nhận và kiểm tra hàng trước khi xác nhận' : 'Chờ người mua nhận và kiểm tra hàng';
-      case 'WAIT_CONFIRM': return isBuyer ? 'Kiểm hàng rồi giải ngân, hoặc mở tranh chấp' : 'Chờ người mua xác nhận giải ngân';
-      case 'DISPUTED': return 'Tiền đang bị đóng băng, chờ quản trị viên phân xử';
+      case 'WAIT_CONFIRM': return isBuyer ? (t.inspectedAt ? 'Đã kiểm hàng · bạn có thể xác nhận giải ngân hoặc báo vấn đề' : 'Kiểm tra sản phẩm rồi bấm Đã kiểm hàng; thao tác này chưa chuyển tiền') : 'Chờ người mua kiểm hàng và xác nhận giải ngân';
+      case 'DISPUTED': return buyerTimeoutOpen(t) && isBuyer
+        ? (t.inspectedAt ? 'Hồ sơ quá hạn còn mở · bạn có thể xác nhận giải ngân bằng Passkey hoặc bổ sung vấn đề' : 'Hồ sơ được mở tự động do quá hạn · bạn vẫn có thể bấm Đã kiểm hàng nếu đã thực sự nhận và kiểm tra sản phẩm')
+        : 'Tiền đang bị đóng băng, chờ quản trị viên phân xử';
       case 'COMPLETED': return 'Người mua đã giải ngân — giao dịch kết thúc';
       case 'RELEASED': return 'Đã giải ngân cho người bán theo phân xử';
       case 'REFUNDED': return 'Đã hoàn tiền cho người mua theo phân xử';
+      case 'CANCELLED': return t.escrowStatus === 'REFUNDED' ? 'Đơn đã hủy · tiền đã hoàn vào ví người mua' : 'Đơn nháp đã hủy · không có khoản tiền nào bị trừ';
       default: return '';
     }
   }
@@ -1560,7 +1987,21 @@ const App = (() => {
         `<button class="btn" data-act="reload">${ico('refresh-cw', 17)} Tải lại</button>`)}</div>`;
     } finally {
       renderChrome();
+      playViewEnter();
     }
+  }
+
+  let viewEnterTimer=0,lastViewEnterHash=null;
+  function playViewEnter() {
+    const el=view();if(!el)return;
+    clearTimeout(viewEnterTimer);
+    el.removeAttribute('data-enter');
+    const changed=lastViewEnterHash!==location.hash;
+    lastViewEnterHash=location.hash;
+    if(!changed||prefersReducedMotion())return;
+    void el.offsetWidth;
+    el.setAttribute('data-enter','');
+    viewEnterTimer=setTimeout(()=>el.removeAttribute('data-enter'),1200);
   }
 
   function requireLogin(message) {
@@ -1673,9 +2114,9 @@ const App = (() => {
 
         <div class="trust-strip">
           <div class="trust-item">${ico('shield-check', 20)}<div><b>Không mất tiền oan</b><span>Người bán chỉ nhận tiền khi bạn xác nhận</span></div></div>
-          <div class="trust-item">${ico('fingerprint', 20)}<div><b>Vân tay hoặc khuôn mặt</b><span>Xác thực lại mỗi khi chuyển tiền</span></div></div>
+          <div class="trust-item">${ico('fingerprint', 20)}<div><b>Xác nhận bằng Passkey</b><span>Vân tay, khuôn mặt hoặc mã PIN thiết bị</span></div></div>
           <div class="trust-item">${ico('scale', 20)}<div><b>Có người phân xử</b><span>Mở tranh chấp là tiền được đóng băng</span></div></div>
-          <div class="trust-item">${ico('link-2', 20)}<div><b>Nhật ký chống sửa</b><span>Mọi bước đều được lưu vết, không sửa được</span></div></div>
+          <div class="trust-item">${ico('link-2', 20)}<div><b>Nhật ký có thể kiểm chứng</b><span>Đối chiếu các sự kiện qua chuỗi băm</span></div></div>
         </div>
 
         ${shopCta()}
@@ -1761,7 +2202,7 @@ const App = (() => {
         </div>
 
         <div class="pd">
-          <div class="pd-gallery">${productImage(l, { sold: l.isSold, size: 110 })}</div>
+          <div class="pd-gallery">${listingGallery(l)}</div>
           <div>
             <h1 class="pd-title">${esc(l.title)}</h1>
             <div class="pd-meta">
@@ -1814,8 +2255,8 @@ const App = (() => {
             </div>
             <div class="note note-trust">
               ${ico('shield-check', 18)}
-              <span>Bạn <b>không chuyển khoản thẳng</b> cho người bán. Tiền chỉ chuyển cho người bán khi bạn xác nhận
-                đã nhận hàng — bước đó luôn cần xác thực lại bằng vân tay hoặc khuôn mặt.</span>
+              <span>Bạn <b>không chuyển khoản thẳng</b> cho người bán. Nhận kiện và ghi nhận kiểm hàng chưa chuyển tiền.
+                Bạn đồng ý giải ngân bằng Passkey (vân tay, khuôn mặt hoặc mã PIN thiết bị); nếu có tranh chấp, quản trị viên quyết định theo hồ sơ.</span>
             </div>
           </div>
         </div>
@@ -1852,21 +2293,24 @@ const App = (() => {
       return `<button class="btn btn-lg btn-block" disabled>Sản phẩm đã có người mua</button>
         <a class="btn btn-block" href="#/" data-act="filter-cat" data-cat="${esc(l.category)}">Xem tin tương tự</a>`;
     }
+    if (l.status && l.status !== 'AVAILABLE') return '<button class="btn btn-lg btn-block" disabled>Tin chưa được mở bán</button>';
     if (!state.user) {
       return `<button class="btn btn-primary btn-lg btn-block" data-act="open-auth">${ico('shopping-bag', 18)} Mua ngay</button>
         <p class="muted tiny center m-0">Cần đăng nhập để mua.</p>`;
     }
-    if (state.user.role !== 'BUYER') {
+    if (state.user.role === 'ADMIN') {
       return `<div class="note note-warning">${ico('circle-alert', 18)}
-        <span>Chỉ tài khoản <b>người mua</b> mới đặt mua được.</span></div>`;
+        <span>Tài khoản quản trị không tham gia mua bán.</span></div>`;
     }
 
     const enough = !state.wallet || state.wallet.availableBalance >= l.price;
     return `
       <div>
         <div class="price-row"><span>Giá sản phẩm</span><span class="val">${money(l.price)}</span></div>
+        <div class="price-row"><span>Vận chuyển mô phỏng</span><span>Miễn phí</span></div>
         <div class="price-row total"><span>Số tiền giữ trong ký quỹ</span><span class="val">${money(l.price)}</span></div>
       </div>
+      <fieldset class="order-shipping-form"><legend>Địa chỉ nhận hàng</legend>${shippingForm()}</fieldset>
       <div class="field">
         <label for="bkNote">Lời nhắn cho người bán</label>
         <input id="bkNote" type="text" maxlength="200" placeholder="Ví dụ: giao giờ hành chính...">
@@ -1877,17 +2321,81 @@ const App = (() => {
       <p class="muted tiny center m-0">Chưa trừ tiền ở bước này — bạn xác nhận thanh toán vào ký quỹ ở bước sau.</p>`;
   }
 
-  async function doOrder(listingId, btn, savedNote) {
-    const note = savedNote ?? ($('#bkNote') ? $('#bkNote').value.trim() : '');
-    if(!['ACTIVE','RECOVERING'].includes(state.user?.accountStatus))return beginActivation('Bạn đang đặt mua sản phẩm này. Lời nhắn và sản phẩm được giữ nguyên.',()=>doOrder(listingId,null,note));
-    const txn = await guard('order', btn, () => api('/transactions/orders', { method: 'POST', body: { listingId, note } }));
+  const orderIntents = new Map();
+
+  function shippingForm(value = {}) {
+    const fields = [
+      ['recipientName', 'Tên người nhận', 'text', 60, 'name'],
+      ['phone', 'Số điện thoại', 'tel', 16, 'tel'],
+      ['address', 'Số nhà, đường, thông tin nhận hàng', 'text', 200, 'street-address'],
+      ['ward', 'Phường / xã', 'text', 80, 'address-level3'],
+      ['district', 'Quận / huyện', 'text', 80, 'address-level2'],
+      ['province', 'Tỉnh / thành phố', 'text', 80, 'address-level1'],
+    ];
+    return fields.map(([key,label,type,max,autocomplete]) => `<div class="field">
+      <label for="ship-${key}">${esc(label)} *</label>
+      <input id="ship-${key}" data-shipping-field="${key}" type="${type}" maxlength="${max}"
+        autocomplete="${autocomplete}" value="${esc(value[key] || '')}" aria-describedby="ship-error-${key}">
+      <span id="ship-error-${key}" class="field-error" role="status"></span>
+    </div>`).join('');
+  }
+
+  function readShippingForm() {
+    return Object.fromEntries(['recipientName','phone','address','ward','district','province'].map(key =>
+      [key, ($('#ship-' + key)?.value || '').trim()]));
+  }
+
+  function showShippingErrors(errors = {}) {
+    let first;
+    document.querySelectorAll('[data-shipping-field]').forEach(input => {
+      const key = input.dataset.shippingField;
+      const message = errors[key] || errors['shipping.' + key] || '';
+      input.setAttribute('aria-invalid', message ? 'true' : 'false');
+      const error = $('#ship-error-' + key);
+      if (error) error.textContent = String(message);
+      if (message && !first) first = input;
+    });
+    if (first) first.focus({ preventScroll: true });
+  }
+
+  function validateShipping(shipping) {
+    const errors = {};
+    if ([...shipping.recipientName].length < 2 || [...shipping.recipientName].length > 60) errors.recipientName = 'Nhập tên người nhận từ 2 đến 60 ký tự.';
+    if (!/^(?:0|\+84|84)[35789]\d{8}$/.test(shipping.phone.replace(/[\s.-]/g, ''))) errors.phone = 'Nhập số điện thoại di động Việt Nam hợp lệ.';
+    if ([...shipping.address].length < 10 || [...shipping.address].length > 200) errors.address = 'Nhập địa chỉ từ 10 đến 200 ký tự.';
+    for (const key of ['ward','district','province']) if (!shipping[key] || [...shipping[key]].length > 80) errors[key] = 'Vui lòng nhập thông tin này, tối đa 80 ký tự.';
+    showShippingErrors(errors);
+    return Object.keys(errors).length === 0;
+  }
+
+  async function doOrder(listingId, btn, savedIntent) {
+    const note = savedIntent?.note ?? ($('#bkNote') ? $('#bkNote').value.trim() : '');
+    const shipping = savedIntent?.shipping || readShippingForm();
+    if (!validateShipping(shipping)) return;
+    const signature = JSON.stringify({ listingId, note, shipping });
+    let intent = orderIntents.get(listingId);
+    if (!intent || intent.signature !== signature || intent.epoch !== state.sessionEpoch) {
+      intent = { signature, epoch: state.sessionEpoch, requestId: newRequestId() };
+      orderIntents.set(listingId, intent);
+    }
+    if(!['ACTIVE','RECOVERING'].includes(state.user?.accountStatus))return beginActivation('Bạn đang đặt mua sản phẩm này. Địa chỉ, lời nhắn và sản phẩm được giữ cho bước tiếp theo.',()=>doOrder(listingId,null,{note,shipping}));
+    let txn;
+    try {
+      txn = await guard('order', btn, () => api('/transactions/orders', { method: 'POST', body: { listingId, note, shipping, requestId:intent.requestId } }));
+    } catch (error) {
+      if (error.fieldErrors) showShippingErrors(error.fieldErrors);
+      throw error;
+    }
     if (!txn) return;
+    orderIntents.delete(listingId);
 
     openModal({
       title: 'Đã tạo đơn hàng',
       body: `
         <p>Đơn <b>${esc(txn.itemName)}</b> đã được tạo nhưng <b>chưa trừ tiền</b>.</p>
         ${moneyStrip(txn)}
+        ${shippingSummary(txn.shipping || shipping)}
+        <p class="small muted">Vận chuyển mô phỏng miễn phí. Đơn nháp chưa giữ hàng${txn.draftExpiresAt ? ', tự hết hạn lúc ' + fmtDateTime(txn.draftExpiresAt) : ''}.</p>
         <div class="note note-trust">
           ${ico('shield-check', 18)}
           <span>Bước tiếp theo: thanh toán ${money(txn.amount)} để tiền được giữ lại an toàn. Người bán chỉ bắt đầu
@@ -1945,7 +2453,7 @@ const App = (() => {
     ).join('');
   }
 
-  const DONE_STATUSES = ['COMPLETED', 'RELEASED', 'REFUNDED'];
+  const DONE_STATUSES = ['COMPLETED', 'RELEASED', 'REFUNDED', 'CANCELLED'];
 
   async function loadOrders(selector, perspective, as) {
     const box = $(selector);
@@ -1981,7 +2489,7 @@ const App = (() => {
           <span>Mã GD <span class="mono">#${esc(shortId(t.id))}</span> · ${fmtDateTime(t.createdAt)}</span>
         </div>
         <div class="order-main">
-          <div class="order-tile">${productImage({ category: t.listingCategory }, { size: 30 })}</div>
+          <div class="order-tile">${productImage({ category: t.listingCategory,images:t.images,title:t.itemName }, { size: 30 })}</div>
           <div>
             <a class="order-title" href="#/tx/${esc(t.id)}">${esc(t.itemName)}</a>
             <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}</div>
@@ -2013,14 +2521,21 @@ const App = (() => {
     const out = [];
     if (isBuyer) {
       if (t.status === 'CREATED') {
-        out.push(`<button class="btn btn-primary btn-sm" data-act="secure" data-id="${id}">${ico('lock', 15)} Thanh toán an toàn</button>`);
+        if (t.listingId && !t.shipping) out.push(`<button class="btn btn-primary btn-sm" data-act="edit-order-shipping" data-id="${id}">Bổ sung địa chỉ để thanh toán</button>`);
+        else out.push(`<button class="btn btn-primary btn-sm" data-act="secure" data-id="${id}">${ico('lock', 15)} Thanh toán an toàn</button>`);
+        out.push(`<button class="btn btn-sm" data-act="open-order-cancel" data-id="${id}">Hủy đơn nháp</button>`);
       }
-      if (t.status === 'SHIPPING' && (!t.shipment || t.shipment.status === 'ARRIVED')) {
+      if ((t.status === 'SHIPPING' && (!t.shipment || t.shipment.status === 'ARRIVED')) || t.status === 'ARRIVED') {
         out.push(`<button class="btn btn-primary btn-sm" data-act="wait-confirm" data-id="${id}">${ico('package', 15)} Xác nhận đã nhận hàng</button>`);
       }
-      if (t.status === 'WAIT_CONFIRM') {
+      if (canInspectOrder(t) && !t.inspectedAt) {
+        out.push(`<button class="btn btn-primary btn-sm" data-act="open-inspected" data-id="${id}">${ico('circle-check', 15)} Đã kiểm hàng</button>`);
+      }
+      if (canReleaseOrder(t)) {
         out.push(`<button class="btn btn-trust btn-sm" data-act="open-release" data-id="${id}">${ico('fingerprint', 15)} Xác nhận bằng Passkey &amp; giải ngân</button>`);
-        out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-id="${id}">${ico('triangle-alert', 15)} Mở tranh chấp</button>`);
+      }
+      if (t.status === 'SECURED' && !t.sellerAckAt && !t.shipment) {
+        out.push(`<button class="btn btn-danger btn-sm" data-act="open-order-cancel" data-id="${id}">Hủy đơn và nhận hoàn tiền</button>`);
       }
     } else {
       if (t.status === 'SECURED' && !t.sellerAckAt) {
@@ -2029,12 +2544,33 @@ const App = (() => {
       if (t.status === 'SECURED' && t.sellerAckAt && !t.shipment) {
         out.push(`<button class="btn btn-primary btn-sm" data-act="pack" data-id="${id}">${ico('package', 15)} Đã đóng gói</button>`);
       }
-      if (t.status === 'WAIT_CONFIRM') {
-        out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-id="${id}">${ico('triangle-alert', 15)} Báo sự cố</button>`);
+      if (t.status === 'SECURED' && !t.shipment) {
+        out.push(`<button class="btn btn-danger btn-sm" data-act="open-order-reject" data-id="${id}">${t.sellerAckAt ? 'Hủy vì không thể giao hàng' : 'Từ chối đơn hàng'}</button>`);
       }
+    }
+    if (['SECURED','SHIPPING','ARRIVED','WAIT_CONFIRM'].includes(t.status) && t.escrowStatus === 'LOCKED') {
+      out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-id="${id}">${ico('triangle-alert', 15)} ${isBuyer ? 'Chưa nhận được / có vấn đề' : 'Báo sự cố'}</button>`);
+    }
+    if (t.status === 'DISPUTED' && (!t.dispute || t.dispute.status === 'OPEN')) {
+      out.push(`<button class="btn btn-sm" data-act="open-dispute-message" data-system="${t.dispute?.openedBy === 'SYSTEM' || buyerTimeoutOpen(t) ? '1' : '0'}" data-id="${id}">Bổ sung nội dung hồ sơ</button>`);
+      if (t.dispute?.openedBy === 'SYSTEM' || buyerTimeoutOpen(t)) out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-system="1" data-id="${id}">Báo vấn đề và yêu cầu phân xử</button>`);
     }
     if (t.shipment) out.push(`<button class="btn btn-sm" data-act="shipping-open" data-id="${id}">${ico('truck', 15)} Theo dõi giao hàng</button>`);
     return out.join('');
+  }
+
+  function canInspectOrder(t) {
+    return t.canInspect === true || (t.canInspect === undefined && (t.status === 'WAIT_CONFIRM' || buyerTimeoutOpen(t)));
+  }
+
+  function buyerTimeoutOpen(t) {
+    return t.status === 'DISPUTED' && t.escrowStatus === 'FROZEN'
+      && (t.dispute?.status === 'OPEN' && t.dispute.type === 'INSPECTION_TIMEOUT' && t.dispute.openedBy === 'SYSTEM'
+        || !t.dispute && (t.canInspect === true || t.canBuyerRelease === true));
+  }
+
+  function canReleaseOrder(t) {
+    return !!t.inspectedAt && (t.canBuyerRelease === true || (t.canBuyerRelease === undefined && (t.status === 'WAIT_CONFIRM' || buyerTimeoutOpen(t))));
   }
 
 
@@ -2052,10 +2588,10 @@ const App = (() => {
   }
 
   function rememberShipping(t) {
-    if (!t || !t.id || !t.shipment) return;
+    if (!t || !t.id) return;
     const previous = shippingRows.get(t.id);
     if (previous && (Number(previous.version) > Number(t.version)
-      || Date.parse(previous.shipment.serverNow) > Date.parse(t.shipment.serverNow))) return;
+      || Date.parse(previous.shipment?.serverNow) > Date.parse(t.shipment?.serverNow))) return;
     shippingRows.set(t.id, t);
   }
 
@@ -2112,7 +2648,7 @@ const App = (() => {
 
   function startShippingWatch() {
     if (shippingWatch || !state.token || !state.user || state.user.role === 'ADMIN'
-      || state.user.accountStatus && state.user.accountStatus !== 'ACTIVE') return;
+      || state.user.accountStatus && !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)) return;
     const watch = { epoch: state.sessionEpoch, stopped: false, busy: false, timer: null };
     shippingWatch = watch;
     watch.timer = setTimeout(() => pollShipping(watch), 100);
@@ -2140,14 +2676,13 @@ const App = (() => {
       if (!shippingWatchAlive(watch)) return;
       let changed = false;
       for (const list of lists) for (const t of list.transactions || []) {
-        if (!t.shipment) continue;
         const before = shippingRows.get(t.id);
         rememberShipping(t);
         const current = shippingRows.get(t.id);
         if (current && (!before || shippingKey(before) !== shippingKey(current))) changed = true;
       }
       const rows = Array.from(shippingRows.values());
-      active = rows.some((t) => ['PICKUP_PENDING', 'IN_TRANSIT'].includes(t.shipment.status));
+      active = rows.some((t) => t.shipment && ['PICKUP_PENDING', 'IN_TRANSIT'].includes(t.shipment.status));
       if (state.shippingModalId) {
         const t = shippingRows.get(state.shippingModalId);
         if (t && window.EnclaveShippingMotion) {
@@ -2157,7 +2692,7 @@ const App = (() => {
       }
       const page = $('#txPage');
       const current = page && shippingRows.get(page.dataset.id);
-      if (current && page.dataset.shippingKey !== shippingKey(current)) {
+      if (current && page.dataset.shippingKey !== shippingKey(current) && !state.busy.size) {
         await viewTransaction(current.id);
       } else if (changed && currentHead() === 'orders' && !state.busy.size) {
         const perspective = state.orderTab === 'sell' ? 'SELLER' : 'BUYER';
@@ -2165,7 +2700,7 @@ const App = (() => {
       }
       if (!shippingWatchAlive(watch)) return;
       if (!$('#modalRoot').children.length && !state.busy.size && document.visibilityState !== 'hidden') {
-        const candidate = rows.find((t) => ['SECURED', 'SHIPPING'].includes(t.status) && t.escrowStatus === 'LOCKED'
+        const candidate = rows.find((t) => t.shipment && ['SECURED', 'SHIPPING'].includes(t.status) && t.escrowStatus === 'LOCKED'
           && ((t.sellerId === state.user.id && t.shipment.status === 'PICKUP_PENDING')
             || (t.buyerId === state.user.id && ['IN_TRANSIT', 'ARRIVED'].includes(t.shipment.status)))
           && !shippingNoticeSeen(t));
@@ -2181,28 +2716,68 @@ const App = (() => {
 
   async function secureOrder(id, btn, then) {
     if(!['ACTIVE','RECOVERING'].includes(state.user?.accountStatus))return beginActivation('Bạn đang thanh toán đơn hàng.',()=>secureOrder(id,null,then));
-    const epoch=state.sessionEpoch;
+    const epoch=state.sessionEpoch,generation=modalGeneration;
     const prepared=await guard('prepare-secure:'+id,btn,()=>api(`/transactions/${id}/reauth/options`,{method:'POST',body:{action:'LOCK_ESCROW'}}));
-    if(!prepared || epoch!==state.sessionEpoch)return;
-    authUi.lock={id,then,prepared,createdAt:Date.now(),requestId:newRequestId(),epoch};
-    openModal({title:'Xác nhận thanh toán vào ký quỹ',body:`<p>Sản phẩm: <b>${esc(prepared.context.itemName)}</b></p><div class="price-row total"><span>Thanh toán cho ${esc(prepared.context.sellerName)}</span><b>${money(prepared.context.amount)}</b></div><div class="note note-trust mt-3">Tiền sẽ được giữ trong ký quỹ cho đến khi bạn xác nhận đã nhận hàng. Xác nhận bằng Passkey để thanh toán.</div><p class="hint">Tiền chưa chuyển cho người bán. Mỗi lần thanh toán đều cần xác nhận, kể cả khi đã đăng nhập bằng Passkey.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="secure-confirm">Xác nhận bằng Passkey</button>'});
+    if(!prepared || epoch!==state.sessionEpoch || generation!==modalGeneration)return;
+    authUi.lock={id,then,prepared,lastContext:prepared.context,createdAt:Date.now(),requestId:newRequestId(),epoch,attempted:false,needsReconcile:false};
+    showSecureReview(authUi.lock);
   }
+
+  function showSecureReview(pending, notice) {
+    const context = pending.prepared?.context || pending.lastContext || {};
+    const checking = pending.attempted || pending.needsReconcile || !pending.prepared;
+    openModal({title:'Xác nhận thanh toán vào ký quỹ',body:`${notice ? `<div class="note note-warning" role="status">${esc(notice)}</div>` : ''}<p>Sản phẩm: <b>${esc(context.itemName)}</b></p><div class="price-row total"><span>Thanh toán cho ${esc(context.sellerName)}</span><b>${money(context.amount)}</b></div><div class="note note-trust mt-3">Tiền được giữ trong ký quỹ. Nhận kiện và kiểm hàng không tự chuyển tiền; giải ngân cần sự đồng ý riêng của bạn hoặc quyết định phân xử hợp lệ.</div><p class="hint">${checking ? 'Hệ thống sẽ đọc lại trạng thái đơn trước. Nếu chưa thanh toán, bạn được xem lại nội dung mới trước khi xác nhận Passkey.' : 'Xác nhận bằng Passkey để khóa tiền. Mỗi lần thanh toán đều cần xác nhận, kể cả khi đã đăng nhập bằng Passkey.'}</p>`,footer:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="secure-confirm">${checking ? 'Kiểm tra lại trạng thái' : 'Xác nhận bằng Passkey'}</button>`});
+  }
+
+  async function finishSecureOutcome(pending, txn) {
+    if (pending.epoch !== state.sessionEpoch || authUi.lock !== pending) return;
+    authUi.lock=null;closeModal();await refreshWallet();
+    if (pending.epoch !== state.sessionEpoch) return;
+    if (pending.then === 'tx') location.hash = '#/tx/' + encodeURIComponent(pending.id);
+    else await route();
+    if (pending.epoch !== state.sessionEpoch) return;
+    const refunded=txn.escrowStatus==='REFUNDED',released=txn.escrowStatus==='RELEASED',frozen=txn.escrowStatus==='FROZEN';
+    openModal({title:refunded?'Đơn đã được hoàn tiền':released?'Đơn đã được giải ngân':'Đơn đã thanh toán vào ký quỹ',body:`<p>${refunded?'Máy chủ xác nhận khoản giữ của đơn đã hoàn vào ví người mua.':released?'Máy chủ xác nhận giao dịch đã kết thúc và tiền đã được chuyển cho người bán.':frozen?'Máy chủ xác nhận tiền đã vào ký quỹ và hiện đang bị đóng băng trong hồ sơ tranh chấp.':'Máy chủ xác nhận tiền đã được giữ trong ký quỹ, chưa chuyển cho người bán.'}</p><p>Không cần xác nhận thanh toán lại cho đơn này.</p>`,footer:`<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button><a class="btn" href="#/tx/${esc(pending.id)}">Xem chi tiết đơn</a>`});
+  }
+
   async function confirmSecureOrder(btn){
     const pending=authUi.lock;if(!pending || pending.epoch!==state.sessionEpoch)return;
-    const {id,then}=pending;
-    await guard('secure:'+id,btn,async()=>{
-      if(Date.now()-pending.createdAt>110000){pending.prepared=await api(`/transactions/${id}/reauth/options`,{method:'POST',body:{action:'LOCK_ESCROW'}});pending.createdAt=Date.now();}
-      const {reauthSessionId,options}=pending.prepared;
-      const response=await webauthn('reauth',()=>SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options}));
-      const {reauthGrant}=await api(`/transactions/${id}/reauth/verify`,{method:'POST',body:{reauthSessionId,response}});
-      pending.createdAt=0;
-      return api(`/transactions/${id}/secure`,{method:'POST',body:{requestId:pending.requestId,reauthGrant}});
-    },'Đã thanh toán — tiền đang được giữ trong ký quỹ, chưa chuyển cho người bán.');
-    authUi.lock=null;
-    closeModal();
-    await refreshWallet();
-    if (then === 'tx') { location.hash = '#/tx/' + id; return; }
-    route();
+    const {id}=pending;let outcome;
+    try {
+      await guard('secure:'+id,btn,async()=>{
+        if (pending.attempted || pending.needsReconcile || !pending.prepared || Date.now()-pending.createdAt>110000) {
+          const current=await api('/transactions/'+encodeURIComponent(id));
+          if (['LOCKED','FROZEN','RELEASED','REFUNDED'].includes(current.escrowStatus)) {outcome=current;return;}
+          if (current.status!=='CREATED'||current.escrowStatus!=='NONE') throw new Error('Đơn không còn chờ thanh toán. Hãy mở chi tiết để xem trạng thái mới.');
+          pending.prepared=await api(`/transactions/${id}/reauth/options`,{method:'POST',body:{action:'LOCK_ESCROW'}});
+          pending.lastContext=pending.prepared.context;pending.createdAt=Date.now();pending.attempted=false;pending.needsReconcile=false;
+          showSecureReview(pending,'Đã đọc lại trạng thái và chuẩn bị nội dung mới. Hãy kiểm tra số tiền, người bán rồi xác nhận bằng Passkey.');
+          return;
+        }
+        const {reauthSessionId,options}=pending.prepared;pending.attempted=true;
+        try {
+          const response=await webauthn('reauth',()=>SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options}));
+          const {reauthGrant}=await api(`/transactions/${id}/reauth/verify`,{method:'POST',body:{reauthSessionId,response}});
+          pending.prepared=null;pending.createdAt=0;
+          outcome=await api(`/transactions/${id}/secure`,{method:'POST',body:{requestId:pending.requestId,reauthGrant}});
+        } catch(error) {
+          pending.prepared=null;pending.createdAt=0;
+          if (error.unknownOutcome) {
+            pending.needsReconcile=true;
+            try {
+              const current=await api('/transactions/'+encodeURIComponent(id));
+              if (['LOCKED','FROZEN','RELEASED','REFUNDED'].includes(current.escrowStatus)) {outcome=current;return;}
+              pending.needsReconcile=false;
+            } catch(readError) {if(readError.silent)throw readError;}
+          }
+          throw error;
+        }
+      });
+    } catch(error) {
+      if(!error.silent&&pending.epoch===state.sessionEpoch&&authUi.lock===pending)showSecureReview(pending,error.message);
+      return;
+    }
+    if(outcome)await finishSecureOutcome(pending,outcome);
   }
 
   async function acknowledgeOrder(id, btn) {
@@ -2243,38 +2818,135 @@ const App = (() => {
     }
   }
 
-  async function waitConfirmOrder(id, btn) {
-    await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }),
-      'Đã ghi nhận bạn nhận được hàng. Kiểm hàng rồi giải ngân, hoặc mở tranh chấp nếu có vấn đề.');
-    route();
+  function confirmReceipt(id) {
+    openModal({title:'Bạn đã nhận được kiện hàng?',body:'<p>Chỉ xác nhận khi kiện hàng đã được giao tới bạn. Bước này bắt đầu thời hạn kiểm hàng, chưa xác nhận sản phẩm đạt yêu cầu và chưa chuyển tiền cho người bán.</p><p>Nếu chưa nhận được hàng, hãy chọn <b>Chưa nhận được / có vấn đề</b> trên đơn hàng.</p>',footer:`<button class="btn" data-act="modal-close">Chưa nhận được</button><button class="btn btn-primary" data-act="wait-confirm-confirm" data-id="${esc(id)}">Xác nhận đã nhận kiện</button>`});
   }
 
-  function openDisputeModal(id) {
+  async function waitConfirmOrder(id, btn) {
+    await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }),
+      'Đã ghi nhận bạn nhận được kiện hàng. Tiền chưa chuyển cho người bán.');
+    closeModal();
+    await route();
+    openModal({title:'Đã xác nhận nhận kiện',body:'<p>Hãy kiểm tra tình trạng, phụ kiện và mô tả của sản phẩm, rồi bấm <b>Đã kiểm hàng</b>. Nếu có vấn đề, bạn vẫn có thể mở tranh chấp.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Tiếp tục kiểm hàng</button>'});
+  }
+
+  async function loadOrderForModal(id) {
+    const epoch = state.sessionEpoch, generation = modalGeneration;
+    const t = await api('/transactions/' + encodeURIComponent(id));
+    return epoch === state.sessionEpoch && generation === modalGeneration ? t : null;
+  }
+
+  async function openOrderCancel(id, seller) {
+    const t = await loadOrderForModal(id);
+    if (!t) return;
+    const draft = t.status === 'CREATED' && t.escrowStatus === 'NONE';
+    openModal({
+      title: draft ? 'Hủy đơn nháp?' : seller ? (t.sellerAckAt ? 'Hủy đơn đã xác nhận?' : 'Từ chối đơn hàng?') : 'Hủy đơn và nhận hoàn tiền?',
+      body: `<p>Đơn <b>${esc(t.itemName)}</b> · ${money(t.amount)}.</p>${draft ? '<p>Đơn này chưa giữ tiền và chưa giữ hàng. Hủy nháp không tạo bút toán hay khoản hoàn tiền.</p>' : '<p>Toàn bộ tiền đang giữ sẽ hoàn vào ví người mua. Không thực hiện hoàn tiền qua PayPal.</p>'}
+        ${seller && t.sellerAckAt ? '<div class="note note-warning">Tin sẽ được ẩn để bạn kiểm tra lại tình trạng hàng trước khi chủ động mở bán lại.</div>' : '<p class="small muted">Tin đăng có thể nhận người mua khác sau khi hủy thành công.</p>'}
+        ${seller ? '<div class="field"><label for="orderRejectReason">Lý do không thể giao hàng *</label><textarea id="orderRejectReason" maxlength="1000" placeholder="Ví dụ: sản phẩm bị hỏng, không thể giao như mô tả"></textarea></div>' : ''}`,
+      footer:`<button class="btn" data-act="modal-close">Giữ đơn hàng</button><button class="btn btn-danger" data-act="order-cancel-confirm" data-id="${esc(id)}" data-seller="${seller ? '1' : '0'}">${seller ? 'Xác nhận không giao hàng' : 'Xác nhận hủy đơn'}</button>`,
+    });
+  }
+
+  async function cancelOrder(id, seller, btn) {
+    const reason = seller ? ($('#orderRejectReason')?.value || '').trim() : undefined;
+    if (seller && !reason) return toast('Vui lòng nêu lý do không thể giao hàng.', 'err');
+    const result = await guard('cancel-order:' + id, btn, () => api('/transactions/' + encodeURIComponent(id) + (seller ? '/reject' : '/cancel'), {method:'POST',body:seller ? {reason} : {}}));
+    closeModal();
+    await refreshWallet();
+    await route();
+    openModal({title:result?.escrowStatus === 'NONE' ? 'Đã hủy đơn nháp' : 'Đã hủy đơn hàng',body:result?.escrowStatus === 'NONE' ? '<p>Nháp đã đóng. Ví không thay đổi và không có khoản hoàn tiền vì đơn chưa thanh toán.</p>' : '<p>Tiền đã hoàn vào ví người mua. Đơn không tiếp tục giao hàng và không có khoản tiền nào chuyển cho người bán.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+  }
+
+  async function openInspected(id) {
+    const t = await loadOrderForModal(id);
+    if (!t) return;
+    if (!canInspectOrder(t)) return toast('Đơn không còn ở bước có thể ghi nhận kiểm hàng. Hãy tải lại trạng thái.', 'err');
+    openModal({title:'Bạn đã kiểm tra sản phẩm?',body:`<p>Đơn <b>${esc(t.itemName)}</b>.</p><p>Chỉ xác nhận khi bạn đã thực sự nhận, mở kiện và kiểm tra sản phẩm. Thao tác này ghi nhận mốc kiểm hàng, <b>chưa giải ngân</b> và không đóng hồ sơ tranh chấp đang mở.</p>`,footer:`<button class="btn" data-act="modal-close">Chưa kiểm xong</button><button class="btn btn-primary" data-act="inspected-confirm" data-id="${esc(id)}">Xác nhận đã kiểm hàng</button>`});
+  }
+
+  async function inspectOrder(id, btn) {
+    const t = await guard('inspect:' + id, btn, () => api('/transactions/' + encodeURIComponent(id) + '/inspected',{method:'POST',body:{}}));
+    if (!t) return;
+    closeModal();
+    await route();
+    openModal({title:'Đã ghi nhận kiểm hàng',body:'<p>Tiền vẫn ở ký quỹ. Bạn có thể xác nhận giải ngân bằng Passkey nếu đồng ý nhận sản phẩm, hoặc báo vấn đề để quản trị viên xem xét.</p>',footer:`<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-trust" data-act="open-release" data-id="${esc(id)}">Xem lại và giải ngân</button>`});
+  }
+
+  function shippingSummary(shipping) {
+    if (!shipping) return '<p class="small muted">Đơn cũ chưa có bản chụp địa chỉ nhận hàng. Hệ thống không tự điền địa chỉ thay bạn.</p>';
+    return `<dl class="spec-list order-address"><div class="spec"><dt>Người nhận</dt><dd>${esc(shipping.recipientName)}</dd></div><div class="spec"><dt>Điện thoại</dt><dd>${esc(shipping.phone)}</dd></div><div class="spec"><dt>Địa chỉ</dt><dd>${esc([shipping.address,shipping.ward,shipping.district,shipping.province].filter(Boolean).join(', '))}</dd></div></dl>`;
+  }
+
+  function orderShippingCard(t, role) {
+    if (role === 'ADMIN') return '';
+    if (role === 'SELLER' && !t.shipping) return '';
+    const editable = role === 'BUYER' && ['CREATED','SECURED'].includes(t.status) && !t.shipment?.pickedUpAt;
+    return `<div class="card"><div class="card-head"><h3>Địa chỉ giao hàng</h3></div><div class="card-body">${shippingSummary(t.shipping)}<p class="small muted">Vận chuyển mô phỏng miễn phí. Địa chỉ được lưu riêng theo đơn${t.shipping?.version ? ' · phiên bản ' + esc(t.shipping.version) : ''}.</p>${editable ? `<button class="btn btn-sm" data-act="edit-order-shipping" data-id="${esc(t.id)}">${t.shipping ? 'Cập nhật địa chỉ đơn này' : 'Bổ sung địa chỉ nhận hàng'}</button>` : ''}</div></div>`;
+  }
+
+  async function openOrderShipping(id) {
+    const t = await loadOrderForModal(id);
+    if (!t) return;
+    openModal({title:'Cập nhật địa chỉ nhận hàng',body:`<p class="small">Chỉ thay đổi bản chụp của đơn này. Sau thanh toán, việc cập nhật được lưu vết và chỉ được phép trước khi vận chuyển lấy hàng.</p>${shippingForm(t.shipping || {})}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="save-order-shipping" data-id="${esc(id)}">Lưu địa chỉ đơn hàng</button>`});
+  }
+
+  async function saveOrderShipping(id, btn) {
+    const shipping = readShippingForm();
+    if (!validateShipping(shipping)) return;
+    try {
+      await guard('shipping-address:' + id, btn, () => api('/transactions/' + encodeURIComponent(id) + '/shipping',{method:'POST',body:{shipping}}));
+    } catch(error) { if (error.fieldErrors) showShippingErrors(error.fieldErrors); throw error; }
+    closeModal();
+    await route();
+    openModal({title:'Đã lưu địa chỉ nhận hàng',body:'<p>Bản chụp địa chỉ của đơn đã được cập nhật. Số tiền ký quỹ không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+  }
+
+  function openDisputeModal(id, systemCase = false) {
     openModal({
       title: 'Mở tranh chấp',
       body: `
+        ${systemCase ? '<div class="note note-warning">Đây là yêu cầu quản trị viên phân xử vì có vấn đề thực tế. Sau khi gửi, hồ sơ sẽ do quản trị viên quyết định; đường tự giải ngân của hồ sơ quá hạn không còn áp dụng. Nếu chỉ muốn bổ sung thông tin, hãy đóng và chọn Bổ sung nội dung hồ sơ.</div>' : ''}
         <div class="note note-warning mb-4">
           ${ico('triangle-alert', 18)}
           <span>Khi mở tranh chấp, toàn bộ tiền trong ký quỹ bị <b>đóng băng</b> — không bên nào rút được — cho tới khi
             quản trị viên xem xét và quyết định hoàn tiền cho người mua hay giải ngân cho người bán.</span>
         </div>
         <div class="field">
+          <label for="dsType">Vấn đề cần hỗ trợ</label>
+          <select id="dsType"><option value="NOT_RECEIVED">Chưa nhận được hàng</option><option value="NOT_SHIPPED">Người bán chưa xử lý / chưa gửi hàng</option><option value="DEFECT">Sản phẩm hỏng, thiếu hoặc sai mô tả</option></select>
+        </div>
+        <div class="field">
           <label for="dsReason">Mô tả sự cố</label>
-          <textarea id="dsReason" placeholder="Hàng không đúng mô tả, thiếu phụ kiện, chưa nhận được hàng..."></textarea>
-        </div>`,
+          <textarea id="dsReason" maxlength="1000" placeholder="Nêu rõ sự cố và nội dung bạn muốn quản trị viên xem xét; không ghi mật khẩu hay mã xác thực."></textarea>
+        </div>${mediaPickerHTML('EVIDENCE')}`,
       footer: `
         <button class="btn" data-act="modal-close">Huỷ</button>
         <button class="btn btn-danger" data-act="do-dispute" data-id="${esc(id)}">Mở tranh chấp</button>`,
     });
+    beginMediaDraft('EVIDENCE',id);
   }
 
   async function doDispute(id, btn) {
     const reason = $('#dsReason') ? $('#dsReason').value.trim() : '';
-    if (!reason) return toast('Vui lòng mô tả sự cố', 'err');
-    await guard('dispute:' + id, btn, () => api(`/transactions/${id}/dispute`, { method: 'POST', body: { reason } }),
-      'Đã mở tranh chấp. Tiền trong ký quỹ đã bị đóng băng.');
-    closeModal();
-    route();
+    const type = $('#dsType')?.value || 'NOT_RECEIVED';
+    if (reason.length<10||reason.length>1000) return toast('Mô tả sự cố từ 10 đến 1000 ký tự.', 'err');
+    const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } }),
+      {successMsg:'Đã mở tranh chấp. Tiền trong ký quỹ đã bị đóng băng.'});
+    await finishMediaForm(scope,{title:'Đã lưu nội dung tranh chấp',body:'<p>Tiền đang được giữ và đóng băng trong ký quỹ. Nếu đơn đã có hồ sơ mở, nội dung vừa gửi được bổ sung vào hồ sơ đó; hệ thống không tạo khoản giữ tiền thứ hai.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+  }
+
+  function openDisputeMessage(id, systemCase = false) {
+    openModal({title:'Bổ sung nội dung hồ sơ',body:`<p>Nội dung này được thêm vào hồ sơ đang mở, không thay đổi người mở hay loại hồ sơ.${systemCase ? ' Nếu bạn đang có sự cố cần quản trị viên quyết định, hãy dùng <b>Báo vấn đề và yêu cầu phân xử</b>.' : ''}</p><div class="field"><label for="disputeMessage">Nội dung bổ sung *</label><textarea id="disputeMessage" maxlength="1000" placeholder="Bổ sung thông tin giao nhận hoặc mô tả liên quan, không ghi mật khẩu hay mã xác thực."></textarea></div>${mediaPickerHTML('EVIDENCE')}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="send-dispute-message" data-id="${esc(id)}">Gửi nội dung bổ sung</button>`});
+    beginMediaDraft('EVIDENCE',id);
+  }
+
+  async function sendDisputeMessage(id, btn) {
+    const message = ($('#disputeMessage')?.value || '').trim();
+    if (message.length<5 || message.length>1000) return toast('Nhập nội dung từ 5 đến 1000 ký tự.', 'err');
+    const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api('/transactions/' + encodeURIComponent(id) + '/dispute/messages',{method:'POST',body:{message,imageIds}}));
+    await finishMediaForm(scope,{title:'Đã lưu nội dung bổ sung',body:'<p>Nội dung được thêm vào hồ sơ hiện có. Thao tác này không chuyển tiền và không tự thay đổi loại hồ sơ.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
 
@@ -2282,10 +2954,12 @@ const App = (() => {
 
   async function openReleaseModal(id) {
     let t;
-    try { t = await api('/transactions/' + id); } catch (e) { return toast(e.message, 'err'); }
+    try { t = await loadOrderForModal(id); } catch (e) { return toast(e.message, 'err'); }
+    if (!t) return;
+    if (!canReleaseOrder(t)) return toast('Bạn cần bấm Đã kiểm hàng trước; hồ sơ cũng phải còn cho phép người mua giải ngân.', 'err');
 
     openModal({
-      title: 'Xác nhận đã nhận hàng và giải ngân',
+      title: 'Đồng ý giải ngân cho người bán',
       body: `
         <p>Sản phẩm: <b>${esc(t.itemName)}</b></p>
         ${moneyStrip(t)}
@@ -2310,7 +2984,7 @@ const App = (() => {
 
   async function doRelease(id, btn) {
     await guard('release:' + id, btn, async () => {
-      const { reauthSessionId, options } = await api(`/transactions/${id}/reauth/options`, { method: 'POST' });
+      const { reauthSessionId, options } = await api(`/transactions/${id}/reauth/options`, { method: 'POST', body:{action:'RELEASE_ESCROW'} });
       const assertion = await webauthn('reauth', () =>
         SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
       const { reauthGrant } = await api(`/transactions/${id}/reauth/verify`, {
@@ -2323,7 +2997,8 @@ const App = (() => {
 
     closeModal();
     await refreshWallet();
-    route();
+    await route();
+    openModal({title:'Đã giải ngân cho người bán',body:'<p>Khoản ký quỹ của đơn đã được chuyển cho người bán. Giao dịch đã kết thúc và không thể hủy lại từ đơn này.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   /**
@@ -2366,15 +3041,50 @@ const App = (() => {
   function suggestedDeviceName(){const ua=navigator.userAgent;return `${/Android/.test(ua)?'Android':/iPhone|iPad/.test(ua)?'iPhone / iPad':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Thiết bị'}, ${/Edg/.test(ua)?'Edge':/Chrome/.test(ua)?'Chrome':/Safari/.test(ua)?'Safari':'trình duyệt'}`;}
   function bindRegistrationValidation(){
     const reserved=new Set(['admin','support','enclave','root','system','moderator']);
+    const generation=modalGeneration,tabGeneration=authTabGeneration;
     for(const input of document.querySelectorAll('#authPanel input')){
-      input.addEventListener('input',()=>input.setCustomValidity(''));
+      let version=0;
+      const alive=()=>input.isConnected&&generation===modalGeneration&&tabGeneration===authTabGeneration;
+      const error=document.createElement('span');
+      error.id=input.id+'Error';error.className='field-error';error.hidden=true;
+      error.setAttribute('role','status');
+      input.insertAdjacentElement('afterend',error);
+      const showError=()=>{
+        if(!alive())return;
+        let message=input.validity.valid?'':input.validationMessage;
+        if(input.validity.valueMissing)message='Vui lòng nhập thông tin này.';
+        else if(input.validity.typeMismatch&&input.type==='email')message='Email chưa đúng định dạng. Ví dụ: ten@example.com.';
+        else if(input.validity.tooShort)message=`Vui lòng nhập ít nhất ${input.minLength} ký tự.`;
+        error.textContent=message;error.hidden=!message;
+        const descriptions=(input.getAttribute('aria-describedby')||'').split(/\s+/).filter(id=>id&&id!==error.id);
+        if(message){input.setAttribute('aria-invalid','true');descriptions.push(error.id);}
+        else input.removeAttribute('aria-invalid');
+        if(descriptions.length)input.setAttribute('aria-describedby',descriptions.join(' '));
+        else input.removeAttribute('aria-describedby');
+      };
+      input.addEventListener('input',()=>{
+        version++;input.setCustomValidity('');error.textContent='';error.hidden=true;
+        input.removeAttribute('aria-invalid');
+        const descriptions=(input.getAttribute('aria-describedby')||'').split(/\s+/).filter(id=>id&&id!==error.id);
+        if(descriptions.length)input.setAttribute('aria-describedby',descriptions.join(' '));
+        else input.removeAttribute('aria-describedby');
+      });
       input.addEventListener('blur',async()=>{
+        if(!alive()||!input.value)return;
+        const requestVersion=++version;
         if(input.id==='regUsername'){
           input.value=input.value.trim().toLowerCase();const name=input.value;
           input.setCustomValidity(/^[a-z0-9](?:[a-z0-9]|[._-](?=[a-z0-9])){1,30}[a-z0-9]$/.test(name)&&!reserved.has(name)?'':'Tên đăng nhập không hợp lệ hoặc dành riêng.');
-          if(input.checkValidity())try{const result=await api('/passkeys/username-availability?username='+encodeURIComponent(name));if(input.isConnected&&input.value===name)input.setCustomValidity(result.available?'':'Tên đăng nhập đã có người dùng.');}catch{}
+          showError();
+          if(input.validity.valid)try{
+            const result=await api('/passkeys/username-availability?username='+encodeURIComponent(name));
+            if(!alive()||version!==requestVersion||input.value!==name)return;
+            input.setCustomValidity(result.available?'':'Tên đăng nhập đã có người dùng.');
+          }catch{}
         }
-        if(input.value)input.reportValidity();
+        // reportValidity() may focus the old input and reopen the iOS keyboard.
+        // Only explicit Submit should invoke native interactive validation.
+        if(alive()&&version===requestVersion)showError();
       });
     }
   }
@@ -2384,6 +3094,7 @@ const App = (() => {
       if(!SimpleWebAuthnBrowser.browserSupportsWebAuthnAutofill || !await SimpleWebAuthnBrowser.browserSupportsWebAuthnAutofill())return;
       if(generation!==modalGeneration||tabGeneration!==authTabGeneration||!$('#loginUsername'))return;
       const {authenticationSessionId,options}=await api('/passkeys/login/options',{method:'POST'});
+      if(generation!==modalGeneration||tabGeneration!==authTabGeneration||epoch!==state.sessionEpoch||state.busy.has('login'))return;
       const response=await SimpleWebAuthnBrowser.startAuthentication({optionsJSON:options,useBrowserAutofill:true});
       if(generation!==modalGeneration||tabGeneration!==authTabGeneration||epoch!==state.sessionEpoch)return;
       const result=await api('/passkeys/login/verify',{method:'POST',body:{authenticationSessionId,response}});
@@ -2483,7 +3194,7 @@ const App = (() => {
   }
   function openEmailRecoveryRequest(kind='recovery'){
     authUi.action=kind;authUi.recoveryOtp=null;
-    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục Passkey qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Nhận mã 6 số qua email, sau đó tạo Passkey mới theo hướng dẫn. Sau khi xác nhận mã, yêu cầu chờ 24 giờ để bảo vệ tài khoản; giải ngân bị hạn chế 72 giờ sau khôi phục.'}</p>${kind==='password'?'':'<p class="hint">Nếu Passkey vẫn dùng được trên thiết bị khác, bạn có thể đăng nhập bằng nó. <button class="btn btn-ghost btn-sm" data-act="recovery-code-open">Tôi có mã dự phòng đã lưu</button></p>'}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">${kind==='password'?'Gửi hướng dẫn':'Gửi mã xác nhận'}</button>`});
+    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục Passkey qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Nhận mã 6 số qua email, sau đó tạo Passkey mới theo hướng dẫn. Sau khi xác nhận mã, yêu cầu chờ 24 giờ để bảo vệ tài khoản; thanh toán khóa tiền và giải ngân bị hạn chế 72 giờ sau khôi phục.'}</p>${kind==='password'?'':'<p class="hint">Nếu Passkey vẫn dùng được trên thiết bị khác, bạn có thể đăng nhập bằng nó. <button class="btn btn-ghost btn-sm" data-act="recovery-code-open">Tôi có mã dự phòng đã lưu</button></p>'}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">${kind==='password'?'Gửi hướng dẫn':'Gửi mã xác nhận'}</button>`});
   }
   function openRecoveryEmailCode(result,email){
     const skew=Date.parse(result.serverNow)-Date.now(),offset=Number.isFinite(skew)?skew:0;
@@ -2496,6 +3207,28 @@ const App = (() => {
   function openRecoveryPasskey(emailRecovery){
     authUi.recoveryEmail=emailRecovery;
     openModal({title:'Tạo Passkey khôi phục',dismissible:false,body:`<p>Tạo Passkey mới bằng vân tay, khuôn mặt hoặc mã PIN thiết bị. Các Passkey cũ sẽ bị thu hồi khi hoàn tất.</p>${authField('recoveryDeviceName','Tên Passkey','text',suggestedDeviceName())}${emailRecovery?authField('recoveryNewPassword','Mật khẩu mới bắt buộc','password'):''}`,footer:'<button class="btn" data-act="do-logout">Đăng xuất</button><button class="btn btn-primary" data-act="recovery-passkey-create">Tạo Passkey mới</button>'});
+    preparePasskeyOptions('recovery');
+  }
+
+  async function createRecoveryPasskey(btn) {
+    const deviceName=$('#recoveryDeviceName')?.value,newPassword=$('#recoveryNewPassword')?.value;
+    const passwordInput=$('#recoveryNewPassword');
+    // Reject a missing required password before creating a credential on the
+    // device. This synchronous check preserves the next valid tap's ceremony.
+    if(passwordInput&&!passwordInput.reportValidity())return;
+    const scope=ceremonyScope(),prepared=takePreparedPasskey('recovery');if(!prepared)return;
+    await guard('recovery-create',btn,async()=>{
+      try {
+        const {registrationSessionId,options}=prepared;
+        const response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));
+        assertCurrentCeremony(scope);
+        const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});
+        assertCurrentCeremony(scope);await afterSession(result,'Đã khôi phục tài khoản.');
+      } catch(error) {
+        if(!currentCeremony(scope))throw Object.assign(error,{silent:true});
+        preparePasskeyOptions('recovery');throw error;
+      }
+    });
   }
   async function handleAccountAction(){
     const hash=location.hash || '';if(!hash.startsWith('#/account-action?'))return;
@@ -2514,7 +3247,7 @@ const App = (() => {
     }
     const titles={'recovery-start':'Xác nhận bắt đầu khôi phục','recovery-cancel':'Hủy yêu cầu khôi phục','recovery-finish':'Tiếp tục khôi phục tài khoản'};
     if(!titles[kind]||!authUi.linkToken)return;
-    openModal({title:titles[kind],body:`<p>${kind==='recovery-start'?'Sau khi xác nhận, thời gian chờ 24 giờ bắt đầu. Trong thời gian này tài khoản không thể giải ngân.':kind==='recovery-cancel'?'Xác nhận hủy yêu cầu khôi phục. Các Passkey hiện có vẫn được giữ.':'Bạn sẽ tạo Passkey mới và đặt mật khẩu mới. Sau khi hoàn tất, các phiên và Passkey cũ bị thu hồi.'}</p>`,footer:'<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-primary" data-act="recovery-link-confirm">Xác nhận</button>'});
+    openModal({title:titles[kind],body:`<p>${kind==='recovery-start'?'Sau khi xác nhận, thời gian chờ 24 giờ bắt đầu. Trong thời gian này tài khoản không thể khóa tiền thanh toán hoặc giải ngân.':kind==='recovery-cancel'?'Xác nhận hủy yêu cầu khôi phục. Các Passkey hiện có vẫn được giữ.':'Bạn sẽ tạo Passkey mới và đặt mật khẩu mới. Sau khi hoàn tất, các phiên và Passkey cũ bị thu hồi.'}</p>`,footer:'<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-primary" data-act="recovery-link-confirm">Xác nhận</button>'});
   }
   async function loadSecurityDetails(){
     const box=$('#securityDetails');if(!box)return;
@@ -2532,7 +3265,7 @@ const App = (() => {
     }
     if(!['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){box.innerHTML='';return;}
     const user=state.user;
-    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'');
+    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Thanh toán khóa tiền và giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Thanh toán khóa tiền, giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'');
   }
 
   // =====================================================================
@@ -2762,6 +3495,7 @@ const App = (() => {
         <td>
           <div class="row justify-end flex-nowrap">
             <a class="btn btn-sm btn-ghost" href="#/listing/${esc(l.id)}">Xem</a>
+            ${l.status === 'PENDING_SELLER_REVIEW' ? `<button class="btn btn-primary btn-sm" data-act="open-relist" data-id="${esc(l.id)}">Kiểm tra và mở bán lại</button>` : ''}
             <button class="btn btn-sm" data-act="edit-listing" data-id="${esc(l.id)}">Sửa</button>
             <button class="btn btn-sm btn-ghost" data-act="delete-listing" data-id="${esc(l.id)}">Gỡ</button>
           </div>
@@ -2772,6 +3506,17 @@ const App = (() => {
   async function seedDemo(btn) {
     await guard('seed', btn, () => api('/listings/demo-seed', { method: 'POST' }), 'Đã nhập 8 tin đăng mẫu.');
     route();
+  }
+
+  function confirmRelist(id) {
+    openModal({title:'Mở bán lại sản phẩm?',body:'<p>Chỉ tiếp tục khi sản phẩm đang ở trong tay bạn, đã được kiểm tra và vẫn bán được đúng mô tả. Hãy sửa tình trạng, phụ kiện hoặc giá trước nếu có thay đổi.</p><p>Việc hoàn tiền của đơn trước không tự chứng minh hàng đã được trả về. Xác nhận này sẽ được lưu vào nhật ký mở bán lại.</p>',footer:`<button class="btn" data-act="modal-close">Chưa đủ điều kiện</button><button class="btn btn-primary" data-act="relist-confirm" data-id="${esc(id)}">Hàng đã về, đã kiểm tra và mở bán lại</button>`});
+  }
+
+  async function relistListing(id, btn) {
+    await guard('relist:' + id, btn, () => api('/listings/' + encodeURIComponent(id) + '/relist',{method:'POST',body:{confirmed:true}}));
+    closeModal();
+    await route();
+    openModal({title:'Đã mở bán lại',body:'<p>Tin đăng có thể nhận người mua mới. Đơn và bút toán của lần giao dịch trước được giữ nguyên.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   // ---------- Form đăng / sửa tin ----------
@@ -2814,6 +3559,7 @@ const App = (() => {
           <label for="lsDesc">Mô tả chi tiết</label>
           <textarea id="lsDesc" maxlength="2000" placeholder="Tình trạng thực tế, phụ kiện kèm theo, lý do bán, cách giao nhận...">${esc(v.description || '')}</textarea>
         </div>
+        ${v.isSold ? '<div class="note field span-2">Tin đã có người mua nên ảnh đã được giữ cố định và không thể thay đổi.</div>' : mediaPickerHTML('LISTING')}
         <div class="field">
           <label for="lsVisibility">Hiển thị</label>
           <select id="lsVisibility">
@@ -2844,6 +3590,7 @@ const App = (() => {
       footer: `<button class="btn" data-act="modal-close">Huỷ</button>
                <button class="btn btn-primary" data-act="save-listing">Đăng tin</button>`,
     });
+    beginMediaDraft('LISTING');
   }
 
   async function openEditListing(id) {
@@ -2856,8 +3603,9 @@ const App = (() => {
              <span>Tin này đã có người thanh toán nên không đổi được giá bán.</span></div>`
         : ''),
       footer: `<button class="btn" data-act="modal-close">Huỷ</button>
-               <button class="btn btn-primary" data-act="save-listing" data-id="${esc(l.id)}" data-busy="${l.isSold ? '1' : ''}">Lưu thay đổi</button>`,
+               <button class="btn btn-primary" data-act="save-listing" data-id="${esc(l.id)}" data-busy="${l.isSold ? '1' : '0'}">Lưu thay đổi</button>`,
     });
+    if (!l.isSold) beginMediaDraft('LISTING',null,l.images);
   }
 
   async function saveListing(btn) {
@@ -2867,14 +3615,15 @@ const App = (() => {
     if (!payload.price || payload.price < 1000) return toast('Giá bán tối thiểu 1.000₫', 'err');
 
     // Tin đã có người thanh toán: máy chủ chặn đổi giá, nên không gửi trường này lên.
-    if (id && btn.dataset.busy) delete payload.price;
+    if (id && btn.dataset.busy === '1') delete payload.price;
 
-    await guard('save-listing', btn,
-      () => id
+    const scope=await submitMediaForm('save-listing', btn,
+      imageIds => {if(imageIds!==undefined)payload.imageIds=imageIds;return id
         ? api('/listings/' + encodeURIComponent(id), { method: 'PATCH', body: payload })
-        : api('/listings', { method: 'POST', body: payload }),
-      id ? 'Đã lưu thay đổi.' : 'Đã đăng tin.');
+        : api('/listings', { method: 'POST', body: payload });},
+      {editing:!!id,successMsg:id ? 'Đã lưu thay đổi.' : 'Đã đăng tin.'});
 
+    if(!scope||!mediaSubmissionAlive(scope))return;
     closeModal();
     if (!id && currentHead() !== 'shop') { location.hash = '#/shop'; return; }
     route();
@@ -4321,8 +5070,8 @@ const App = (() => {
 
   const ESCROW_BOX = {
     NONE:     { cls: 'done',   label: 'Chưa thanh toán',             text: 'Tiền vẫn ở ví người mua, chưa vào ký quỹ.', here: 0 },
-    LOCKED:   { cls: '',       label: 'Đang được giữ an toàn',       text: 'Người bán chưa nhận được tiền; người mua chỉ lấy lại được qua phân xử.', here: 1 },
-    FROZEN:   { cls: 'frozen', label: 'Đang bị đóng băng',           text: 'Không bên nào rút được cho tới khi quản trị viên phân xử.', here: 1 },
+    LOCKED:   { cls: '',       label: 'Đang được giữ an toàn',       text: 'Người bán chưa nhận tiền. Hủy hoặc giải quyết tranh chấp theo trạng thái của đơn.', here: 1 },
+    FROZEN:   { cls: 'frozen', label: 'Đang bị đóng băng',           text: 'Tiền được giữ trong khi hồ sơ tranh chấp đang xử lý.', here: 1 },
     RELEASED: { cls: 'done',   label: 'Đã giải ngân cho người bán',  text: 'Giao dịch đã tất toán.', here: 2 },
     REFUNDED: { cls: 'done',   label: 'Đã hoàn cho người mua',       text: 'Giao dịch đã tất toán.', here: 0 },
   };
@@ -4376,7 +5125,7 @@ const App = (() => {
               <div class="card-head"><h2>Trạng thái giao dịch</h2><span class="tag tag-navy">${ico('link-2', 12)} ${logs.length} bản ghi trong chuỗi băm</span></div>
               <div class="card-body"><ol class="steps">${txSteps(t, logs)}</ol></div>
             </div>
-            ${t.dispute ? disputeCard(t.dispute) : ''}
+            ${t.dispute ? disputeCard(t.dispute, t.disputeMessages, t) : ''}
             <div class="card">
               <div class="card-head"><h3>Nhật ký chi tiết</h3></div>
               <div class="card-body">
@@ -4392,13 +5141,14 @@ const App = (() => {
           <div class="stack">
             ${escrowBox(t)}
             ${actionBox(t, role, isBuyer)}
+            ${orderShippingCard(t, role)}
             <div class="card">
               <div class="card-head"><h3>Bảo mật của giao dịch</h3></div>
               <div class="card-body stack gap-3">
                 <div class="small layout-grid gap-8px">
                   <div class="row flex-nowrap items-start">${ico('fingerprint', 16)}<span>Giải ngân và phân xử luôn đòi <b>xác thực lại bằng Passkey</b>, kể cả khi đang đăng nhập.</span></div>
                   <div class="row flex-nowrap items-start">${ico('key-round', 16)}<span>Phiếu uỷ quyền dùng một lần, ràng buộc đúng giao dịch này, đúng số tiền, đúng người nhận.</span></div>
-                  <div class="row flex-nowrap items-start">${ico('link-2', 16)}<span>Mọi bước được ghi vào chuỗi băm riêng của giao dịch; sửa lén một bản ghi sẽ bị phát hiện.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('link-2', 16)}<span>Các sự kiện có nhật ký kiểm chứng chuỗi băm riêng của giao dịch. Bấm Kiểm chứng chuỗi nhật ký để đối chiếu liên kết giữa các bản ghi.</span></div>
                 </div>
                 <div class="row">
                   <button class="btn btn-sm" data-act="tx-verify-chain" data-id="${esc(t.id)}">${ico('shield-check', 15)} Kiểm chứng chuỗi nhật ký</button>
@@ -4412,29 +5162,36 @@ const App = (() => {
       </div>`;
   }
 
-  /** Dòng thời gian: 6 bước chuẩn, chèn bước tranh chấp nếu có; mốc giờ lấy từ chuỗi nhật ký. */
+  /** Dòng thời gian: chỉ đánh dấu mốc có dữ liệu hoặc sự kiện tương ứng. */
   function txSteps(t, logs) {
     const timeOf = (actions) => {
       const l = logs.find((x) => actions.includes(x.action));
       return l ? l.createdAt : null;
     };
-    const steps = TX_STEPS.map((s) => ({ ...s }));
+    const steps = TX_STEPS.map((s) => ({ ...s, actions:[...s.actions] }));
     const last = steps[steps.length - 1];
     if (t.status === 'COMPLETED') last.label = 'Người mua giải ngân — hoàn tất';
     if (t.status === 'RELEASED') last.label = 'Giải ngân cho người bán theo phân xử';
-    if (t.status === 'REFUNDED') last.label = 'Hoàn tiền cho người mua theo phân xử';
-
-    let done = stepsDone(t);
-    if (t.dispute) {
-      steps.splice(steps.length - 1, 0, { key: 'DISPUTE', label: 'Mở tranh chấp — tiền bị đóng băng', actions: ['DISPUTE_OPENED'], dispute: true });
-      if (t.status !== 'DISPUTED') done += 1;
+    if (t.status === 'REFUNDED') last.label = 'Đã hoàn tiền cho người mua';
+    if (t.status === 'CANCELLED') last.label = t.escrowStatus === 'REFUNDED' ? 'Đã hủy đơn và hoàn tiền cho người mua' : 'Đã hủy đơn nháp — chưa giữ tiền';
+    if (t.receivedConfirmedBy === 'SYSTEM') {
+      const received = steps.find(step => step.key === 'RECEIVED');
+      received.label = 'Hệ thống mở thời hạn kiểm hàng — người mua chưa xác nhận nhận kiện';
+      received.actions.push('SYSTEM_RECEIPT_WINDOW_STARTED', 'SYSTEM_CONFIRMED_RECEIPT', 'SYSTEM_RECEIPT_TIMEOUT', 'BUYER_RECEIVE_TIMEOUT');
     }
 
+    const terminal = DONE_STATUSES.includes(t.status);
+    const firstPending = steps.findIndex(step => !orderMilestone(t,step.key,logs));
+    if (t.dispute) {
+      steps.splice(Math.max(0,Math.min(firstPending < 0 ? steps.length - 1 : firstPending,steps.length - 1)), 0, { key: 'DISPUTE', label: t.dispute.openedBy === 'SYSTEM' ? 'Hệ thống mở hồ sơ — tiền bị đóng băng' : 'Mở tranh chấp — tiền bị đóng băng', actions: ['DISPUTE_OPENED','INSPECTION_TIMEOUT','SHIPMENT_STALLED'], dispute: true });
+    }
+
+    const currentIndex = steps.findIndex(step => !orderMilestone(t,step.key,logs));
     return steps.map((s, i) => {
-      let cls = i < done ? 'done' : 'pending';
-      if (i === done && done < steps.length) cls = 'current';
+      let cls = orderMilestone(t,s.key,logs) ? 'done' : 'pending';
+      if (!terminal && t.status !== 'DISPUTED' && i === currentIndex) cls = 'current';
       if (s.dispute && t.status === 'DISPUTED') cls = 'failed';
-      const time = timeOf(s.actions);
+      const time = timeOf(s.actions) || (s.key === 'INSPECTED' ? t.inspectedAt : s.key === 'RECEIVED' ? t.receivedConfirmedAt : null);
       const note = s.key === 'ACK' && cls === 'done' && !t.sellerAckAt ? 'Người bán gửi hàng mà không bấm xác nhận đơn riêng' : '';
       return `
         <li class="step ${cls}">
@@ -4470,7 +5227,7 @@ const App = (() => {
     const text = role === 'ADMIN'
       ? (t.status === 'DISPUTED' ? 'Hồ sơ tranh chấp đang chờ bạn phân xử.' : 'Không có việc gì cho quản trị viên ở giao dịch này.')
       : nextStepText(t, isBuyer);
-    const warn = isBuyer && t.status === 'WAIT_CONFIRM'
+    const warn = isBuyer && (t.status === 'WAIT_CONFIRM' || buyerTimeoutOpen(t))
       ? `<div class="note note-warning mt-3">${ico('triangle-alert', 18)}
           <span>Chỉ giải ngân khi đã kiểm hàng. Sau bước này tiền thuộc về người bán và không rút lại được.</span></div>`
       : '';
@@ -4478,23 +5235,68 @@ const App = (() => {
       <div class="action-box ${acts ? '' : 'idle'}">
         <h3>Hành động hiện tại</h3>
         <p class="small m-0 text-2">${esc(text)}</p>
+        ${orderDeadline(t)}
+        ${t.receivedConfirmedBy === 'SYSTEM' && !['COMPLETED','RELEASED','REFUNDED','CANCELLED'].includes(t.status) ? '<div class="note note-warning mt-3">Hệ thống đã mở thời hạn kiểm hàng do quá hạn nhận kiện. Đây không phải xác nhận bạn đã nhận hàng; nếu chưa nhận, hãy báo vấn đề ngay.</div>' : ''}
         ${warn}
         ${acts ? `<div class="row">${acts}</div>` : ''}
       </div>`;
   }
 
-  function disputeCard(d) {
+  function orderDeadline(t) {
+    const due = t.deadlineAt || (t.status === 'CREATED' ? t.draftExpiresAt : t.status === 'WAIT_CONFIRM' ? t.inspectionDueAt : null);
+    if (!due) return '';
+    let label = 'Hạn xử lý';
+    if (t.status === 'CREATED') label = 'Nháp hết hạn';
+    else if (t.status === 'WAIT_CONFIRM') label = 'Hạn kiểm hàng';
+    else if (t.status === 'SECURED' && !t.shipment) label = t.sellerAckAt ? 'Hạn người bán đóng gói' : 'Hạn người bán xác nhận';
+    else if (t.shipment?.status === 'ARRIVED' || t.status === 'ARRIVED') label = 'Hạn xác nhận nhận kiện';
+    return `<p class="small order-deadline"><b>${esc(label)}:</b> ${fmtDateTime(due)}. Thời hạn do máy chủ quản lý.</p>`;
+  }
+
+  const DISPUTE_TYPE_LABEL = {INSPECTION_TIMEOUT:'Quá hạn kiểm hàng',SHIPMENT_STALLED:'Vận chuyển chưa hoàn tất',NOT_SHIPPED:'Chưa gửi hàng',NOT_RECEIVED:'Chưa nhận được hàng',DEFECT:'Sản phẩm có vấn đề'};
+
+  function disputeWarnings(d) {
+    return `${d.openedBy === 'SYSTEM' ? '<div class="note note-warning">Hồ sơ do hệ thống tự mở để bảo vệ tiền đang giữ, không phải lời khiếu nại và không quy lỗi cho bên nào.</div>' : ''}
+      ${d.buyerNeverConfirmedReceipt ? '<div class="note note-danger">Người mua chưa từng tự xác nhận đã nhận kiện. Không được coi mốc nhận do hệ thống ghi là bằng chứng giao hàng.</div>' : ''}`;
+  }
+
+  function disputeEvidence(d) {
+    const entries = Array.isArray(d.evidence) ? d.evidence : [];
+    return entries.length ? `<div class="stack gap-3">${entries.map(item => `<div class="note"><span><b>${item.actorRole === 'BUYER' || item.openedBy === 'BUYER' ? 'Người mua' : item.actorRole === 'SELLER' || item.openedBy === 'SELLER' ? 'Người bán' : 'Nội dung bổ sung'}</b>${item.createdAt ? ' · ' + fmtDateTime(item.createdAt) : ''}<br>${esc(item.text || item.content || item.reason || '')}</span></div>`).join('')}</div>` : '';
+  }
+
+  /** Ảnh bằng chứng của hồ sơ: chỉ siêu dữ liệu an toàn từ máy chủ, ảnh luôn đi qua fetch có xác thực. */
+  function renderImageEvidence(list, transaction = {}) {
+    const images = approvedImages(list);
+    if (!images.length) return '';
+    const who = (id) => id && id === transaction.buyerId ? 'Người mua' : id && id === transaction.sellerId ? 'Người bán' : 'Người tham gia hồ sơ';
+    return `<div class="stack gap-3 image-evidence"><h3>Ảnh bằng chứng</h3><div class="media-evidence-grid">${images.map(image => `<figure class="media-evidence"><button type="button" class="media-thumb" data-act="media-view" data-media-id="${esc(image.id)}" data-created="${esc(image.createdAt || '')}" aria-label="Xem ảnh bằng chứng của ${esc(who(image.actorId || image.uploadedBy))}">${mediaFrame(image, 'Ảnh bằng chứng')}</button><figcaption class="small"><b>${esc(who(image.actorId || image.uploadedBy))}</b><br>${esc(mediaTime(image.createdAt))}${image.attachedAt ? '<br>Gắn vào hồ sơ lúc ' + esc(fmtDateTime(image.attachedAt)) : ''}</figcaption></figure>`).join('')}</div><p class="hint">${MEDIA_NOTICE}</p></div>`;
+  }
+
+  function renderDisputeMessages(messages, transaction = {}) {
+    if (!Array.isArray(messages) || !messages.length) return '';
+    return `<div class="stack gap-3"><h3>Nội dung bổ sung</h3>${messages.map(item => `<div class="note"><span><b>${item.actorId === transaction.buyerId ? 'Người mua' : item.actorId === transaction.sellerId ? 'Người bán' : item.actorId ? 'Người tham gia hồ sơ' : 'Hệ thống'}</b>${item.createdAt ? ' · ' + fmtDateTime(item.createdAt) : ''}<br><span class="pre-wrap">${esc(item.message || item.text || '')}</span></span></div>`).join('')}</div>`;
+  }
+
+  function disputeCard(d, messages, transaction) {
     const resolved = d.status !== 'OPEN';
     return `
       <div class="card">
         <div class="card-head">
           <h2>Tranh chấp</h2>
-          <span class="tag ${resolved ? 'tag-success' : 'tag-danger'}">${resolved ? 'Đã phân xử' : 'Đang chờ phân xử'}</span>
+          <span class="tag ${resolved ? 'tag-success' : 'tag-danger'}">${resolved ? 'Đã giải quyết' : 'Đang chờ xử lý'}</span>
         </div>
         <div class="card-body">
-          <p class="small muted m-0-0-6">Mở bởi <b>${d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
+          ${disputeWarnings(d)}
+          <p class="small muted m-0-0-6">Mở bởi <b>${d.openedBy === 'SYSTEM' ? 'hệ thống' : d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
+          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
           <p class="m-0-0-6">“${esc(d.reason)}”</p>
-          ${resolved ? `<p class="small m-0">Quyết định: <b>${d.adminDecision === 'REFUND'
+          ${disputeEvidence(d)}
+          ${renderDisputeMessages(messages || d.messages, transaction)}
+          ${renderImageEvidence(d.imageEvidence || transaction?.imageEvidence, transaction)}
+          ${d.evidenceDueAt && !resolved ? `<p class="small muted">Hai bên bổ sung nội dung trước ${fmtDateTime(d.evidenceDueAt)}.</p>` : ''}
+          ${d.adminDueAt && !resolved ? `<p class="small muted">Mốc nhắc quản trị viên xử lý: ${fmtDateTime(d.adminDueAt)}. Quá mốc này không tự quyết định bên thắng.</p>` : ''}
+          ${resolved ? `<p class="small m-0">Kết quả: <b>${d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã kiểm hàng và tự xác nhận giải ngân' : d.adminDecision === 'REFUND'
             ? 'Hoàn tiền cho người mua' : 'Giải ngân cho người bán'}</b> lúc ${fmtDateTime(d.resolvedAt)}</p>` : ''}
         </div>
       </div>`;
@@ -4703,7 +5505,7 @@ const App = (() => {
                 · Mở lúc ${fmtDateTime(d.createdAt)}
               </div>
             </div>
-            <span class="tag ${open ? 'tag-danger' : 'tag-success'}">${open ? 'Chờ xử lý' : d.status === 'RESOLVED_REFUND' ? 'Đã hoàn tiền' : 'Đã chuyển cho chủ'}</span>
+            <span class="tag ${open ? 'tag-danger' : 'tag-success'}">${open ? 'Chờ xử lý' : d.status === 'RESOLVED_REFUND' ? 'Đã hoàn tiền' : d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã giải ngân' : 'Đã giải ngân cho người bán'}</span>
           </div>
 
           <div class="money-strip">
@@ -4713,13 +5515,19 @@ const App = (() => {
     
           </div>
 
+          ${disputeWarnings(d)}
           <p class="small m-0-0-4">
-            <b>${d.openedBy === 'BUYER' ? 'Người mua' : 'Người bán'} ${esc(d.createdByName || '')} khiếu nại:</b>
+            <b>${d.openedBy === 'SYSTEM' ? 'Hồ sơ tự sinh của hệ thống' : (d.openedBy === 'BUYER' ? 'Người mua' : 'Người bán') + ' ' + esc(d.createdByName || '') + ' báo vấn đề'}:</b>
           </p>
+          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
           <p class="small m-0-0-s4 pre-wrap">“${esc(d.reason)}”</p>
+          ${disputeEvidence(d)}
+          ${d.evidenceDueAt ? `<p class="small muted">Hạn bổ sung nội dung: ${fmtDateTime(d.evidenceDueAt)}</p>` : ''}
+          ${d.adminDueAt ? `<p class="small muted">Mốc nhắc xử lý: ${fmtDateTime(d.adminDueAt)} · không tự phân xử khi quá hạn.</p>` : ''}
 
           <div class="row">
             ${open ? `
+              ${!d.adminId || d.adminId === state.user.id ? `<button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>` : '<span class="small muted">Địa chỉ chỉ mở cho quản trị viên đã nhận xử lý hồ sơ.</span>'}
               <button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Hoàn ${money(t.amount || 0)} cho người mua</button>
               <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Chuyển ${money(t.amount || 0)} cho người bán</button>
             ` : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
@@ -4727,6 +5535,22 @@ const App = (() => {
           </div>
         </div></div>`;
     }).join('')}</div>`;
+  }
+
+  function confirmClaimDispute(id) {
+    openModal({title:'Nhận xử lý hồ sơ tranh chấp?',body:'<p>Địa chỉ và số điện thoại giao hàng chỉ được mở cho quản trị viên đang xử lý hồ sơ này. Chỉ truy cập khi cần đối chiếu giao nhận; việc nhận xử lý chưa quyết định hoàn tiền hay giải ngân.</p>',footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="admin-claim-confirm" data-id="${esc(id)}">Nhận xử lý và xem chi tiết</button>`});
+  }
+
+  async function claimDispute(id, btn) {
+    let detail;
+    await guard('claim-dispute:' + id, btn, async () => {
+      await api('/admin/disputes/' + encodeURIComponent(id) + '/claim',{method:'POST',body:{}});
+      detail = await api('/admin/disputes/' + encodeURIComponent(id));
+    });
+    if (!detail) return;
+    const d = detail.dispute || detail, t = detail.transaction || d.transaction || {};
+    disputeCache.set(id,{...disputeCache.get(id),...d,transaction:t});
+    openModal({title:'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
   }
 
   /**
@@ -4757,6 +5581,7 @@ const App = (() => {
       title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: giải ngân cho người bán',
       body: `
         <div class="stack">
+          ${disputeWarnings(d)}
           <div class="note note-warning">
             ${ico('triangle-alert', 18)}
             <span>Quyết định này <b>không thể hoàn tác</b>: tiền rời ví ký quỹ và được ghi vĩnh viễn vào nhật ký của đơn.</span>
@@ -5025,6 +5850,14 @@ const App = (() => {
     'del-device-confirm':(el)=>deleteDevice(el.dataset.id,el),
     'logout': () => logout(),
     'modal-close': () => dismissModal(),
+    'media-view': (el) => viewMedia(el.dataset.mediaId, el.dataset.created),
+    'media-preview': (el) => previewSelectedMedia(el.dataset.key),
+    'media-remove': (el) => removeSelectedMedia(el.dataset.key),
+    'media-cover': (el) => moveSelectedMedia(el.dataset.key, 'cover'),
+    'media-move': (el) => moveSelectedMedia(el.dataset.key, el.dataset.dir),
+    'media-gallery-select': (el) => selectGalleryImage(el),
+    'media-overlay-close': () => closeMediaOverlay(),
+    'media-discard-confirm': () => { if (!mediaDraftBusy()) closeModal(); },
     'reload': () => route(),
     'open-sell': () => openSell(),
     'passkey-check': (el) => refreshPasskeyReadiness(el.dataset.target),
@@ -5045,22 +5878,36 @@ const App = (() => {
     'pack-confirm': (el) => packOrder(el.dataset.id, el),
     'shipping-open': (el) => openShipping(el.dataset.id, el),
     'shipping-order': (el) => { closeModal(); location.hash = '#/tx/' + encodeURIComponent(el.dataset.id); },
-    'wait-confirm': (el) => waitConfirmOrder(el.dataset.id, el),
+    'wait-confirm': (el) => confirmReceipt(el.dataset.id),
+    'wait-confirm-confirm': (el) => waitConfirmOrder(el.dataset.id, el),
+    'open-inspected': (el) => openInspected(el.dataset.id),
+    'inspected-confirm': (el) => inspectOrder(el.dataset.id, el),
+    'open-order-cancel': (el) => openOrderCancel(el.dataset.id, false),
+    'open-order-reject': (el) => openOrderCancel(el.dataset.id, true),
+    'order-cancel-confirm': (el) => cancelOrder(el.dataset.id, el.dataset.seller === '1', el),
+    'edit-order-shipping': (el) => openOrderShipping(el.dataset.id),
+    'save-order-shipping': (el) => saveOrderShipping(el.dataset.id, el),
     'open-release': (el) => openReleaseModal(el.dataset.id),
     'do-release': (el) => doRelease(el.dataset.id, el),
-    'open-dispute': (el) => openDisputeModal(el.dataset.id),
+    'open-dispute': (el) => openDisputeModal(el.dataset.id, el.dataset.system === '1'),
     'do-dispute': (el) => doDispute(el.dataset.id, el),
+    'open-dispute-message': (el) => openDisputeMessage(el.dataset.id, el.dataset.system === '1'),
+    'send-dispute-message': (el) => sendDisputeMessage(el.dataset.id, el),
 
     'new-listing': () => openNewListing(),
     'edit-listing': (el) => openEditListing(el.dataset.id),
     'save-listing': (el) => saveListing(el),
     'delete-listing': (el) => confirmDeleteListing(el.dataset.id),
     'do-delete-listing': (el) => doDeleteListing(el.dataset.id, el),
+    'open-relist': (el) => confirmRelist(el.dataset.id),
+    'relist-confirm': (el) => relistListing(el.dataset.id, el),
     'seed-demo': (el) => seedDemo(el),
 
     'admin-refund': (el) => openDisputeConfirm('refund', el.dataset.id),
     'admin-release': (el) => openDisputeConfirm('release', el.dataset.id),
     'admin-confirm': (el) => adminResolve(el.dataset.kind, el.dataset.id, el),
+    'admin-claim-dispute': (el) => confirmClaimDispute(el.dataset.id),
+    'admin-claim-confirm': (el) => claimDispute(el.dataset.id, el),
 
     'audit-load': () => loadAudit($('#auditTxId').value.trim()),
     'audit-verify': (el) => verifyAudit(el),
@@ -5157,7 +6004,7 @@ const App = (() => {
       });
     },
     'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
-    'recovery-passkey-create':async(el)=>{const deviceName=$('#recoveryDeviceName').value,newPassword=$('#recoveryNewPassword')?.value;await guard('recovery-create',el,async()=>{const {registrationSessionId,options}=await api('/passkeys/recovery/passkey/options',{method:'POST',body:{}});const response=await webauthn('enroll',()=>SimpleWebAuthnBrowser.startRegistration({optionsJSON:options}));const result=await api('/passkeys/recovery/passkey/verify',{method:'POST',body:{registrationSessionId,response,newPassword,deviceName}});await afterSession(result,'Đã khôi phục tài khoản.');});},
+    'recovery-passkey-create':(el)=>createRecoveryPasskey(el),
     'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
     'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');toast('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
     'recovery-regenerate':async(el)=>{await guard('regenerate-codes',el,async()=>{const reauthGrant=await getAccountGrant('REGENERATE_RECOVERY');const result=await api('/passkeys/recovery-codes/regenerate',{method:'POST',body:{reauthGrant}});showRecoveryCodes(result.recoveryCodes);});},
@@ -5193,7 +6040,13 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
+    document.addEventListener('change', (e) => { if (e.target && e.target.id === 'mediaFiles') selectMediaFiles(e.target); });
+    // Mọi chỉnh sửa trong hộp thoại đang có lựa chọn ảnh đều được coi là chưa lưu: đóng sẽ hỏi lại.
+    document.addEventListener('input', (e) => { if (mediaDraft && e.target && e.target.closest && e.target.closest('#modalRoot') && e.target.id !== 'mediaFiles') mediaDraft.dirty = true; });
+    startMediaObserver();
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape') dismissModal(); });
+    // Điều hướng khi hộp thoại có ảnh đang chọn/tải: huỷ yêu cầu đang bay và thu hồi URL xem trước.
+    window.addEventListener('hashchange', () => { if (mediaDraft || mediaOverlay) closeModal(); });
     window.addEventListener('hashchange', route);
     // Liên kết email mở khi ứng dụng đang chạy: đọc và gỡ token khỏi URL ngay, như lúc khởi động.
     window.addEventListener('hashchange', () => { handleAccountAction().catch(() => {}); });

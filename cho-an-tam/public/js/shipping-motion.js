@@ -95,6 +95,7 @@
     unloading: ['Đang giao kiện hàng', 'Kiện hàng ra qua cửa sau và được đặt trước cửa nhà.', 'Giao hàng'],
     delivered: ['Đơn hàng đã đến', 'Hãy nhận và kiểm tra sản phẩm trước khi xác nhận hoàn tất.', 'Đã đến'],
     received: ['Người mua đã nhận hàng', 'Kiểm tra sản phẩm và theo dõi bước hoàn tất hoặc hồ sơ tranh chấp của đơn.', 'Đã nhận'],
+    received_system: ['Hệ thống đã mở thời hạn kiểm hàng', 'Chưa có xác nhận nhận kiện của người mua. Nếu chưa nhận được hàng, hãy báo vấn đề trên đơn.', 'Chờ kiểm hàng'],
     completed: ['Giao dịch đã hoàn tất', 'Hàng đã giao và giao dịch đã kết thúc. Xem kết quả trong nhật ký.', 'Hoàn tất'],
     refunded: ['Giao dịch đã hoàn tiền', 'Hành trình giao tự động đã dừng. Theo dõi kết quả hoàn tiền trong ví.', 'Hoàn tiền'],
     resolved: ['Giao dịch đã được phân xử', 'Hành trình giao tự động đã dừng. Xem quyết định trong hồ sơ tranh chấp.', 'Đã phân xử'],
@@ -139,7 +140,7 @@
     }
     e = Math.min(END, e);
     let displayPhase = stopped ? 'stopped' : phase;
-    if (t.status === 'WAIT_CONFIRM') { displayPhase = 'received'; if (arrived != null) e = END; }
+    if (t.status === 'WAIT_CONFIRM') { displayPhase = t.receivedConfirmedBy === 'SYSTEM' ? 'received_system' : 'received'; if (arrived != null) e = END; }
     if (t.status === 'COMPLETED') { displayPhase = 'completed'; if (arrived != null) e = END; }
     if (t.status === 'REFUNDED') displayPhase = 'refunded';
     if (t.status === 'RELEASED') displayPhase = 'resolved';
