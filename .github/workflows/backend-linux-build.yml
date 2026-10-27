@@ -1,0 +1,44 @@
+name: Backend Linux build
+
+on:
+  pull_request:
+    branches: [migrate-postgres]
+    paths:
+      - Dockerfile
+      - cho-an-tam/package.json
+      - cho-an-tam/package-lock.json
+      - cho-an-tam/src/**
+      - .github/workflows/backend-linux-build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: backend-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  image-and-native-codec:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Build production Dockerfile
+        run: docker build --pull --tag enclave-linux-check .
+      - name: Load Sharp and round-trip WebP with no network or credentials
+        run: |
+          docker run --rm --network none --read-only --tmpfs /tmp:rw,noexec,nosuid,size=16m --entrypoint node enclave-linux-check -e '
+          const assert = require("node:assert/strict");
+          const sharp = require("sharp");
+          (async () => {
+            assert.equal(process.platform, "linux");
+            const bytes = await sharp({create:{width:2,height:2,channels:3,background:"#ff5b20"}}).webp().toBuffer();
+            const info = await sharp(bytes).metadata();
+            assert.equal(info.format, "webp");
+            assert.equal(info.width, 2);
+            assert.equal(info.height, 2);
+            console.log(JSON.stringify({platform:process.platform,arch:process.arch,node:process.version,sharp:sharp.versions.sharp,vips:sharp.versions.vips,webpRoundTrip:true,bytes:bytes.length}));
+          })().catch(() => { console.error("Linux native image codec check failed"); process.exitCode = 1; });'
