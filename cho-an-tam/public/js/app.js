@@ -401,9 +401,18 @@ const App = (() => {
     const box = $('#toasts');
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
-    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>`;
+    el.setAttribute('role', kind === 'err' ? 'alert' : 'status');
+    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>` +
+      `<button type="button" class="toast-x" aria-label="Đóng thông báo">${ico('x', 16)}</button>`;
+    // Rời đi bằng hiệu ứng ngắn rồi mới gỡ; className giữ nguyên "toast <kind>" vì test đọc loại từ đó.
+    const leave = () => {
+      if (el.hasAttribute('data-leaving')) return;
+      el.setAttribute('data-leaving', '');
+      setTimeout(() => el.remove(), 200);
+    };
+    el.querySelector('.toast-x').addEventListener('click', leave);
     box.appendChild(el);
-    setTimeout(() => el.remove(), kind === 'err' ? 8000 : 5000);
+    setTimeout(leave, kind === 'err' ? 8000 : 5000);
   }
 
   /** Bọc một handler async: khoá nút, hiện spinner, bắt lỗi thành toast. */
@@ -638,7 +647,7 @@ const App = (() => {
   let modalGeneration = 0;
 
   function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
-    closeModal();
+    closeModal({ instant: true });
     modalDismissible = dismissible;
     const root = $('#modalRoot');
     root.innerHTML = `
@@ -662,13 +671,42 @@ const App = (() => {
     return root;
   }
 
-  function closeModal() {
+  function closeModal({ instant = false } = {}) {
     modalGeneration++;
     if (window.EnclaveShippingMotion) window.EnclaveShippingMotion.stop();
     state.shippingModalId = null;
-    $('#modalRoot').innerHTML = '';
+    const root = $('#modalRoot');
+    const old = root.firstElementChild;
+    root.innerHTML = '';
+    if (old && !instant) playModalExit(old);
     modalDismissible = true;
     state.paypalAbandonConfirmation = null;
+  }
+
+  // Hiệu ứng đóng chạy trên hộp thoại cũ đã rời #modalRoot, đặt trong một shadow root đóng: không
+  // id, data-act hay .modal nào của nó còn bị querySelector/getElementById tìm thấy hay bấm trúng
+  // trong 200ms nó mờ dần. Trình duyệt không có constructable stylesheet (jsdom) thì đóng ngay.
+  let modalGhostSheet = null;
+  function playModalExit(old) {
+    if (modalGhostSheet === null) {
+      try {
+        const css = [...document.styleSheets].flatMap((s) => {
+          try { return [...s.cssRules].map((r) => r.cssText); } catch (_) { return []; }
+        }).join('\n');
+        modalGhostSheet = new CSSStyleSheet();
+        modalGhostSheet.replaceSync(css);
+      } catch (_) { modalGhostSheet = false; }
+    }
+    if (!modalGhostSheet || typeof document.body.attachShadow !== 'function') return;
+    const host = document.createElement('div');
+    host.setAttribute('aria-hidden', 'true');
+    host.inert = true;
+    const shadow = host.attachShadow({ mode: 'closed' });
+    shadow.adoptedStyleSheets = [modalGhostSheet];
+    old.classList.add('modal-leaving');
+    shadow.appendChild(old);
+    document.body.appendChild(host);
+    setTimeout(() => host.remove(), 200);
   }
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
@@ -1560,7 +1598,21 @@ const App = (() => {
         `<button class="btn" data-act="reload">${ico('refresh-cw', 17)} Tải lại</button>`)}</div>`;
     } finally {
       renderChrome();
+      playViewEnter();
     }
+  }
+
+  // Bật hiệu ứng vào trang (#view[data-enter] trong style.css) sau khi route() vẽ xong, rồi tắt lại để
+  // những lần vẽ lại tại chỗ ngoài route() (đếm ngược, thăm dò trạng thái) không nháy.
+  let viewEnterTimer = 0;
+  function playViewEnter() {
+    const el = view();
+    if (!el) return;
+    el.removeAttribute('data-enter');
+    void el.offsetWidth; // gỡ rồi gắn lại trong cùng khung hình: ép trình duyệt chạy lại animation
+    el.setAttribute('data-enter', '');
+    clearTimeout(viewEnterTimer);
+    viewEnterTimer = setTimeout(() => el.removeAttribute('data-enter'), 1200);
   }
 
   function requireLogin(message) {
