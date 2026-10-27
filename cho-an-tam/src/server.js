@@ -90,6 +90,7 @@ app.use('/', healthRouter);
 app.use('/api/passkeys', passkeysRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/wallets', walletsRouter);
+app.use('/api/media', require('./routes/media'));
 app.use('/api/listings', listingsRouter);
 app.use('/api/transactions', transactionsRouter);
 // Specific PayPal routes must precede the payment request :id route. Disabled by default.
@@ -165,7 +166,18 @@ app.use(async (err, req, res, next) => {
     });
   }
   // Lỗi 4xx luôn do mã ứng dụng chủ động ném kèm status (lỗi parser đã xử lý ở trên).
-  res.status(status).json({ error: err.code || 'BAD_REQUEST', message: err.message || 'Yêu cầu không hợp lệ' });
+  const response = { error: err.code || 'BAD_REQUEST', message: err.message || 'Yêu cầu không hợp lệ' };
+  // Only server-authored shipping field messages are exposed. Never echo the
+  // submitted address/phone or arbitrary exception details into an API response.
+  if (err instanceof AppError && err.details?.fields) {
+    const fields = {};
+    for (const key of ['recipientName', 'phone', 'address', 'ward', 'district', 'province']) {
+      const value = err.details.fields[key];
+      if (typeof value === 'string' && value.length <= 200) fields[key] = value;
+    }
+    if (Object.keys(fields).length) response.details = { fields };
+  }
+  res.status(status).json(response);
 });
 
 // ---------------------------------------------------------------------------

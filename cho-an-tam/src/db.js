@@ -6,7 +6,7 @@ const { normalizeSettledListingsSql } = require('./lib/listingNormalize');
 
 function logListingNormalization(sold, reopened) {
   if (sold || reopened) {
-    console.log(`[migrate] listings: chuẩn hoá ${sold} tin đăng đã bán -> SOLD, ${reopened} tin đăng đã hoàn tiền -> AVAILABLE.`);
+    console.log(`[migrate] listings: chuẩn hoá ${sold} tin đăng đã bán -> SOLD, ${reopened} tin đăng được mở bán lại.`);
   }
 }
 
@@ -334,6 +334,8 @@ function openSqlite() {
   migrate();
   migratePasskeyCredentials();
   require('./lib/authMigration').migrateSqlite(db);
+  require('./lib/orderMigration').migrateSqlite(db);
+  db.exec(fs.readFileSync(path.join(__dirname, 'schema.media.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
   if (db.prepare("SELECT 1 FROM paypal_payment_bindings WHERE not_captured_evidence IS NOT NULL AND not_captured_evidence <> 'ORDER_VOIDED' LIMIT 1").get()) {
     throw new Error('PAYPAL_TERMINAL_EVIDENCE_INVALID: manual reconciliation required before startup');
@@ -377,6 +379,8 @@ const PG_MIGRATIONS = [
   { version: 9, name: 'auth-redesign-state', file: 'schema.auth.sql' },
   { version: 10, name: 'progressive-auth-lock-authorization', file: 'schema.pg.010-progressive-auth.sql' },
   { version: 11, name: 'auth-verification-hardening', file: 'schema.pg.011-auth-verification-hardening.sql' },
+  { version: 12, name: 'order-lifecycle-address-inspection', file: 'schema.pg.012-order-lifecycle.sql' },
+  { version: 13, name: 'private-media-assets', file: 'schema.pg.013-media.sql' },
 ];
 
 function installPgTypeParsers(pg) {

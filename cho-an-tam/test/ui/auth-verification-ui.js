@@ -50,9 +50,9 @@ async function main(){
  p=await wallet({user:basic,hash:'#/wallet'});
  try{
   p.routes['POST /api/passkeys/email/verify']=()=>json(200,{token:'verified-p',scope:'full',user:{...basic,accountStatus:'VERIFIED',emailVerified:true,emailProofFresh:true}});
+  p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'fixture',options:{}});
   await click(p,'activate-wallet');p.d.getElementById('emailVerificationCode').value='123456';await click(p,'email-verify');
   const codes=['ABCDE-FGHJK','LMNPQ-RSTUV','WXYZA-BCDEF','GHJKL-MNPQR','STUVW-XYZAB','CDEFG-HJKLM','NPQRS-TUVWX','YZABC-DEFGH'];
-  p.routes['POST /api/passkeys/register/passkey/options']=()=>json(200,{registrationSessionId:'fixture',options:{}});
   // An old server may still include codes during a rolling deployment; activation must ignore them.
   p.routes['POST /api/passkeys/register/passkey/verify']=()=>json(201,{token:'active-k',scope:'full',user:{...basic,accountStatus:'ACTIVE',emailVerified:true,authMethod:'passkey'},recoveryCodes:codes});
   p.w.SimpleWebAuthnBrowser.startRegistration=async()=>({id:'key'});await click(p,'do-enroll-passkey',240);

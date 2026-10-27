@@ -150,6 +150,7 @@ router.post(
       });
 
       const sessionId = uuid();
+      const expiresAt = expiresAtIso();
       await db.prepare(
         `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
          VALUES (?, ?, NULL, ?, 'REGISTRATION', ?, ?)`
@@ -158,10 +159,10 @@ router.post(
         user.id,
         options.challenge,
         JSON.stringify({ firstCredential: true, deviceName: 'Thiết bị đăng ký',userHandle:options.user.id,enrollmentSessionId:req.user.sessionId }),
-        expiresAtIso()
+        expiresAt
       );
 
-      res.json({ registrationSessionId: sessionId, options });
+      res.json({ registrationSessionId: sessionId, options, expiresAt });
     } catch (e) {
       next(e);
     }
@@ -410,12 +411,13 @@ router.post('/login/options', authLimiter, async (req, res, next) => {
     });
 
     const sessionId = uuid();
+    const expiresAt = expiresAtIso();
     await db.prepare(
       `INSERT INTO auth_challenges (id, user_id, transaction_id, challenge, purpose, context_data, expires_at)
        VALUES (?, NULL, NULL, ?, 'AUTHENTICATION', '{}', ?)`
-    ).run(sessionId, options.challenge, expiresAtIso());
+    ).run(sessionId, options.challenge, expiresAt);
 
-    res.json({ authenticationSessionId: sessionId, options });
+    res.json({ authenticationSessionId: sessionId, options, expiresAt });
   } catch (e) {
     next(e);
   }

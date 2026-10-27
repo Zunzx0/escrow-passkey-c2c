@@ -21,6 +21,11 @@ const {
 const { serializeShipment, createShipment } = require('../lib/shipping');
 const { settleListing } = require('../lib/listingLifecycle');
 const { parseVndAmount } = require('../lib/money');
+const {readShipping,shippingHash,serializeShipping,loadShipping,insertShipping}=require('../lib/orderShipping');
+const {orderPolicy,orderDeadline,afterHours}=require('../lib/orderPolicy');
+const {transitionOrder,canReleaseBuyer,assertReleaseReady,serializeDispute,settleOrder,openOrderDispute,appendDisputeMessage,receiveOrder}=require('../lib/orderLifecycle');
+const {notify}=require('../lib/notifications');
+const media=require('../lib/mediaService');
 
 // Mỗi lần xin challenge đều ghi một bản ghi vào cơ sở dữ liệu, nên đây là điểm gửi ồ ạt
 // rẻ tiền nếu không chặn. Mở tranh chấp cũng được giới hạn vì nó đóng băng tiền của
@@ -55,12 +60,14 @@ const TXN_SELECT = `
          sp.packed_at AS shipment_packed_at, sp.pickup_due_at AS shipment_pickup_due_at,
          sp.picked_up_at AS shipment_picked_up_at, sp.arrival_due_at AS shipment_arrival_due_at,
          sp.arrived_at AS shipment_arrived_at, sp.stopped_at AS shipment_stopped_at,
-         sp.stop_reason AS shipment_stop_reason
+         sp.stop_reason AS shipment_stop_reason,
+         dp.type AS dispute_type,dp.opened_by AS dispute_opened_by,dp.status AS dispute_status
   FROM transactions t
   JOIN users b ON b.id = t.buyer_id
   JOIN users s ON s.id = t.seller_id
   LEFT JOIN listings l ON l.id = t.listing_id
   LEFT JOIN shipments sp ON sp.transaction_id = t.id
+  LEFT JOIN disputes dp ON dp.transaction_id = t.id
 `;
 
 function serializeTxn(t) {
@@ -79,6 +86,15 @@ function serializeTxn(t) {
     createdAt: t.created_at,
     updatedAt: t.updated_at,
     inspectionDueAt:t.inspection_due_at||null,
+    inspectedAt:t.inspected_at||null,inspectedBy:t.inspected_by||null,
+    receivedConfirmedAt:t.received_confirmed_at||null,receivedConfirmedBy:t.received_confirmed_by||null,
+    securedAt:t.secured_at||null,draftExpiresAt:t.draft_expires_at||null,
+    cancelledAt:t.cancelled_at||null,cancelReason:t.cancel_reason||null,
+    shippingFee:0,
+    policy:orderPolicy(),
+    deadlineAt:orderDeadline(t,t.shipment_id?{status:t.shipment_status,packed_at:t.shipment_packed_at,arrived_at:t.shipment_arrived_at}:null),
+    canInspect:!t.inspected_at&&((t.status==='WAIT_CONFIRM'&&t.escrow_status==='LOCKED')||(t.status==='DISPUTED'&&t.escrow_status==='FROZEN'&&t.dispute_type==='INSPECTION_TIMEOUT'&&t.dispute_opened_by==='SYSTEM'&&t.dispute_status==='OPEN')),
+    canBuyerRelease:!!t.inspected_at&&((t.status==='WAIT_CONFIRM'&&t.escrow_status==='LOCKED')||(t.status==='DISPUTED'&&t.escrow_status==='FROZEN'&&t.dispute_type==='INSPECTION_TIMEOUT'&&t.dispute_opened_by==='SYSTEM'&&t.dispute_status==='OPEN')),
     // Thông tin tin đăng (null với các giao dịch tạo bằng API thủ công, không gắn listing)
     listingId: t.listing_id || null,
     listingTitle: t.listing_title || null,
@@ -95,6 +111,22 @@ function serializeTxn(t) {
       stop_reason: t.shipment_stop_reason,
     } : null),
   };
+}
+
+async function viewTxn(t,user) {
+  const result=serializeTxn(t);
+  const allowed=user&&(t.buyer_id===user.id||(t.seller_id===user.id&&!['CREATED','CANCELLED'].includes(t.status)&&t.escrow_status!=='NONE'));
+  result.shipping=allowed?serializeShipping(await loadShipping(t.id)):null;
+  // Photos the buyer saw at LOCK (frozen snapshot), or the live gallery while still a draft.
+  // A later listing edit never changes what an existing order shows.
+  result.images=await media.orderImagesFor(t,user);
+  return result;
+}
+
+async function assertOrderActor(user) {
+  if(!['BUYER','SELLER'].includes(user.role))throw new AppError(403,'FORBIDDEN','Tài khoản quản trị không được đặt mua hàng.');
+  const actor=await db.prepare('SELECT is_active,account_status FROM users WHERE id=?').get(user.id);
+  if(!actor?.is_active||actor.account_status!=='ACTIVE')throw new AppError(403,'WALLET_ACTIVATION_REQUIRED','Hãy kích hoạt tài khoản và ví trước khi đặt hàng.');
 }
 
 async function loadTxnOr404(id) {
@@ -166,104 +198,105 @@ async function lockListingForOrder(listingId,expectedVersion) {
   }
 }
 
-// ---------- Tạo giao dịch thủ công, không gắn tin đăng ----------
-// Giữ lại để các kịch bản kiểm thử lõi escrow chạy được mà không cần lớp marketplace.
+function readRequestId(value,{required=true,normalize=false}={}) {
+  if(value===undefined&&!required)return null;
+  const clean=typeof value==='string'?value.trim():value;
+  if(typeof value!=='string'||clean.length<1||clean.length>128||(!normalize&&clean!==value)||/[\u0000-\u001f\u007f]/u.test(value)){
+    throw new AppError(400,'VALIDATION_ERROR','Mã yêu cầu phải là chuỗi từ 1 đến 128 ký tự, không có khoảng trắng ở hai đầu.');
+  }
+  return clean;
+}
 
-router.post('/', requireAuth, requireWallet, requireRole('BUYER'), async (req, res, next) => {
-  try {
-    const { sellerId, itemName, itemDescription, amount: rawAmount } = req.body || {};
-    if (!sellerId || !itemName || rawAmount === undefined || rawAmount === null) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu sellerId/itemName/amount hợp lệ');
+// Drafts do not reserve a listing or move money. Only the storefront requires a
+// snapshot at creation; legacy manual drafts must add one before they can LOCK.
+async function createDraft(req,{
+  marketplace
+}) {
+  await assertOrderActor(req.user);
+  const body=req.body||{};
+  const requestId=readRequestId(body.requestId,{required:marketplace,normalize:true});
+  if(body.note!==undefined&&body.note!==null&&(typeof body.note!=='string'||body.note.length>500||body.note.includes('\u0000')))throw new AppError(400,'VALIDATION_ERROR','Ghi chú phải là chuỗi tối đa 500 ký tự.');
+  if(!marketplace){
+    if(typeof body.sellerId!=='string'||!body.sellerId.trim()||body.sellerId.length>128||body.sellerId.includes('\u0000'))throw new AppError(400,'VALIDATION_ERROR','Mã người bán không hợp lệ.');
+    if(typeof body.itemName!=='string'||!body.itemName.trim()||body.itemName.length>200||body.itemName.includes('\u0000'))throw new AppError(400,'VALIDATION_ERROR','Tên hàng phải là chuỗi từ 1 đến 200 ký tự.');
+    if(body.itemDescription!==undefined&&body.itemDescription!==null&&(typeof body.itemDescription!=='string'||body.itemDescription.length>2000||body.itemDescription.includes('\u0000')))throw new AppError(400,'VALIDATION_ERROR','Mô tả hàng phải là chuỗi tối đa 2.000 ký tự.');
+  }
+  const shipping=body.shipping?readShipping(body.shipping):marketplace?readShipping(null):null;
+  if(marketplace){
+    if(typeof body.listingId!=='string'||!body.listingId.trim()||body.listingId.length>128||body.listingId.includes('\u0000'))throw new AppError(400,'VALIDATION_ERROR','Mã tin đăng không hợp lệ.');
+  }
+  const note=body.note?body.note.trim():null;
+  const manualAmount=marketplace?null:parseVndAmount(body.amount);
+  // Fingerprint the submitted intent, not mutable catalog fields. A retry of the
+  // original request still identifies its order after payment or a price change.
+  // The first marketplace creation always snapshots price/owner from the server.
+  const intent=marketplace
+    ? {v:1,kind:'MARKETPLACE',listingId:body.listingId,note,shipping}
+    : {v:1,kind:'MANUAL',sellerId:body.sellerId,itemName:body.itemName,itemDescription:body.itemDescription||null,amount:manualAmount,note,shipping};
+  const requestHash=shippingHash(intent);
+  return db.transaction(async()=>{
+    await db.prepare('INSERT INTO buyer_order_locks(buyer_id,version) VALUES(?,0) ON CONFLICT DO NOTHING').run(req.user.id);
+    await db.prepare('UPDATE buyer_order_locks SET version=version+1 WHERE buyer_id=?').run(req.user.id);
+    if(requestId){
+      const existing=await db.prepare('SELECT * FROM transactions WHERE buyer_id=? AND order_request_id=?').get(req.user.id,requestId);
+      if(existing){
+        if(existing.order_request_hash!==requestHash)throw new AppError(409,'IDEMPOTENCY_KEY_REUSED','Mã yêu cầu đã dùng cho nội dung khác.');
+        return {
+          id:existing.id,created:false
+        };
+      }
     }
-    // Số nguyên VND an toàn trong khoảng giá một món hàng (lib/money.js). Trước đây chỉ kiểm
-    // `amount <= 0`, nên số lẻ, chuỗi số, boolean và số vượt 2^53 lọt xuống CSDL — SQLite cất thành
-    // REAL/ép kiểu, PostgreSQL trả 500.
-    const amount = parseVndAmount(rawAmount);
-    if (sellerId === req.user.id) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'Buyer và Seller phải khác nhau');
+    let listing=null;
+    let sellerId=body.sellerId,itemName=body.itemName,itemDescription=body.itemDescription||null,amount=manualAmount;
+    if(marketplace){
+      listing=await db.prepare('SELECT * FROM listings WHERE id=?').get(body.listingId);
+      if(!listing||listing.visibility!=='PUBLIC')throw new AppError(404,'LISTING_NOT_FOUND','Sản phẩm không còn được bán.');
+      if(listing.status!=='AVAILABLE')throw new AppError(409,'LISTING_SOLD','Sản phẩm chưa mở bán hoặc đã có người mua.');
+      sellerId=listing.seller_id;
+      itemName=listing.title;
+      itemDescription=listing.description;
+      amount=listing.price;
     }
-    const seller = await db.prepare(`SELECT * FROM users WHERE id = ? AND role = 'SELLER'`).get(sellerId);
-    if (!seller) throw new AppError(400, 'SELLER_NOT_FOUND', 'Seller không tồn tại');
-
-    const id = uuid();
-    const now = nowIso();
-    await db.transaction(async () => {
-      await db.prepare(
-        `INSERT INTO transactions (id, buyer_id, seller_id, item_name, item_description, amount,
-          status, escrow_status, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'CREATED', 'NONE', 0, ?, ?)`
-      ).run(id, req.user.id, sellerId, itemName, itemDescription || null, amount, now, now);
-      await appendAuditLog(db, {
-        transactionId: id,
-        actorId: req.user.id,
-        action: 'TRANSACTION_CREATED',
-        oldStatus: null,
-        newStatus: 'CREATED',
-        eventData: { itemName, amount, sellerId },
-      });
-    })();
-
-    res.status(201).json(serializeTxn(await loadTxnOr404(id)));
-  } catch (e) {
+    if(sellerId===req.user.id)throw new AppError(400,'SELF_PURCHASE','Không thể tự mua hàng của mình.');
+    const seller=await db.prepare('SELECT is_active,account_status,role FROM users WHERE id=?').get(sellerId);
+    if(!seller||!seller.is_active||seller.role==='ADMIN'||seller.account_status!=='ACTIVE')throw new AppError(409,'SELLER_UNAVAILABLE','Người bán chưa sẵn sàng nhận giao dịch.');
+    const open=await db.prepare("SELECT COUNT(*) AS n FROM transactions WHERE buyer_id=? AND status='CREATED'").get(req.user.id);
+    if(open.n>=orderPolicy().maxOpenDrafts)throw new AppError(409,'DRAFT_LIMIT','Bạn đang có tối đa 5 đơn nháp. Hãy thanh toán hoặc hủy nháp trước.');
+    const id=uuid(),at=nowIso();
+    await db.prepare("INSERT INTO transactions(id,buyer_id,seller_id,item_name,item_description,amount,status,escrow_status,listing_id,buyer_note,version,created_at,updated_at,draft_expires_at,order_request_id,order_request_hash) VALUES(?,?,?,?,?,?,'CREATED','NONE',?,?,0,?,?,?,?,?)").run(id,req.user.id,sellerId,String(itemName).slice(0,200),itemDescription,amount,listing?.id||null,note,at,at,afterHours(at,orderPolicy().draftHours),requestId||null,requestId?requestHash:null);
+    if(shipping)await insertShipping(id,shipping);
+    await appendAuditLog(db,{
+      transactionId:id,
+      actorId:req.user.id,
+      action:marketplace?'ORDER_CREATED':'TRANSACTION_CREATED',
+      oldStatus:null,
+      newStatus:'CREATED',
+      eventData:{
+        listingId:listing?.id||null,amount,shippingSnapshotVersion:shipping?0:null
+      }
+    });
+    return {
+      id,created:true
+    };
+  })();
+}
+router.post('/',requireAuth,requireWallet,async(req,res,next)=>{
+  try{
+    const r=await createDraft(req,{
+      marketplace:false
+    });
+    res.status(r.created?201:200).json(await viewTxn(await loadTxnOr404(r.id),req.user));
+  } catch(e){
     next(e);
   }
 });
-
-// ---------- Đặt mua một sản phẩm từ storefront ----------
-
-router.post('/orders', requireAuth, requireWallet, requireRole('BUYER'), async (req, res, next) => {
-  try {
-    const { listingId, note } = req.body || {};
-    if (!listingId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu listingId');
-
-    const listing = await db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
-    if (!listing || listing.visibility !== 'PUBLIC') {
-      throw new AppError(404, 'LISTING_NOT_FOUND', 'Sản phẩm không còn được bán');
-    }
-    if (listing.seller_id === req.user.id) {
-      throw new AppError(400, 'VALIDATION_ERROR', 'Không thể tự mua sản phẩm của chính mình');
-    }
-    if (await findReservingOrder(listing.id)) {
-      throw new AppError(409, 'LISTING_SOLD', 'Sản phẩm này đã có người mua, vui lòng chọn sản phẩm khác');
-    }
-
-    // Server tự lấy giá từ listing trong DB — không bao giờ tin số tiền client gửi lên.
-    const amount = listing.price;
-
-    const id = uuid();
-    const now = nowIso();
-    const buyerNote = note ? String(note).trim().slice(0, 500) : null;
-
-    await db.transaction(async () => {
-      await db.prepare(
-        `INSERT INTO transactions (id, buyer_id, seller_id, item_name, item_description, amount,
-          status, escrow_status, listing_id, buyer_note, version, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, 'CREATED', 'NONE', ?, ?, 0, ?, ?)`
-      ).run(
-        id,
-        req.user.id,
-        listing.seller_id,
-        listing.title,
-        listing.description || null,
-        amount,
-        listing.id,
-        buyerNote,
-        now,
-        now
-      );
-
-      await appendAuditLog(db, {
-        transactionId: id,
-        actorId: req.user.id,
-        action: 'ORDER_CREATED',
-        oldStatus: null,
-        newStatus: 'CREATED',
-        eventData: { listingId: listing.id, itemName: listing.title, amount },
-      });
-    })();
-
-    res.status(201).json(serializeTxn(await loadTxnOr404(id)));
-  } catch (e) {
+router.post('/orders',requireAuth,requireWallet,async(req,res,next)=>{
+  try{
+    const r=await createDraft(req,{
+      marketplace:true
+    });
+    res.status(r.created?201:200).json(await viewTxn(await loadTxnOr404(r.id),req.user));
+  } catch(e){
     next(e);
   }
 });
@@ -305,7 +338,7 @@ router.get('/', requireAuth, async (req, res) => {
 
   const sql = `${TXN_SELECT} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY t.created_at DESC LIMIT 200`;
   const rows = await db.prepare(sql).all(...params);
-  res.json({ transactions: rows.map(serializeTxn) });
+  res.json({ transactions: await Promise.all(rows.map(row=>viewTxn(row,req.user))),policy:orderPolicy() });
 });
 
 router.get('/:id', requireAuth, async (req, res, next) => {
@@ -315,18 +348,7 @@ router.get('/:id', requireAuth, async (req, res, next) => {
     // Hồ sơ tranh chấp (nếu có) đi kèm chi tiết giao dịch, để cả hai bên — không chỉ quản trị
     // viên — thấy được tiền đang bị đóng băng vì đâu và đã được phân xử ra sao.
     const d = await db.prepare('SELECT * FROM disputes WHERE transaction_id = ?').get(txn.id);
-    res.json({
-      ...serializeTxn(txn),
-      dispute: d ? {
-        id: d.id,
-        status: d.status,
-        reason: d.reason,
-        openedBy: d.created_by === txn.buyer_id ? 'BUYER' : 'SELLER',
-        adminDecision: d.admin_decision,
-        createdAt: d.created_at,
-        resolvedAt: d.resolved_at,
-      } : null,
-    });
+    res.json({...await viewTxn(txn,req.user),dispute:serializeDispute(d),imageEvidence:await media.imageEvidence(d,req.user),disputeMessages:d?await db.prepare('SELECT id,actor_id AS "actorId",message,created_at AS "createdAt" FROM dispute_messages WHERE dispute_id=? ORDER BY created_at,id').all(d.id):[]});
   } catch (e) {
     next(e);
   }
@@ -336,8 +358,9 @@ router.get('/:id', requireAuth, async (req, res, next) => {
 
 router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) => {
   try {
+    await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,ACTIONS.LOCK);
     const { requestId,reauthGrant } = req.body || {};
-    if (!requestId) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId');
+    readRequestId(requestId);
 
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
@@ -353,7 +376,7 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
     });
     const buyerLegKey = `lock:${requestId}:buyer`;
     if (await checkIdempotency(buyerLegKey, fingerprint)) {
-      return res.json(serializeTxn(await loadTxnOr404(txn.id)));
+      return res.json(await viewTxn(await loadTxnOr404(txn.id),req.user));
     }
 
     if (txn.status !== 'CREATED' || txn.escrow_status !== 'NONE') {
@@ -372,19 +395,24 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
 
     const grant=await requireGrant({userId:req.user.id,sessionId:req.user.sessionId,transactionId:txn.id,action:ACTIONS.LOCK,rawToken:reauthGrant});
     await db.transaction(async () => {
+      if(await checkIdempotency(buyerLegKey,fingerprint))return;
       const current=await loadTxnOr404(txn.id);
       await assertLockReady(current,req.user);
       const context=await buildAuthorizationContext(current,ACTIONS.LOCK,req.user.sessionId);
       const expected=contextDigest(context).toString('hex');
       if(!grant.context_hash || grant.context_hash!==expected) throw new AppError(409,'CONTEXT_MISMATCH','Giá hoặc nội dung đơn đã thay đổi. Hãy tải lại và xác nhận lại.');
+      await transitionOrder(current,{status:'SECURED',escrow_status:'LOCKED',secured_at:nowIso()});
+      await db.prepare('UPDATE order_shipping_snapshot SET locked_at=? WHERE order_id=?').run(nowIso(),txn.id);
       await markGrantUsed(grant.id);
       // Chiếm độc quyền tin đăng TRƯỚC khi chạm tới ví — đúng thứ tự bước 3-4 của quy trình
       // LOCK đã chốt. Thua ở bước này thì không có delta ví nào phát sinh để phải rollback.
       if (txn.listing_id) await lockListingForOrder(txn.listing_id,context.listing.version);
+      // Freeze the exact photo IDs/hashes the buyer is paying for, in this same transaction.
+      const mediaSnapshot=await media.snapshotOrderImages(current);
 
       const updated = await applyOrderedWalletUpdates([
-        { wallet: buyerWallet, availableDelta: -txn.amount, lockedDelta: 0 },
-        { wallet: escrowWallet, availableDelta: 0, lockedDelta: txn.amount },
+        { wallet: await getUserWallet(req.user.id), availableDelta: -txn.amount, lockedDelta: 0 },
+        { wallet: await getEscrowWallet(), availableDelta: 0, lockedDelta: txn.amount },
       ], 'lock');
 
       await insertWalletEntry({
@@ -412,7 +440,7 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
         description: 'Escrow giữ tiền của người mua',
       });
 
-      await applyTransactionStatus(txn, { status: 'SECURED', escrowStatus: 'LOCKED' });
+
 
       await appendAuditLog(db, {
         transactionId: txn.id,
@@ -420,14 +448,16 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
         action: 'ESCROW_LOCKED',
         oldStatus: 'CREATED',
         newStatus: 'SECURED',
-        eventData: { amount: txn.amount, requestId },
+        eventData: mediaSnapshot.count
+          ? { amount: txn.amount, requestId, mediaSnapshot: { count: mediaSnapshot.count, sha256: mediaSnapshot.sha256, images: mediaSnapshot.images } }
+          : { amount: txn.amount, requestId },
       });
       const recipient=await db.prepare('SELECT id,email,email_verified_at FROM users WHERE id=?').get(txn.buyer_id);
       if(recipient?.email_verified_at)await require('../lib/accountSecurity').queueMail(recipient,'Biên nhận thanh toán ký quỹ Enclave',`Đơn ${txn.id}: ${txn.item_name}. Đã giữ ${txn.amount} VND trong ký quỹ. Người bán chưa nhận tiền. Chỉ xác nhận giải ngân sau khi nhận và kiểm tra hàng.`);
     })();
     await onOrderSecured(txn);
 
-    res.json(serializeTxn(await loadTxnOr404(txn.id)));
+    res.json(await viewTxn(await loadTxnOr404(txn.id),req.user));
   } catch (e) {
     next(e);
   }
@@ -437,21 +467,22 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
 //
 // Mốc sự kiện, không phải trạng thái: đơn vẫn SECURED + LOCKED, không có tiền nào di chuyển.
 // Luồng mô phỏng mới bắt buộc mốc này trước khi đóng gói. /ship của đơn cũ vẫn giữ tương thích.
-router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, res, next) => {
+router.post('/:id/acknowledge', requireAuth, async (req, res, next) => {
   try {
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['SELLER']);
     if (txn.status !== 'SECURED' || txn.escrow_status !== 'LOCKED') {
       throw new AppError(409, 'INVALID_STATE', 'Chỉ xác nhận được đơn đã thanh toán (SECURED + LOCKED)');
     }
+    if(orderDeadline(txn,null)<=nowIso())throw new AppError(409,'ORDER_DEADLINE_PASSED','Đơn đã quá hạn xác nhận, đang chờ xử lý hủy.');
     if (txn.seller_ack_at) throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'Đơn này đã được xác nhận');
 
     await db.transaction(async () => {
       // Điều kiện nằm trong WHERE: hai lần bấm gần như đồng thời chỉ một lần ghi được.
       const r = await db
         .prepare(`UPDATE transactions SET seller_ack_at = ?, updated_at = ?, version = version + 1
-          WHERE id = ? AND seller_ack_at IS NULL AND status = 'SECURED' AND escrow_status = 'LOCKED'`)
-        .run(nowIso(), nowIso(), txn.id);
+          WHERE id = ? AND seller_ack_at IS NULL AND status = 'SECURED' AND escrow_status = 'LOCKED' AND version = ?`)
+        .run(nowIso(), nowIso(), txn.id,txn.version);
       if (r.changes !== 1) throw new AppError(409, 'ALREADY_ACKNOWLEDGED', 'Đơn này vừa được xác nhận');
       await appendAuditLog(db, {
         transactionId: txn.id,
@@ -463,14 +494,14 @@ router.post('/:id/acknowledge', requireAuth, requireRole('SELLER'), async (req, 
       });
     })();
     await onOrderAcknowledged(txn);
-    res.json(serializeTxn(await loadTxnOr404(txn.id)));
+    res.json(await viewTxn(await loadTxnOr404(txn.id),req.user));
   } catch (e) {
     next(e);
   }
 });
 
 // ---------- Đóng gói: đặt lịch đơn vị vận chuyển mô phỏng ----------
-router.post('/:id/pack', requireAuth, requireRole('SELLER'), async (req, res, next) => {
+router.post('/:id/pack', requireAuth, async (req, res, next) => {
   try {
     const initial = await loadTxnOr404(req.params.id);
     assertOwnership(initial, req.user, ['SELLER']);
@@ -493,45 +524,13 @@ router.post('/:id/pack', requireAuth, requireRole('SELLER'), async (req, res, ne
       }
     })();
     if (packed.created) await onOrderPacked(current);
-    res.status(packed.created ? 201 : 200).json(serializeTxn(await loadTxnOr404(initial.id)));
+    res.status(packed.created ? 201 : 200).json(await viewTxn(await loadTxnOr404(initial.id),req.user));
   } catch (e) { next(e); }
 });
 
 // ---------- UC07: Người bán giao hàng ----------
 
-router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, next) => {
-  try {
-    const txn = await loadTxnOr404(req.params.id);
-    assertOwnership(txn, req.user, ['SELLER']);
-    if (txn.status !== 'SECURED' || txn.escrow_status !== 'LOCKED') {
-      throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SECURED + LOCKED');
-    }
-    await db.transaction(async () => {
-      // Compatibility for historical orders only. A new persisted carrier schedule
-      // cannot be skipped by calling the old endpoint or racing a /pack request.
-      const current = await loadTxnOr404(txn.id);
-      if (current.shipment_id) {
-        throw new AppError(409, 'SHIPMENT_MANAGED', 'Đơn đã có lịch vận chuyển mô phỏng; hệ thống sẽ tự lấy và giao hàng.');
-      }
-      if (current.status !== 'SECURED' || current.escrow_status !== 'LOCKED') {
-        throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SECURED + LOCKED');
-      }
-      await applyTransactionStatus(current, { status: 'SHIPPING', escrowStatus: 'LOCKED' });
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'SELLER_SHIPPED',
-        oldStatus: 'SECURED',
-        newStatus: 'SHIPPING',
-        eventData: {},
-      });
-    })();
-    await onOrderShipped(txn);
-    res.json(serializeTxn(await loadTxnOr404(txn.id)));
-  } catch (e) {
-    next(e);
-  }
-});
+router.post('/:id/ship',requireAuth,async(req,res,next)=>{try{const txn=await loadTxnOr404(req.params.id);assertOwnership(txn,req.user,['SELLER']);throw new AppError(409,'PACK_REQUIRED','Hãy đóng gói để hệ thống đặt lịch vận chuyển. Không thể bỏ qua đơn vị vận chuyển.');}catch(e){next(e);}});
 
 // ---------- Người MUA xác nhận đã nhận được kiện hàng ----------
 //
@@ -546,37 +545,23 @@ router.post('/:id/ship', requireAuth, requireRole('SELLER'), async (req, res, ne
 // toàn cục: một người mua được duyệt quyền bán hàng trong lúc đơn đang SHIPPING đã mang role
 // SELLER, và requireRole('BUYER') trước đây khiến họ không xác nhận nhận hàng được — tiền kẹt ở
 // SHIPPING. Cùng lý do với secure / reauth / release (xem chú thích của assertOwnership).
-router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
-  try {
-    const txn = await loadTxnOr404(req.params.id);
-    assertOwnership(txn, req.user, ['BUYER']);
-    if (txn.status !== 'SHIPPING' || txn.escrow_status !== 'LOCKED') {
-      throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SHIPPING + LOCKED');
-    }
-    await db.transaction(async () => {
-      const current = await loadTxnOr404(txn.id);
-      if (current.status !== 'SHIPPING' || current.escrow_status !== 'LOCKED') {
-        throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở SHIPPING + LOCKED');
-      }
-      if (current.shipment_id && current.shipment_status !== 'ARRIVED') {
-        throw new AppError(409, 'SHIPMENT_NOT_ARRIVED', 'Đơn hàng đang vận chuyển. Hãy đợi hàng đến rồi xác nhận đã nhận.');
-      }
-      await applyTransactionStatus(current, { status: 'WAIT_CONFIRM', escrowStatus: 'LOCKED' });
-      const inspectionSeconds=Number(process.env.ORDER_INSPECTION_SECONDS||86400);
-      if(!Number.isSafeInteger(inspectionSeconds)||inspectionSeconds<60)throw new AppError(503,'INVALID_INSPECTION_POLICY','Thời hạn kiểm tra hàng chưa hợp lệ.');
-      await db.prepare('UPDATE transactions SET inspection_due_at=? WHERE id=?').run(new Date(Date.now()+inspectionSeconds*1000).toISOString(),current.id);
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'BUYER_RECEIVED_PACKAGE',
-        oldStatus: 'SHIPPING',
-        newStatus: 'WAIT_CONFIRM',
-        eventData: {},
-      });
+router.post('/:id/wait-confirm',requireAuth,async(req,res,next)=>{
+  try{
+    const result=await db.transaction(async()=>{
+      const txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER']);
+      if(txn.received_confirmed_by==='BUYER'&&['WAIT_CONFIRM','DISPUTED'].includes(txn.status))return {
+        txn,changed:false
+      };
+      if(txn.status!=='SHIPPING'||txn.escrow_status!=='LOCKED')throw new AppError(409,'INVALID_STATE','Đơn không còn ở bước nhận kiện.');
+      if(txn.shipment_id&&txn.shipment_status!=='ARRIVED')throw new AppError(409,'SHIPMENT_NOT_ARRIVED','Hãy đợi đơn đến trước khi xác nhận nhận kiện.');
+      return {
+        txn:await receiveOrder(txn),changed:true
+      };
     })();
-    await onOrderWaitConfirm(txn);
-    res.json(serializeTxn(await loadTxnOr404(txn.id)));
-  } catch (e) {
+    if(result.changed)await onOrderWaitConfirm(result.txn);
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
     next(e);
   }
 });
@@ -610,6 +595,9 @@ router.post('/:id/wait-confirm', requireAuth, async (req, res, next) => {
 // tự chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
 async function assertLockReady(txn,user) {
   assertOwnership(txn,user,['BUYER']);
+  await require('../lib/accountSecurity').assertMoneyAllowed(user.id,ACTIONS.LOCK);
+  if(!await loadShipping(txn.id))throw new AppError(400,'SHIPPING_REQUIRED','Hãy bổ sung thông tin nhận hàng trước khi thanh toán.');
+  if((txn.draft_expires_at||afterHours(txn.created_at,orderPolicy().draftHours))<=nowIso())throw new AppError(409,'DRAFT_EXPIRED','Đơn nháp đã hết hạn. Hãy tạo đơn mới.');
   const buyer=await db.prepare('SELECT account_status,is_active FROM users WHERE id=?').get(user.id);
   if(!buyer?.is_active || !['ACTIVE','RECOVERING'].includes(buyer.account_status))throw new AppError(403,'WALLET_ACTIVATION_REQUIRED','Hãy kích hoạt ví trước khi thanh toán.');
   if(txn.buyer_id===txn.seller_id)throw new AppError(400,'SELF_PURCHASE','Không thể tự mua hàng của mình.');
@@ -624,14 +612,18 @@ async function assertLockReady(txn,user) {
   const wallet=await getUserWallet(user.id);
   if(!wallet || wallet.available_balance<txn.amount)throw new AppError(400,'INSUFFICIENT_FUNDS','Số dư không đủ. Hãy nạp thêm trước khi xác nhận Passkey.');
 }
+
 async function buildAuthorizationContext(txn,action=ACTIONS.RELEASE,sessionId=null) {
   const seller = await db.prepare('SELECT display_name FROM users WHERE id = ?').get(txn.seller_id);
   if(action===ACTIONS.LOCK){
     const listing=txn.listing_id?await db.prepare('SELECT * FROM listings WHERE id=?').get(txn.listing_id):null;
-    return {v:3,action,transactionId:txn.id,buyerId:txn.buyer_id,sellerId:txn.seller_id,sellerName:seller?.display_name||'',amount:txn.amount,currency:'VND',itemName:txn.item_name,orderVersion:txn.version,sessionId,listing:listing?{id:listing.id,title:listing.title,price:listing.price,version:listing.version,visibility:listing.visibility}:null};
+    const snapshot=await loadShipping(txn.id);
+    return {shippingSnapshot:snapshot?{version:snapshot.version,digest:shippingHash(serializeShipping(snapshot))}:null,v:4,action,transactionId:txn.id,buyerId:txn.buyer_id,sellerId:txn.seller_id,sellerName:seller?.display_name||'',amount:txn.amount,currency:'VND',itemName:txn.item_name,orderVersion:txn.version,sessionId,listing:listing?{id:listing.id,title:listing.title,price:listing.price,version:listing.version,visibility:listing.visibility}:null};
   }
   return {
-    v: 2,
+    v: 3,
+    orderVersion:txn.version,inspectedAt:txn.inspected_at||null,
+    dispute:txn.status==='DISPUTED'?await db.prepare('SELECT id,type,status,revision FROM disputes WHERE transaction_id=?').get(txn.id):null,
     action: 'RELEASE_ESCROW',
     sessionId,
     transactionId: txn.id,
@@ -657,14 +649,12 @@ router.post('/:id/reauth/options', requireAuth, sensitiveLimiter, async (req, re
   try {
     const action=req.body?.action||ACTIONS.RELEASE;
     if(![ACTIONS.LOCK,ACTIONS.RELEASE].includes(action))throw new AppError(400,'INVALID_ACTION','Hành động xác nhận không hợp lệ.');
-    if(action===ACTIONS.RELEASE)await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,action);
+    await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,action);
     await require('../lib/accountSecurity').assertReauthAvailable(req.user.id);
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER']);
     if(action===ACTIONS.LOCK)await assertLockReady(txn,req.user);
-    else if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
-      throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở WAIT_CONFIRM + LOCKED');
-    }
+    else await assertReleaseReady(txn);
 
     const credentials = await userCredentials(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản chưa có Passkey');
@@ -719,7 +709,7 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
     if(action===ACTIONS.LOCK)await assertLockReady(txn,req.user);
     else {
       await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,action);
-      if(txn.status!=='WAIT_CONFIRM'||txn.escrow_status!=='LOCKED')throw new AppError(409,'INVALID_STATE','Đơn không còn ở bước giải ngân.');
+      await assertReleaseReady(txn);
     }
 
     // Người dùng có thể ký bằng BẤT KỲ thiết bị nào của họ — chọn đúng cái đã ký.
@@ -789,111 +779,36 @@ router.post('/:id/reauth/verify', requireAuth, sensitiveLimiter, async (req, res
 
 // ---------- UC09: Người mua xác nhận đã nhận hàng và giải ngân ----------
 
-router.post('/:id/release', requireAuth, async (req, res, next) => {
-  try {
-    const { requestId, reauthGrant } = req.body || {};
-    if (!requestId || !reauthGrant) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu requestId hoặc reauthGrant');
-
-    const txn = await loadTxnOr404(req.params.id);
-    assertOwnership(txn, req.user, ['BUYER']);
-
-    const fingerprint = fingerprintRequest({
-      actorId: req.user.id,
-      action: 'ESCROW_RELEASE',
-      transactionId: txn.id,
-      amount: txn.amount,
-    });
-    const escrowLegKey = `release:${requestId}:escrow`;
-    if (await checkIdempotency(escrowLegKey, fingerprint)) {
-      return res.json(serializeTxn(await loadTxnOr404(txn.id)));
+router.post('/:id/release',requireAuth,async(req,res,next)=>{
+  try{
+    const {
+      requestId,reauthGrant
     }
-
-    if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
-      throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở WAIT_CONFIRM + LOCKED');
-    }
-
-    // Phiếu phải đúng user, đúng giao dịch, đúng hành động, còn hạn và chưa dùng.
-    const grant = await requireGrant({
-      userId: req.user.id,
-      sessionId: req.user.sessionId,
-      transactionId: txn.id,
-      action: ACTIONS.RELEASE,
-      rawToken: reauthGrant,
-      message: 'Phiếu uỷ quyền không hợp lệ, hết hạn, hoặc thuộc giao dịch khác',
-    });
-
-    // Đối chiếu ngữ cảnh lần HAI, độc lập với lần ở bước verify. Phiếu chỉ chứng minh
-    // "người này đã uỷ quyền MỘT nội dung nào đó". Ở đây kiểm nội dung ấy có đúng là nội
-    // dung đang sắp thực thi không — chặn kịch bản giao dịch bị sửa số tiền trong khoảng
-    // thời gian giữa lúc ký và lúc lệnh giải ngân thực sự chạy.
-    const currentContextHash = contextDigest(await buildAuthorizationContext(txn,ACTIONS.RELEASE,req.user.sessionId)).toString('hex');
-    if (!grant.context_hash || grant.context_hash !== currentContextHash) {
-      throw new AppError(
-        409,
-        'CONTEXT_MISMATCH',
-        'Nội dung giao dịch đã thay đổi sau khi bạn xác thực. Vì an toàn, hãy xác thực lại.'
-      );
-    }
-
-    // Một dòng tiền duy nhất: toàn bộ số tiền đang bị khóa chuyển sang ví người bán.
-    const escrowWallet = await getEscrowWallet();
-    const sellerWallet = await getUserWallet(txn.seller_id);
-
-    await db.transaction(async () => {
-      const latestContext=contextDigest(await buildAuthorizationContext(await loadTxnOr404(txn.id),ACTIONS.RELEASE,req.user.sessionId)).toString('hex');
-      if(!grant.context_hash || latestContext!==grant.context_hash) throw new AppError(409,'CONTEXT_MISMATCH','Nội dung giao dịch đã thay đổi. Hãy xác nhận lại.');
-      const updated = await applyOrderedWalletUpdates([
-        { wallet: escrowWallet, availableDelta: 0, lockedDelta: -txn.amount },
-        { wallet: sellerWallet, availableDelta: txn.amount, lockedDelta: 0 },
-      ], 'release');
-
-      await insertWalletEntry({
-        walletId: escrowWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_RELEASE_DEBIT',
-        availableDelta: 0,
-        lockedDelta: -txn.amount,
-        walletAfter: updated.get(escrowWallet.id),
-        idempotencyKey: escrowLegKey,
-        requestFingerprint: fingerprint,
-        description: 'Escrow giải ngân cho người bán',
-      });
-      await insertWalletEntry({
-        walletId: sellerWallet.id,
-        transactionId: txn.id,
-        requestId,
-        entryType: 'ESCROW_RELEASE_CREDIT',
-        availableDelta: txn.amount,
-        lockedDelta: 0,
-        walletAfter: updated.get(sellerWallet.id),
-        idempotencyKey: `release:${requestId}:seller`,
-        requestFingerprint: fingerprint,
-        description: 'Nhận tiền bán hàng',
-      });
-
-      await applyTransactionStatus(txn, { status: 'COMPLETED', escrowStatus: 'RELEASED' });
-      // Đã giải ngân thì sản phẩm đã bán hẳn: LOCKED -> SOLD trong cùng giao dịch với dòng tiền.
-      await settleListing(txn, 'RELEASE');
-      await markGrantUsed(grant.id);
-
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'ESCROW_RELEASED',
-        oldStatus: 'WAIT_CONFIRM',
-        newStatus: 'COMPLETED',
-        eventData: { amount: txn.amount, payoutToSeller: txn.amount, requestId },
-      });
-      for(const userId of [txn.buyer_id,txn.seller_id]){
-        const recipient=await db.prepare('SELECT id,email,email_verified_at FROM users WHERE id=?').get(userId);
-        if(recipient?.email_verified_at)await require('../lib/accountSecurity').queueMail(recipient,'Đã hoàn tất giao dịch Enclave',`Đơn ${txn.id}: ${txn.item_name}. Đã giải ngân ${txn.amount} VND cho người bán. Giao dịch hoàn tất.`);
+    =req.body||{};
+    readRequestId(requestId);
+    if(!reauthGrant)throw new AppError(400,'VALIDATION_ERROR','Thiếu phiếu xác thực.');
+    let completed;
+    await db.transaction(async()=>{
+      const txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER']);
+      const replay=await db.prepare('SELECT request_id FROM wallet_entries WHERE idempotency_key=?').get(`release:${txn.id}:debit`);
+      if(txn.status==='COMPLETED'&&replay?.request_id===requestId){
+        completed=txn;
+        return;
       }
+      await assertReleaseReady(txn);
+      const grant=await requireGrant({
+        userId:req.user.id,sessionId:req.user.sessionId,transactionId:txn.id,action:ACTIONS.RELEASE,rawToken:reauthGrant
+      });
+      if(grant.context_hash!==contextDigest(await buildAuthorizationContext(txn,ACTIONS.RELEASE,req.user.sessionId)).toString('hex'))throw new AppError(409,'CONTEXT_MISMATCH','Nội dung đơn đã thay đổi. Hãy xác thực lại.');
+      const dispute=txn.status==='DISPUTED'?await db.prepare("SELECT * FROM disputes WHERE transaction_id=? AND status='OPEN'").get(txn.id):null;
+      completed=await settleOrder(txn,{
+        decision:'RELEASE',actorId:req.user.id,requestId,grant,dispute,finalStatus:'COMPLETED',action:'ESCROW_RELEASED'
+      });
     })();
-    await onOrderCompleted(txn);
-
-    res.json(serializeTxn(await loadTxnOr404(txn.id)));
-  } catch (e) {
+    await onOrderCompleted(completed);
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
     next(e);
   }
 });
@@ -903,45 +818,187 @@ router.post('/:id/release', requireAuth, async (req, res, next) => {
 // tả. Người bán mở khi người mua đòi hoàn tiền không có căn cứ hoặc phủ nhận đã nhận
 // hàng. Nội dung phán quyết thuộc chính sách nghiệp vụ, không phải trọng tâm ở đây.
 
-router.post('/:id/dispute', requireAuth, requireRole('BUYER', 'SELLER'), sensitiveLimiter, async (req, res, next) => {
-  try {
-    const { reason } = req.body || {};
-    if (!reason || !String(reason).trim()) throw new AppError(400, 'VALIDATION_ERROR', 'Thiếu lý do tranh chấp');
-
-    const txn = await loadTxnOr404(req.params.id);
-    assertOwnership(txn, req.user, ['BUYER', 'SELLER']);
-    if (txn.status !== 'WAIT_CONFIRM' || txn.escrow_status !== 'LOCKED') {
-      throw new AppError(409, 'INVALID_STATE', 'Chỉ mở tranh chấp khi WAIT_CONFIRM + LOCKED');
+router.post('/:id/dispute',requireAuth,sensitiveLimiter,async(req,res,next)=>{
+  try{
+    const reason=typeof req.body?.reason==='string'?req.body.reason.trim():'';
+    const type=req.body?.type||'DEFECT';
+    if(!reason||reason.length>1000||reason.includes('\u0000')||!['NOT_SHIPPED','NOT_RECEIVED','DEFECT'].includes(type))throw new AppError(400,'VALIDATION_ERROR','Nhập loại vấn đề và mô tả từ 1 đến 1.000 ký tự.');
+    const imageIds=media.readImageIds(req.body?.imageIds,{max:6});
+    if(imageIds?.length&&[...reason].length<10)throw new AppError(400,'VALIDATION_ERROR','Mô tả sự cố kèm ảnh cần từ 10 đến 1.000 ký tự.');
+    let txn;
+    const result=await db.transaction(async()=>{
+      txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER','SELLER']);
+      const opened=await openOrderDispute(txn,{
+        type,actorId:req.user.id,reason
+      });
+      // Same transaction: a bad/foreign/expired image rolls back the dispute itself, and
+      // the dispute revision + order version were already bumped by openOrderDispute.
+      await media.attachEvidenceImages(txn,opened.dispute,req.user.id,imageIds);
+      return opened;
+    })();
+    if(result.created)await onDisputeOpened(txn,req.user.id);
+    if(result.converted){
+      const admins=await db.prepare("SELECT u.id FROM users u JOIN admin_provenance p ON p.user_id=u.id WHERE u.role='ADMIN' AND u.is_active=1").all();
+      const recipients=new Set([txn.buyer_id,txn.seller_id,...admins.map(a=>a.id)]);
+      await notify([...recipients].map(userId=>({
+        userId,type:'DISPUTE_COMPLAINT_ADDED',key:`${result.dispute.id}:${result.dispute.revision}`,transactionId:txn.id,
+        title:'Hồ sơ hệ thống đã có khiếu nại thực tế',
+        body:'Một bên đã báo vấn đề với đơn hàng. Tiền tiếp tục bị đóng băng và cần quản trị viên phân xử.'
+      })));
     }
+    res.status(result.created?201:200).json({
+      dispute:serializeDispute(result.dispute),transaction:await viewTxn(await loadTxnOr404(req.params.id),req.user),
+      imageEvidence:await media.imageEvidence(result.dispute,req.user)
+    });
+  } catch(e){
+    next(e);
+  }
+});
+router.post('/:id/dispute/messages',requireAuth,sensitiveLimiter,async(req,res,next)=>{
+  try{
+    const raw=req.body?.message===undefined?req.body?.reason:req.body.message;
+    const message=typeof raw==='string'?raw.trim():'';
+    if(!message||message.length>1000||message.includes('\u0000'))throw new AppError(400,'VALIDATION_ERROR','Nội dung bổ sung phải là chuỗi từ 1 đến 1.000 ký tự.');
+    const imageIds=media.readImageIds(req.body?.imageIds,{max:6});
+    if(imageIds?.length&&[...message].length<5)throw new AppError(400,'VALIDATION_ERROR','Nội dung bổ sung kèm ảnh cần từ 5 đến 1.000 ký tự.');
+    const result=await db.transaction(async()=>{
+      const txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER','SELLER']);
+      // appendDisputeMessage bumps dispute.revision and orders.version exactly once; the
+      // images ride in the same transaction so a stale admin/buyer authorization fails.
+      const appended=await appendDisputeMessage(txn,{actorId:req.user.id,message});
+      await media.attachEvidenceImages(txn,appended.dispute,req.user.id,imageIds);
+      return appended;
+    })();
+    res.status(201).json({
+      dispute:serializeDispute(result.dispute),
+      transaction:await viewTxn(await loadTxnOr404(req.params.id),req.user),
+      message:result.message,
+      imageEvidence:await media.imageEvidence(result.dispute,req.user)
+    });
+  }catch(error){next(error);}
+});
 
-    const disputeId = uuid();
-    const openedBy = txn.buyer_id === req.user.id ? 'BUYER' : 'SELLER';
-    const trimmed = String(reason).trim().slice(0, 1000);
-
-    await db.transaction(async () => {
-      await db.prepare(
-        `INSERT INTO disputes (id, transaction_id, created_by, reason, status, created_at)
-         VALUES (?, ?, ?, ?, 'OPEN', ?)`
-      ).run(disputeId, txn.id, req.user.id, trimmed, nowIso());
-
-      await applyTransactionStatus(txn, { status: 'DISPUTED', escrowStatus: 'FROZEN' });
-
-      await appendAuditLog(db, {
-        transactionId: txn.id,
-        actorId: req.user.id,
-        action: 'DISPUTE_OPENED',
-        oldStatus: 'WAIT_CONFIRM',
-        newStatus: 'DISPUTED',
-        eventData: { reason: trimmed, openedBy },
+router.post('/:id/inspected',requireAuth,async(req,res,next)=>{
+  try{
+    await db.transaction(async()=>{
+      const txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER']);
+      if(txn.inspected_at)return;
+      await assertReleaseReady(txn,{
+        requireInspection:false
+      });
+      const at=nowIso();
+      await transitionOrder(txn,{
+        inspected_at:at,inspected_by:req.user.id
+      });
+      await appendAuditLog(db,{
+        transactionId:txn.id,
+        actorId:req.user.id,
+        action:'BUYER_INSPECTED',
+        oldStatus:txn.status,
+        newStatus:txn.status,
+        eventData:{
+          inspectedAt:at
+        }
       });
     })();
-    await onDisputeOpened(txn, req.user.id);
-
-    res.status(201).json({
-      dispute: { id: disputeId, status: 'OPEN', openedBy },
-      transaction: serializeTxn(await loadTxnOr404(txn.id)),
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
+    next(e);
+  }
+});
+async function cancelOrder(req,{ seller=false } = {}) {
+  let result;
+  await db.transaction(async()=>{
+    const txn=await loadTxnOr404(req.params.id);
+    assertOwnership(txn,req.user,[seller?'SELLER':'BUYER']);
+    const reason=seller?'seller_reject':'buyer_cancel';
+    if(txn.status==='CANCELLED'&&txn.cancel_reason===reason){
+      result=txn;
+      return;
+    }
+    if(txn.status==='CREATED'&&!seller){
+      await transitionOrder(txn,{
+        status:'CANCELLED',cancelled_at:nowIso(),cancel_reason:reason
+      });
+      await appendAuditLog(db,{
+        transactionId:txn.id,
+        actorId:req.user.id,
+        action:'DRAFT_CANCELLED',
+        oldStatus:'CREATED',
+        newStatus:'CANCELLED',
+        eventData:{
+          reason
+        }
+      });
+      result=txn;
+      return;
+    }
+    if(txn.status!=='SECURED'||txn.escrow_status!=='LOCKED'||txn.shipment_id||(!seller&&txn.seller_ack_at))throw new AppError(409,'CANCELLATION_NOT_ALLOWED','Không thể hủy thường ở bước này. Hãy báo vấn đề hoặc mở tranh chấp.');
+    if(seller&&(typeof req.body?.reason!=='string'||req.body.reason.trim().length<2||req.body.reason.trim().length>1000||req.body.reason.includes('\u0000')))throw new AppError(400,'VALIDATION_ERROR','Người bán cần nêu lý do từ chối/hủy đơn.');
+    result=await settleOrder(txn,{
+      decision:'REFUND',
+      actorId:req.user.id,
+      requestId:`cancel:${txn.id}`,
+      reason,
+      listingOutcome:seller&&txn.seller_ack_at?'REFUND':'CANCEL_BEFORE_SHIPMENT',
+      finalStatus:'CANCELLED',
+      action:seller?'SELLER_CANCELLED':'BUYER_CANCELLED'
     });
-  } catch (e) {
+    // Free-form cancellation explanation is private dispute content, never an audit payload.
+    if(seller)await db.prepare('INSERT INTO order_cancellation_notes(order_id,actor_id,note,created_at) VALUES(?,?,?,?)').run(txn.id,req.user.id,req.body.reason.trim(),nowIso());
+  })();
+  await notify([result.buyer_id,result.seller_id].map(userId=>({
+    userId,type:'ORDER_CANCELLED',key:result.id,transactionId:result.id,title:'Đơn hàng đã được hủy',body:'Nếu đơn đã thanh toán, tiền ký quỹ đã hoàn về ví người mua.'
+  })));
+}
+router.post('/:id/cancel',requireAuth,async(req,res,next)=>{
+  try{
+    await cancelOrder(req);
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
+    next(e);
+  }
+});
+router.post('/:id/reject',requireAuth,async(req,res,next)=>{
+  try{
+    await cancelOrder(req,{
+      seller:true
+    });
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
+    next(e);
+  }
+});
+router.post('/:id/shipping',requireAuth,async(req,res,next)=>{
+  try{
+    const shipping=readShipping(req.body?.shipping);
+    await db.transaction(async()=>{
+      const txn=await loadTxnOr404(req.params.id);
+      assertOwnership(txn,req.user,['BUYER']);
+      if(!['CREATED','SECURED'].includes(txn.status)||txn.shipment_picked_up_at||txn.shipment_status==='STOPPED')throw new AppError(409,'ADDRESS_LOCKED','Địa chỉ chỉ được thay đổi trước khi đơn vị vận chuyển lấy hàng.');
+      const existing=await loadShipping(txn.id);
+      await transitionOrder(txn,{});
+      if(existing)await db.prepare('INSERT INTO order_shipping_history(order_id,version,snapshot_json,changed_by,created_at) VALUES(?,?,?,?,?)').run(txn.id,existing.version,JSON.stringify(serializeShipping(existing)),req.user.id,nowIso());
+      if(existing){
+        const r=await db.prepare('UPDATE order_shipping_snapshot SET recipient_name=?,phone=?,address=?,ward=?,district=?,province=?,version=version+1,updated_at=? WHERE order_id=? AND version=?').run(shipping.recipientName,shipping.phone,shipping.address,shipping.ward,shipping.district,shipping.province,nowIso(),txn.id,existing.version);
+        if(r.changes!==1)throw new ConflictError('SHIPPING_VERSION_CONFLICT');
+      } else await insertShipping(txn.id,shipping);
+      await appendAuditLog(db,{
+        transactionId:txn.id,
+        actorId:req.user.id,
+        action:'SHIPPING_SNAPSHOT_UPDATED',
+        oldStatus:txn.status,
+        newStatus:txn.status,
+        eventData:{
+          snapshotId:txn.id,version:existing?existing.version+1:0,afterPayment:txn.escrow_status==='LOCKED'
+        }
+      });
+    })();
+    res.json(await viewTxn(await loadTxnOr404(req.params.id),req.user));
+  } catch(e){
     next(e);
   }
 });

@@ -4,7 +4,7 @@ const { db, uuid } = require('../db');
 const { AppError, ConflictError } = require('./errors');
 const { appendAuditLog } = require('./hash');
 const { applyTransactionStatus } = require('./walletOps');
-const { onShipmentPickedUp, onShipmentArrived } = require('./notifications');
+const { onShipmentPickedUp, onShipmentArrived, onDisputeOpened } = require('./notifications');
 
 const PICKUP_DELAY_MS = 4700;
 const ARRIVAL_DELAY_MS = 19200;
@@ -45,6 +45,7 @@ async function createShipment(txn, { now = Date.now() } = {}) {
     throw new AppError(409, 'ACKNOWLEDGEMENT_REQUIRED', 'Hãy xác nhận đơn hàng trước khi đóng gói.');
   }
   const start = timeValue(now);
+  if(require('./orderPolicy').orderDeadline(txn,null)<=new Date(start).toISOString())throw new AppError(409,'ORDER_DEADLINE_PASSED','Đơn đã quá hạn đóng gói, đang chờ xử lý hủy.');
   const packedAt = new Date(start).toISOString();
   const id = uuid();
   const updated = await db.prepare(
@@ -67,6 +68,7 @@ async function stopShipment(txn, shipment, at) {
      WHERE id = ? AND version = ? AND status <> 'STOPPED'`
   ).run(at, `TRANSACTION_${txn.status}_${txn.escrow_status}`, shipment.id, shipment.version);
   if (stopped.changes !== 1) return false;
+  await require('./orderLifecycle').transitionOrder(txn,{}, {at});
   await appendAuditLog(db, {
     transactionId: txn.id, actorId: null, action: 'SIMULATED_SHIPMENT_STOPPED',
     oldStatus: txn.status, newStatus: txn.status,
@@ -104,6 +106,21 @@ async function reconcileShipping({ now = Date.now() } = {}) {
         if (await stopShipment(txn, shipment, at)) counts.stopped += 1;
         return [];
       }
+      // Recovery after a long outage must not invent a delivery just because both
+      // animation deadlines are in the past. The same conservative deadline is
+      // used by the lifecycle worker, regardless of which worker starts first.
+      const { orderPolicy, afterHours } = require('./orderPolicy');
+      const unarrived = ['PICKUP_PENDING','IN_TRANSIT'].includes(shipment.status);
+      if (unarrived && afterHours(shipment.packed_at,orderPolicy().shippingMaxHours) <= at) {
+        await require('./orderLifecycle').openOrderDispute(txn,{
+          type:'SHIPMENT_STALLED',
+          reason:'Vận chuyển đã quá hạn; cần quản trị viên kiểm tra. Tiền vẫn được bảo vệ.',
+          at,
+        });
+        txn = await db.prepare('SELECT * FROM transactions WHERE id=?').get(txn.id);
+        if (await stopShipment(txn,shipment,at)) counts.stopped += 1;
+        return [{kind:'stalled',txn}];
+      }
       const emitted = [];
       if (shipment.status === 'PICKUP_PENDING' && shipment.pickup_due_at <= at) {
         const changed = await db.prepare(
@@ -126,6 +143,7 @@ async function reconcileShipping({ now = Date.now() } = {}) {
            WHERE id = ? AND status = 'IN_TRANSIT' AND version = ?`
         ).run(at, shipment.id, shipment.version);
         if (changed.changes !== 1) throw new ConflictError('SHIPMENT_VERSION_CONFLICT');
+        txn=await require('./orderLifecycle').transitionOrder(txn,{}, {at});
         await appendAuditLog(db, {
           transactionId: txn.id, actorId: null, action: 'SIMULATED_CARRIER_ARRIVED',
           oldStatus: 'SHIPPING', newStatus: 'SHIPPING',
@@ -137,9 +155,12 @@ async function reconcileShipping({ now = Date.now() } = {}) {
     })();
     // Notifications describe committed state; they never govern receipt or money.
     for (const event of events) {
-      counts[event.kind] += 1;
-      if (event.kind === 'pickedUp') await onShipmentPickedUp(event.txn);
-      else await onShipmentArrived(event.txn);
+      if (event.kind === 'stalled') await onDisputeOpened(event.txn,null);
+      else {
+        counts[event.kind] += 1;
+        if (event.kind === 'pickedUp') await onShipmentPickedUp(event.txn);
+        else await onShipmentArrived(event.txn);
+      }
     }
   }
   return counts;

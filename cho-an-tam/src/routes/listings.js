@@ -13,6 +13,8 @@ const {
   RESERVING_STATUSES,
 } = require('../lib/catalog');
 
+const media = require('../lib/mediaService');
+
 const router = express.Router();
 
 const RESERVING_PLACEHOLDERS = RESERVING_STATUSES.map(() => '?').join(',');
@@ -57,7 +59,15 @@ function serializeListing(row) {
     soldStatus: row.is_sold ? (row.sold_status || null) : null,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    // Real seller-uploaded photos only (first = cover). [] means "no photo yet": clients
+    // must show an honest placeholder, never a stock/AI image or the legacy `image` URL.
+    images: [],
   };
+}
+
+async function serializeListings(rows) {
+  const galleries = await media.imagesForListings(rows.map((r) => r.id));
+  return rows.map((row) => ({ ...serializeListing(row), images: galleries.get(row.id) || [] }));
 }
 
 async function loadListingOr404(id) {
@@ -152,7 +162,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
       params.push(req.user.id);
     } else {
       // Khách và người mua chỉ thấy tin đang mở bán.
-      where.push("l.visibility = 'PUBLIC'");
+      where.push("l.visibility = 'PUBLIC' AND l.status <> 'PENDING_SELLER_REVIEW'");
       if (sellerId) {
         where.push('l.seller_id = ?');
         params.push(sellerId);
@@ -193,7 +203,7 @@ router.get('/', optionalAuth, async (req, res, next) => {
     // Hàng đã bán chìm xuống cuối để trang chủ luôn ưu tiên thứ còn mua được.
     const sql = `${SELECT_LISTING} ${where.length ? 'WHERE ' + where.join(' AND ') : ''} ORDER BY is_sold ASC, ${orderBy} LIMIT 200`;
     const rows = await db.prepare(sql).all(...params);
-    res.json({ listings: rows.map(serializeListing) });
+    res.json({ listings: await serializeListings(rows) });
   } catch (e) {
     next(e);
   }
@@ -254,10 +264,10 @@ router.post('/demo-seed', requireAuth, require('../lib/auth').requireWallet, req
 router.get('/:id', optionalAuth, async (req, res, next) => {
   try {
     const row = await loadListingOr404(req.params.id);
-    if (row.visibility === 'HIDDEN' && (!req.user || req.user.id !== row.seller_id)) {
+    if ((row.visibility === 'HIDDEN'||row.status==='PENDING_SELLER_REVIEW') && (!req.user || req.user.id !== row.seller_id)) {
       throw new AppError(404, 'LISTING_NOT_FOUND', 'Không tìm thấy sản phẩm này');
     }
-    res.json(serializeListing(row));
+    res.json((await serializeListings([row]))[0]);
   } catch (e) {
     next(e);
   }
@@ -268,30 +278,36 @@ router.get('/:id', optionalAuth, async (req, res, next) => {
 router.post('/', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
     const input = readListingInput(req.body || {});
+    const imageIds = media.readImageIds((req.body || {}).imageIds);
     if(['BASIC','VERIFIED'].includes(req.user.accountStatus))input.visibility='HIDDEN';
 
     const id = uuid();
     const now = nowIso();
-    await db.prepare(
-      `INSERT INTO listings (id, seller_id, title, description, category, location, condition, image,
-        price, visibility, version, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
-    ).run(
-      id,
-      req.user.id,
-      input.title,
-      input.description ?? null,
-      input.category,
-      input.location ?? null,
-      input.condition ?? 'GOOD',
-      input.image ?? null,
-      input.price,
-      input.visibility ?? 'PUBLIC',
-      now,
-      now
-    );
+    // Listing row and image attachment commit together: an invalid/foreign image leaves no
+    // partially public listing and no half-attached assets.
+    await db.transaction(async () => {
+      await db.prepare(
+        `INSERT INTO listings (id, seller_id, title, description, category, location, condition, image,
+          price, visibility, version, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`
+      ).run(
+        id,
+        req.user.id,
+        input.title,
+        input.description ?? null,
+        input.category,
+        input.location ?? null,
+        input.condition ?? 'GOOD',
+        input.image ?? null,
+        input.price,
+        input.visibility ?? 'PUBLIC',
+        now,
+        now
+      );
+      await media.attachListingImages({ id, seller_id: req.user.id, status: 'AVAILABLE' }, req.user.id, imageIds);
+    })();
 
-    res.status(201).json(serializeListing(await loadListingOr404(id)));
+    res.status(201).json((await serializeListings([await loadListingOr404(id)]))[0]);
   } catch (e) {
     next(e);
   }
@@ -312,35 +328,76 @@ const FIELD_TO_COLUMN = {
 
 router.patch('/:id', requireAuth, requireRole('SELLER'), async (req, res, next) => {
   try {
-    const current = await loadListingOr404(req.params.id);
-    if (current.seller_id !== req.user.id) {
-      throw new AppError(403, 'FORBIDDEN', 'Bạn không phải người đăng bán sản phẩm này');
-    }
+    const imageIds = media.readImageIds((req.body || {}).imageIds);
+    // Field update, version bump and image attachment are ONE transaction. The version bump
+    // is what invalidates any LOCK authorization built from the older listing version.
+    const current = await db.transaction(async () => {
+      const current = await loadListingOr404(req.params.id);
+      if (current.seller_id !== req.user.id) {
+        throw new AppError(403, 'FORBIDDEN', 'Bạn không phải người đăng bán sản phẩm này');
+      }
 
-    const input = readListingInput(req.body || {}, { partial: true });
-    if(['BASIC','VERIFIED'].includes(req.user.accountStatus))input.visibility='HIDDEN';
-    const keys = Object.keys(input);
-    if (keys.length === 0) throw new AppError(400, 'VALIDATION_ERROR', 'Không có trường nào để cập nhật');
+      const input = readListingInput(req.body || {}, { partial: true });
+      if(['BASIC','VERIFIED'].includes(req.user.accountStatus))input.visibility='HIDDEN';
+      const keys = Object.keys(input);
+      if (keys.length === 0 && imageIds === null) throw new AppError(400, 'VALIDATION_ERROR', 'Không có trường nào để cập nhật');
 
-    // Đổi giá khi đã có đơn giữ chỗ sẽ làm lệch số tiền đã khoá trong Escrow.
-    if (current.is_sold && input.price !== undefined) {
-      throw new AppError(409, 'LISTING_SOLD', 'Không thể đổi giá khi sản phẩm đã có đơn mua');
-    }
+      // Đổi giá khi đã có đơn giữ chỗ sẽ làm lệch số tiền đã khoá trong Escrow.
+      if (current.is_sold && input.price !== undefined) {
+        throw new AppError(409, 'LISTING_SOLD', 'Không thể đổi giá khi sản phẩm đã có đơn mua');
+      }
 
-    const assignments = keys.map((k) => `${FIELD_TO_COLUMN[k]} = ?`);
-    const values = keys.map((k) => input[k]);
-    const result = await db
-      .prepare(
-        `UPDATE listings SET ${assignments.join(', ')}, version = version + 1, updated_at = ?
-         WHERE id = ? AND version = ?`
-      )
-      .run(...values, nowIso(), current.id, current.version);
-    if (result.changes !== 1) {
-      throw new AppError(409, 'LISTING_VERSION_CONFLICT', 'Tin đăng vừa được cập nhật ở nơi khác, hãy tải lại');
-    }
+      const assignments = keys.map((k) => `${FIELD_TO_COLUMN[k]} = ?`);
+      const values = keys.map((k) => input[k]);
+      const result = await db
+        .prepare(
+          `UPDATE listings SET ${assignments.map((a) => `${a}, `).join('')}version = version + 1, updated_at = ?
+           WHERE id = ? AND version = ?`
+        )
+        .run(...values, nowIso(), current.id, current.version);
+      if (result.changes !== 1) {
+        throw new AppError(409, 'LISTING_VERSION_CONFLICT', 'Tin đăng vừa được cập nhật ở nơi khác, hãy tải lại');
+      }
+      // imageIds omitted => gallery preserved; [] clears; otherwise replaces, order kept.
+      await media.attachListingImages(current, req.user.id, imageIds);
+      return current;
+    })();
 
-    res.json(serializeListing(await loadListingOr404(current.id)));
+    res.json((await serializeListings([await loadListingOr404(current.id)]))[0]);
   } catch (e) {
+    next(e);
+  }
+});
+
+// A refunded item stays hidden until its owner explicitly confirms physical custody.
+router.post('/:id/relist',requireAuth,require('../lib/auth').requireWallet,async(req,res,next)=>{
+  try{
+    if(req.body?.confirmed!==true)throw new AppError(400,'CONFIRMATION_REQUIRED','Hãy xác nhận hàng đã về và còn bán được.');
+    await db.transaction(async()=>{
+      const listing=await loadListingOr404(req.params.id);
+      if(listing.seller_id!==req.user.id)throw new AppError(403,'FORBIDDEN');
+      if(listing.status!=='PENDING_SELLER_REVIEW')throw new AppError(409,'LISTING_NOT_PENDING_REVIEW','Tin không ở bước chờ kiểm tra lại.');
+      const open=await db.prepare("SELECT 1 FROM transactions WHERE listing_id=? AND status IN ('CREATED','SECURED','SHIPPING','WAIT_CONFIRM','DISPUTED') LIMIT 1").get(listing.id);
+      if(open)throw new AppError(409,'LISTING_HAS_OPEN_ORDER','Tin vẫn có đơn đang mở.');
+      const r=await db.prepare("UPDATE listings SET status='AVAILABLE',visibility='PUBLIC',version=version+1,updated_at=? WHERE id=? AND status='PENDING_SELLER_REVIEW' AND version=?").run(nowIso(),listing.id,listing.version);
+      if(r.changes!==1)throw new AppError(409,'LISTING_VERSION_CONFLICT');
+      const txn=await db.prepare('SELECT * FROM transactions WHERE listing_id=? ORDER BY created_at DESC,id DESC LIMIT 1').get(listing.id);
+      if(txn){
+        await require('../lib/orderLifecycle').transitionOrder(txn,{});
+        await require('../lib/hash').appendAuditLog(db,{
+          transactionId:txn.id,
+          actorId:req.user.id,
+          action:'SELLER_RELISTED',
+          oldStatus:txn.status,
+          newStatus:txn.status,
+          eventData:{
+            listingId:listing.id,confirmedPhysicalCustody:true
+          }
+        });
+      }
+    })();
+    res.json((await serializeListings([await loadListingOr404(req.params.id)]))[0]);
+  } catch(e){
     next(e);
   }
 });
@@ -369,6 +426,9 @@ router.delete('/:id', requireAuth, requireRole('SELLER'), async (req, res, next)
         return { deleted: false, hidden: true };
       }
 
+      // listing_media references the listing: free the gallery rows (images return to
+      // 24h staging, never deleted while a snapshot/dispute references them) first.
+      await media.releaseListingImages(current.id);
       await db.prepare('DELETE FROM listings WHERE id = ?').run(current.id);
       return { deleted: true, hidden: false };
     })();

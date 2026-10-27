@@ -63,6 +63,7 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
   const navs = [];
   const pending = new Map();
   const table = { ...routes };
+  let bootstrapRefresh = true;
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/${search}`,
     runScripts: 'outside-only',
@@ -82,7 +83,11 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
       w.fetch = (url, opts = {}) => new Promise((resolve, reject) => {
         const u = new URL(url, ORIGIN);
         const key = `${opts.method || 'GET'} ${u.pathname}`;
-        log.push(key);
+        // Auth now restores the initial session through its cookie refresh route.
+        // Legacy localStorage values alone intentionally no longer log a user in.
+        const startup = bootstrapRefresh && key === 'POST /api/passkeys/session/refresh';
+        if (startup) bootstrapRefresh = false;
+        else log.push(key);
         (bodies[key] = bodies[key] || []).push(opts.body ? JSON.parse(opts.body) : null);
         const abort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
         if (opts.signal) {
@@ -90,7 +95,9 @@ async function openPage({ hash = '#/wallet', search = '', user = BUYER, routes =
           opts.signal.addEventListener('abort', abort);
         }
         const handler = table[key];
-        const r = handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+        const r = startup
+          ? json(200, { token: 'tok-' + user.id, user: { ...user, authMethod: 'passkey', emailVerified: true } })
+          : handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
         if (r === HANG) return;
         Promise.resolve(r).then((x) => {
           if (x === HANG) return;

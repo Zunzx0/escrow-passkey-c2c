@@ -1,7 +1,7 @@
 // Vòng đời của một tin đăng đơn chiếc SAU khi tiền đã khoá:
 //
 //   AVAILABLE --(lock, /secure)--> LOCKED --(giải ngân: release / admin-release)--> SOLD
-//                                        \--(hoàn tiền: admin-refund)------------> AVAILABLE
+//                                        \--(hoàn tiền sau giao hàng)------------> PENDING_SELLER_REVIEW
 //
 // Chiều đi (AVAILABLE -> LOCKED) nằm ở lockListingForOrder trong routes/transactions.js. Module
 // này lo chiều về. Trước đây chiều về không tồn tại: đơn đã hoàn tiền vẫn để tin đăng kẹt ở
@@ -16,12 +16,13 @@ const { ConflictError } = require('./errors');
 
 const LISTING_STATUS_AFTER = {
   RELEASE: 'SOLD',
-  REFUND: 'AVAILABLE',
+  REFUND: 'PENDING_SELLER_REVIEW',
+  CANCEL_BEFORE_SHIPMENT: 'AVAILABLE',
 };
 
 /**
  * Đưa tin đăng của giao dịch rời khỏi LOCKED theo kết cục tất toán (RELEASE -> SOLD, REFUND ->
- * AVAILABLE). Giao dịch không gắn tin đăng (tạo thủ công qua POST /api/transactions) thì bỏ qua.
+ * PENDING_SELLER_REVIEW). Hủy trước vận chuyển dùng CANCEL_BEFORE_SHIPMENT. Giao dịch không gắn tin đăng (tạo thủ công qua POST /api/transactions) thì bỏ qua.
  *
  * Cập nhật có điều kiện `status = 'LOCKED'`, cùng khuôn mẫu với lockListingForOrder: nếu tin đăng
  * không ở LOCKED thì dữ liệu đã lệch với tiền, và nghiệp vụ bị huỷ cả khối thay vì tất toán tiền
@@ -46,7 +47,7 @@ async function settleListing(txn, outcome) {
   return target;
 }
 
-// Dữ liệu tạo ra TRƯỚC bản sửa này (tin đăng còn LOCKED dù giao dịch đã tất toán) được chuẩn hoá
-// lúc khởi động — xem lib/listingNormalize.js.
+// Startup only normalizes completed sales to SOLD. Historical refunded listings
+// are left unchanged because a refund does not prove physical custody.
 
 module.exports = { settleListing, LISTING_STATUS_AFTER };

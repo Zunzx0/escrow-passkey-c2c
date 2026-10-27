@@ -106,6 +106,7 @@ async function onOrderShipped(txn) {
 }
 
 async function onOrderWaitConfirm(txn) {
+  const systemReceipt = txn.received_confirmed_by === 'SYSTEM';
   await notify([
     {
       userId: txn.buyer_id, type: 'ORDER_WAIT_CONFIRM', key: txn.id, transactionId: txn.id,
@@ -114,8 +115,10 @@ async function onOrderWaitConfirm(txn) {
     },
     {
       userId: txn.seller_id, type: 'ORDER_WAIT_CONFIRM', key: txn.id, transactionId: txn.id,
-      title: 'Người mua đã nhận hàng',
-      body: `"${txn.item_name}" đang chờ người mua xác nhận để giải ngân.`,
+      title: systemReceipt ? 'Hệ thống đã mở thời hạn kiểm hàng' : 'Người mua đã nhận hàng',
+      body: systemReceipt
+        ? `"${txn.item_name}" đã quá hạn xác nhận nhận kiện. Người mua chưa tự xác nhận đã nhận; tiền vẫn ở ký quỹ.`
+        : `"${txn.item_name}" đang chờ người mua kiểm hàng và đồng ý giải ngân.`,
     },
   ]);
 }
@@ -129,14 +132,16 @@ async function onOrderCompleted(txn) {
 }
 
 async function onDisputeOpened(txn, openedByUserId) {
-  const counterparty = openedByUserId === txn.buyer_id ? txn.seller_id : txn.buyer_id;
+  const recipients = openedByUserId
+    ? [openedByUserId === txn.buyer_id ? txn.seller_id : txn.buyer_id]
+    : [txn.buyer_id, txn.seller_id];
   const admins = await adminIds();
   await notify([
-    {
-      userId: counterparty, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
-      title: 'Giao dịch bị mở tranh chấp',
+    ...recipients.map(userId => ({
+      userId, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
+      title: openedByUserId ? 'Giao dịch bị mở tranh chấp' : 'Hệ thống mở hồ sơ cần xem xét',
       body: `"${txn.item_name}" đang tranh chấp; ${money(txn.amount)} bị đóng băng chờ quản trị viên phân xử.`,
-    },
+    })),
     ...admins.map((adminId) => ({
       userId: adminId, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
       title: 'Có hồ sơ tranh chấp mới cần phân xử',
@@ -198,9 +203,14 @@ async function todoFor(user) {
       detail: t.shipment_id ? `"${t.item_name}" đã đến điểm giao (mô phỏng). Hãy nhận kiện hàng rồi xác nhận.`
         : `"${t.item_name}" đã được gửi đi.` });
   }
-  for (const t of await txns(`SELECT * FROM transactions WHERE buyer_id = ? AND status = 'WAIT_CONFIRM' ORDER BY created_at`, user.id)) {
-    items.push({ kind: 'RELEASE_OR_DISPUTE', role: 'BUYER', transactionId: t.id, title: 'Xác nhận giải ngân hoặc mở tranh chấp',
-      detail: `"${t.item_name}" — ${money(t.amount)} đang chờ quyết định của bạn.` });
+  for (const t of await txns(`SELECT t.* FROM transactions t
+    LEFT JOIN disputes d ON d.transaction_id=t.id
+    WHERE t.buyer_id = ? AND (t.status = 'WAIT_CONFIRM'
+      OR (t.status='DISPUTED' AND d.status='OPEN' AND d.type='INSPECTION_TIMEOUT' AND d.opened_by='SYSTEM'))
+    ORDER BY t.created_at`, user.id)) {
+    items.push({ kind: 'RELEASE_OR_DISPUTE', role: 'BUYER', transactionId: t.id,
+      title: t.inspected_at ? 'Đồng ý giải ngân hoặc báo vấn đề' : 'Kiểm hàng rồi ghi nhận đã kiểm',
+      detail: `"${t.item_name}" — ${money(t.amount)} vẫn đang được giữ. ${t.inspected_at ? 'Bạn đã ghi nhận kiểm hàng; tiền chỉ chuyển khi có xác nhận giải ngân hợp lệ.' : 'Đã nhận kiện, đã kiểm hàng và giải ngân là ba bước riêng.'}` });
   }
   const pendingTopups = (await db.prepare(`SELECT COUNT(*) AS n FROM payment_requests WHERE user_id = ? AND status = 'PENDING'`).get(user.id)).n;
   if (pendingTopups > 0) {
@@ -211,8 +221,8 @@ async function todoFor(user) {
   if (user.role === 'ADMIN') {
     for (const d of await db.prepare(
       `SELECT d.id, d.transaction_id, t.item_name, t.amount FROM disputes d JOIN transactions t ON t.id = d.transaction_id
-       WHERE d.status = 'OPEN' ORDER BY d.created_at`
-    ).all()) {
+       WHERE d.status = 'OPEN' AND t.buyer_id<>? AND t.seller_id<>? ORDER BY d.created_at`
+    ).all(user.id,user.id)) {
       items.push({ kind: 'ADJUDICATE_DISPUTE', role: 'ADMIN', transactionId: d.transaction_id, disputeId: d.id,
         title: 'Phân xử tranh chấp', detail: `"${d.item_name}" — ${money(d.amount)} đang bị đóng băng.` });
     }
