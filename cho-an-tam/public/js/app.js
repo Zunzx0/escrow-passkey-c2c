@@ -1252,7 +1252,7 @@ const App = (() => {
             </button>
           `}
 
-          ${!bootstrap?authField('activationDeviceName','Tên Passkey (có thể bỏ qua)','text',suggestedDeviceName())+'<p class="hint">Tặng 5.000.000 VND demo khi kích hoạt ví. Đây là số dư mô phỏng.</p><button class="btn btn-ghost btn-block" data-act="activation-later">Để sau</button>':'<button class="btn btn-ghost btn-block" data-act="do-logout">Đăng xuất và hoàn tất sau</button>'}
+          ${!bootstrap?authField('activationDeviceName','Tên Passkey (có thể bỏ qua)','text',suggestedDeviceName())+'<p class="hint">Số dư thử do máy chủ cấp một lần khi kích hoạt ví. Số tiền thực nhận hiển thị trong ví; đây là tiền mô phỏng.</p><button class="btn btn-ghost btn-block" data-act="activation-later">Để sau</button>':'<button class="btn btn-ghost btn-block" data-act="do-logout">Đăng xuất và hoàn tất sau</button>'}
         </div>`,
     });
     if (!bootstrap) Promise.resolve(refreshPasskeyReadiness('setupPasskeyReadiness')).catch((error) => {
@@ -3669,7 +3669,7 @@ const App = (() => {
       return wrongRole('Quản trị viên không phải một bên của giao dịch nên không có ví.');
     }
     if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){
-      view().innerHTML=empty('wallet','Kích hoạt ví khi bạn cần','Xác minh email và tạo Passkey để mở ví. Tặng 5.000.000 VND demo khi kích hoạt.','<button class="btn btn-primary" data-act="activate-wallet">Kích hoạt ví &amp; nạp tiền</button><a class="btn" href="#/">Tiếp tục xem hàng</a>');return;
+      view().innerHTML=empty('wallet','Kích hoạt ví khi bạn cần','Xác minh email và tạo Passkey để mở ví. Số dư thử được máy chủ cấp một lần khi kích hoạt; số tiền thực nhận hiển thị trong ví.','<button class="btn btn-primary" data-act="activate-wallet">Kích hoạt ví &amp; nạp tiền</button><a class="btn" href="#/">Tiếp tục xem hàng</a>');return;
     }
 
     // Cổng nạp tiền nào đang bật là do MÁY CHỦ nói (GET /api/payments/paypal/config); không đoán từ hostname.

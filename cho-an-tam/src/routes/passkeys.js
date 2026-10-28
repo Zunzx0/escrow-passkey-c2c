@@ -14,11 +14,10 @@
 // mức của lối yếu nhất.
 const express = require('express');
 const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
+const { generateRegistrationOptions, verifyRegistrationResponse } = require('../lib/webauthnRegistration');
 
 const { db, uuid, nowIso } = require('../db');
 const {
@@ -58,13 +57,14 @@ const { assessCounter, reportCounterAnomaly } = require('../lib/credentialCounte
 const { RP_ID, ORIGIN } = require('../lib/webauthnConfig');
 const { isProvenAdmin } = require('../lib/adminProvenance');
 const accountSecurity=require('../lib/accountSecurity');
+const { resolveInitialGrant } = require('../lib/initialGrant');
 
 const router = express.Router();
 router.use(require('./accountSecurity').router);
 
 const RP_NAME = 'Escrow Passkeys C2C';
 const CHALLENGE_TTL_SECONDS = parseInt(process.env.CHALLENGE_TTL_SECONDS || '300', 10);
-const DEMO_BUYER_INITIAL_BALANCE = parseInt(process.env.DEMO_BUYER_INITIAL_BALANCE || '5000000', 10);
+const INITIAL_GRANT_VND = resolveInitialGrant();
 const RATE_LIMIT_AUTH_PER_MINUTE = parseInt(process.env.RATE_LIMIT_AUTH_PER_MINUTE || '10', 10);
 const authLimiter = rateLimit({ perMinute: RATE_LIMIT_AUTH_PER_MINUTE });
 
@@ -298,9 +298,9 @@ router.post(
           await db.prepare(
             `INSERT INTO wallets (id, user_id, wallet_type, available_balance, locked_balance, version, created_at, updated_at)
              VALUES (?, ?, 'USER', ?, 0, 0, ?, ?)`
-          ).run(walletId, user.id, DEMO_BUYER_INITIAL_BALANCE, now, now);
+          ).run(walletId, user.id, INITIAL_GRANT_VND, now, now);
 
-          if (DEMO_BUYER_INITIAL_BALANCE > 0) {
+          if (INITIAL_GRANT_VND > 0) {
             await db.prepare(
               `INSERT INTO wallet_entries
                 (id, wallet_id, transaction_id, request_id, entry_type, available_delta, locked_delta,
@@ -310,8 +310,8 @@ router.post(
               uuid(),
               walletId,
               registrationSessionId,
-              DEMO_BUYER_INITIAL_BALANCE,
-              DEMO_BUYER_INITIAL_BALANCE,
+              INITIAL_GRANT_VND,
+              INITIAL_GRANT_VND,
               `demo-topup:${user.id}`,
               'Số dư demo cấp khi hoàn tất đăng ký',
               now

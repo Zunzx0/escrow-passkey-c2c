@@ -35,7 +35,7 @@ async function main(){
   p.routes['POST /api/passkeys/email/verify']=()=>json(200,{token:'verified-test',scope:'full',user:verified});
   fill(p,'emailVerificationCode','123456');await click(p,'email-verify');
   ok(!!p.d.querySelector('[data-act="do-enroll-passkey"]')&&!!p.d.getElementById('activationDeviceName'),'verified account sees inline device name and Passkey button');
-  ok(/5.000.000/.test(p.d.getElementById('modalRoot').textContent),'activation labels demo balance gift');
+  ok(/máy chủ cấp một lần/.test(p.d.getElementById('modalRoot').textContent)&&/tiền mô phỏng/.test(p.d.getElementById('modalRoot').textContent)&&!/5\.000\.000/.test(p.d.getElementById('modalRoot').textContent),'activation explains one-time simulated credit without promising a stale configured amount');
   p.w.SimpleWebAuthnBrowser.startRegistration=async()=>({id:'new-key'});
   let promptUsed=false;p.w.prompt=()=>{promptUsed=true;throw new Error('native prompt forbidden');};
   const codes=['ABCDE-FGHJK','LMNPQ-RSTUV','WXYZA-BCDEF','GHJKL-MNPQR','STUVW-XYZAB','CDEFG-HJKLM','NPQRS-TUVWX','YZABC-DEFGH'];

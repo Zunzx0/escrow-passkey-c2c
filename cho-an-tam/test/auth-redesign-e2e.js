@@ -23,7 +23,7 @@ function must(res,status=200){assert.equal(res.status,status,JSON.stringify(res.
 async function mail(email,subject){const rows=await db.prepare('SELECT * FROM auth_email_outbox WHERE recipient=? ORDER BY created_at DESC').all(email);const row=rows.find(r=>!subject||r.subject.includes(subject));assert.ok(row,'email queued '+subject);return sec.decryptMail(row.body_cipher);}
 async function otp(email,subject='Mã xác minh'){return (await mail(email,subject)).match(/\b\d{6}\b/)[0];}
 async function emailLink(email,subject){const text=await mail(email,subject),url=text.match(/https?:\/\/\S+/)[0].replace(/[.,]$/,'');return new URLSearchParams(new URL(url).hash.split('?')[1]).get('token');}
-async function register(name){const email=name+'@example.test';const registered=await api('/passkeys/register/account',{body:{email,username:name,displayName:'Người dùng thử',password}});must(registered,201);const verified=await api('/passkeys/email/verify',{token:registered.data.token,body:{code:await otp(email)}});must(verified);const auth=createAuthenticator();const opt=must(await api('/passkeys/register/passkey/options',{token:verified.data.token,body:{}}));const response=auth.register({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true});const activated=await api('/passkeys/register/passkey/verify',{token:verified.data.token,body:{registrationSessionId:opt.registrationSessionId,response,deviceName:'Thiết bị thử'}});must(activated,201);return {...activated.data,auth,email,password,cookie:verified.cookie,registrationOptions:opt.options};}
+async function register(name){const email=name+'@example.test';const registered=await api('/passkeys/register/account',{body:{email,username:name,displayName:'Người dùng thử',password}});must(registered,201);const verified=await api('/passkeys/email/verify',{token:registered.data.token,body:{code:await otp(email)}});must(verified);const auth=createAuthenticator();const opt=must(await api('/passkeys/register/passkey/options',{token:verified.data.token,body:{}}));const response=auth.register({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true});const activated=await api('/passkeys/register/passkey/verify',{token:verified.data.token,body:{registrationSessionId:opt.registrationSessionId,response,deviceName:'Thiết bị thử',initialGrantVnd:99999999,INITIAL_GRANT_VND:99999999,availableBalance:99999999}});must(activated,201);return {...activated.data,auth,email,password,cookie:verified.cookie,registrationOptions:opt.options};}
 async function login(user){return api('/passkeys/login/password',{body:{username:user.user.username,password:user.password}});}
 async function passkeyLogin(user){const opt=must(await api('/passkeys/login/options',{body:{}}));const response=user.auth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true});return api('/passkeys/login/verify',{body:{authenticationSessionId:opt.authenticationSessionId,response}});}
 async function grant(user,action,details={},token=user.token){const opt=must(await api('/passkeys/reauth/options',{token,body:{action,...details}}));const response=user.auth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge,uv:true});return must(await api('/passkeys/reauth/verify',{token,body:{reauthSessionId:opt.reauthSessionId,response}}));}
@@ -58,6 +58,12 @@ async function main(){
   check(a.user.authMethod==='passkey'&&a.recoveryCodes===undefined,'activation yields K session without forcing backup codes');
   check((await db.prepare('SELECT COUNT(*) AS n FROM auth_recovery_codes WHERE user_id=?').get(a.user.id)).n===0,'new account has no unsolicited backup codes');
   check((await db.prepare('SELECT COUNT(*) AS n FROM wallets WHERE user_id=?').get(a.user.id)).n===1,'activation creates exactly one wallet');
+  for(const person of [a,seller]) {
+    const wallet=await db.prepare('SELECT * FROM wallets WHERE user_id=?').get(person.user.id);
+    const credits=await db.prepare("SELECT * FROM wallet_entries WHERE wallet_id=? AND entry_type='DEMO_TOPUP'").all(wallet.id);
+    check(wallet.available_balance===10000000&&wallet.locked_balance===0,'server grants exactly 10m despite client-supplied credit amounts');
+    check(credits.length===1&&credits[0].available_delta===10000000&&credits[0].available_after===10000000&&credits[0].locked_delta===0&&credits[0].idempotency_key==='demo-topup:'+person.user.id,'initial credit has one matching external ledger entry bound to the account');
+  }
   const duplicate=await api('/passkeys/register/account',{body:{email:a.email,username:'different_name',displayName:'Người dùng thử',password}});must(duplicate,201);
   check(duplicate.data.scope===first.data.scope&&duplicate.data.message===first.data.message&&!duplicate.data.token.includes(a.user.id),'existing email gets indistinguishable verification flow');
   check((await api('/passkeys/email/verify',{token:duplicate.data.token,body:{code:await otp(a.email)}})).status===400,'duplicate-email flow cannot authorize existing account');
@@ -109,7 +115,8 @@ async function main(){
   const stale=await lockGrant(daily,secondOrder.id);
   await db.prepare('UPDATE listings SET price=price+1,version=version+1 WHERE id=?').run(secondOrder.listingId);
   check((await api('/transactions/'+secondOrder.id+'/secure',{token:daily.token,body:{requestId:crypto.randomUUID(),reauthGrant:stale.reauthGrant}})).data.error==='CONTEXT_MISMATCH','price change after G prevents locking stale order');
-  const expensive=await order(seller,daily,9000000);
+  const dailyBalance=await db.prepare('SELECT available_balance FROM wallets WHERE user_id=?').get(daily.user.id);
+  const expensive=await order(seller,daily,dailyBalance.available_balance+1000);
   check((await api('/transactions/'+expensive.id+'/reauth/options',{token:daily.token,body:{action:'LOCK_ESCROW'}})).data.error==='INSUFFICIENT_FUNDS','balance failure is reported before invoking Passkey');
   const expiryOrder=await order(seller,daily,3000),expiredGrant=await lockGrant(daily,expiryOrder.id);
   await db.prepare('UPDATE reauth_grants SET expires_at=? WHERE token_hash=?').run(new Date(Date.now()-1000).toISOString(),sec.hash(expiredGrant.reauthGrant));
@@ -118,7 +125,9 @@ async function main(){
   await db.prepare('UPDATE reauth_grants SET context_hash=NULL WHERE token_hash=?').run(sec.hash(noCtx.reauthGrant));
   check((await api('/transactions/'+expiryOrder.id+'/secure',{token:daily.token,body:{requestId:crypto.randomUUID(),reauthGrant:noCtx.reauthGrant}})).status===401,'LOCK grant without context fails closed');
   must(await secure(daily,expiryOrder.id,dailyP.token));
-  check(must(await api('/wallets/me',{token:daily.token})).availableBalance===4996000,'P session with correct G can pay; ledger debits exact amount');
+  const paidWallet=must(await api('/wallets/me',{token:daily.token}));
+  assert.equal(paidWallet.availableBalance,dailyBalance.available_balance-3000,'wallet debit must equal the secured order amount');
+  check(paidWallet.lockedBalance===0,'P session with correct G can pay; money is held in SYSTEM_ESCROW rather than buyer locked balance');
   const newEmail='changed@example.test',emailGrant=await grant(a,'CHANGE_EMAIL',{newEmail});
   check((await api('/passkeys/email/change/request',{token:a.token,body:{newEmail:'tampered@example.test',reauthGrant:emailGrant.reauthGrant}})).status===401,'change-email grant bound to new email');
   const requestedEmail=must(await api('/passkeys/email/change/request',{token:a.token,body:{newEmail,reauthGrant:emailGrant.reauthGrant}}));
