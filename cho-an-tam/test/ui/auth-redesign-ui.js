@@ -13,6 +13,14 @@ async function main(){
   await logoutUi(p);await click(p,'open-auth-register');
   ok(['regEmail','regUsername','regDisplayName','regPassword'].every(id=>p.d.getElementById(id)),'registration has four separate fields');
   fill(p,'regEmail','new@example.test');fill(p,'regUsername','new_person');fill(p,'regDisplayName','Người dùng mới');fill(p,'regPassword','MatKhau-Rieng-2026!');
+  const password=p.d.getElementById('regPassword'),toggle=p.d.querySelector('[data-target="regPassword"]'),original=password.value;
+  ok(password.type==='password'&&toggle.closest('.password-input')===password.parentElement,'password starts hidden and its eye button belongs to the same input wrapper');
+  ok(toggle.type==='button'&&toggle.getAttribute('aria-controls')==='regPassword'&&toggle.getAttribute('aria-label')==='Hiện mật khẩu','eye button is labelled and cannot submit the form');
+  password.setSelectionRange(3,7);await click(p,'toggle-password');
+  ok(password.type==='text'&&password.value===original&&toggle.getAttribute('aria-pressed')==='true'&&toggle.getAttribute('aria-label')==='Ẩn mật khẩu','showing the password preserves its value and updates accessible state');
+  ok(password.selectionStart===3&&password.selectionEnd===7&&p.count('POST /api/passkeys/register/account')===0,'toggling keeps selection and sends no registration request');
+  await click(p,'toggle-password');
+  ok(password.type==='password'&&password.value===original&&toggle.getAttribute('aria-pressed')==='false','second click masks the password without clearing it');
   let finish; p.routes['POST /api/passkeys/register/account']=()=>new Promise(resolve=>{finish=resolve;});
   await click(p,'do-register',30);
   ok([...p.d.querySelectorAll('#modalRoot button')].every(b=>b.disabled),'all modal actions disabled while registration is pending');
@@ -87,6 +95,9 @@ async function main(){
   ok(/các phiên khác sẽ bị đăng xuất/.test(p.d.getElementById('modalRoot').textContent),'key deletion has explicit confirmation');
   await click(p,'modal-close');await click(p,'open-change-password');
   ok(!!p.d.getElementById('currentPassword'),'password change requires current password');
+  ok(['currentPassword','newPassword'].every(id=>p.d.getElementById(id).type==='password'&&p.d.querySelector('[data-target="'+id+'"]').closest('.password-input')===p.d.getElementById(id).parentElement),'change-password fields each have a separate inline eye button and start masked');
+  const currentToggle=p.d.querySelector('[data-target="currentPassword"]');p.click(currentToggle);await sleep(30);
+  ok(p.d.getElementById('currentPassword').type==='text'&&p.d.getElementById('newPassword').type==='password','each eye button only toggles its own password field');
   console.log('AUTH UI: '+checks+' checks passed');
  }finally{p.close();}
 }
