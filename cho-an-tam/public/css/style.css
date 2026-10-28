@@ -391,6 +391,17 @@ img { max-width: 100%; display: block; }
 
 .field { display: flex; flex-direction: column; gap: 8px; }
 .field label { font-weight: 600; font-size: 14px; line-height: 20px; color: var(--text); }
+.password-input { position: relative; width: 100%; }
+.password-input > input { min-height: 48px; padding-inline-end: 56px; }
+.password-input > input::-ms-reveal { display: none; }
+.password-toggle {
+  position: absolute; inset-inline-end: 2px; top: 50%; transform: translateY(-50%);
+  display: grid; place-items: center; width: 44px; height: 44px; padding: 0;
+  border: 0; border-radius: var(--radius); background: transparent; color: var(--text-2); cursor: pointer;
+}
+.password-toggle:hover { background: var(--surface-2); color: var(--text); }
+.password-toggle:focus-visible { outline: 2px solid var(--primary); outline-offset: -3px; }
+.password-toggle:disabled { cursor: not-allowed; opacity: .55; }
 .hint { font-size: 12px; line-height: 16px; color: var(--muted); }
 /* :where() giữ độ đặc hiệu bằng 0: mọi ô nhập văn bản (kể cả ô OTP không khai báo type) có cùng
    kiểu, và luật của từng thành phần (ô tìm kiếm trên topbar...) luôn thắng mà không cần tăng cấp. */

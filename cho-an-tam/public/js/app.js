@@ -1159,7 +1159,7 @@ const App = (() => {
           </div>
           <div class="field">
             <label for="loginPassword">Mật khẩu</label>
-            <input id="loginPassword" type="password" autocomplete="current-password">
+            ${passwordInput('loginPassword',{autocomplete:'current-password'})}
           </div>
           <button class="btn btn-block btn-lg" data-act="do-login-password">Đăng nhập</button>
         </div>`;
@@ -1186,8 +1186,7 @@ const App = (() => {
           </div>
           <div class="field">
             <label for="regPassword">Mật khẩu</label>
-            <input id="regPassword" type="password" autocomplete="new-password" minlength="8" maxlength="128" required>
-            <button class="btn btn-ghost btn-sm" data-act="toggle-password" data-target="regPassword">Hiện mật khẩu</button>
+            ${passwordInput('regPassword',{minlength:8,maxlength:128,required:true})}
             <span class="hint">Ít nhất 8 ký tự. Không dùng lại mật khẩu ở nơi khác; đây là hệ thống demo.</span>
           </div>
 
@@ -1234,11 +1233,11 @@ const App = (() => {
           ${bootstrap ? `
             <div class="field">
               <label for="bootCurrent">Mật khẩu tạm</label>
-              <input id="bootCurrent" type="password" autocomplete="current-password">
+              ${passwordInput('bootCurrent',{autocomplete:'current-password'})}
             </div>
             <div class="field">
               <label for="bootNew">Mật khẩu mới</label>
-              <input id="bootNew" type="password" autocomplete="new-password">
+              ${passwordInput('bootNew')}
               <span class="hint">Ít nhất 8 ký tự</span>
             </div>
             <button class="btn btn-primary btn-block btn-lg" data-act="do-bootstrap-password">Tiếp tục</button>
@@ -3037,7 +3036,10 @@ const App = (() => {
     const pending=authUi.activation;authUi.activation=null;authUi.codes=null;closeModal();renderChrome();
     if(pending && state.user?.id===pending.userId && location.hash===pending.hash && ['ACTIVE','RECOVERING'].includes(state.user.accountStatus))await pending.resume?.();
   }
-  const authField=(id,label,type='text',value='')=>`<div class="field"><label for="${id}">${esc(label)}</label><input id="${id}" type="${type}" value="${esc(value)}" ${type==='password'?'autocomplete="new-password" maxlength="128"':''} required></div>`;
+  function passwordInput(id,{autocomplete='new-password',value='',required=false,minlength,maxlength}={}) {
+    return `<div class="password-input"><input id="${esc(id)}" type="password" value="${esc(value)}" autocomplete="${esc(autocomplete)}" ${minlength?`minlength="${minlength}"`:''} ${maxlength?`maxlength="${maxlength}"`:''} ${required?'required':''}><button type="button" class="password-toggle" data-act="toggle-password" data-target="${esc(id)}" aria-controls="${esc(id)}" aria-label="Hiện mật khẩu" aria-pressed="false" title="Hiện mật khẩu">${ico('eye',20)}</button></div>`;
+  }
+  const authField=(id,label,type='text',value='')=>`<div class="field"><label for="${id}">${esc(label)}</label>${type==='password'?passwordInput(id,{value,maxlength:128,required:true}):`<input id="${id}" type="${type}" value="${esc(value)}" required>`}</div>`;
   function suggestedDeviceName(){const ua=navigator.userAgent;return `${/Android/.test(ua)?'Android':/iPhone|iPad/.test(ua)?'iPhone / iPad':/Windows/.test(ua)?'Windows':/Mac/.test(ua)?'Mac':'Thiết bị'}, ${/Edg/.test(ua)?'Edge':/Chrome/.test(ua)?'Chrome':/Safari/.test(ua)?'Safari':'trình duyệt'}`;}
   function bindRegistrationValidation(){
     const reserved=new Set(['admin','support','enclave','root','system','moderator']);
@@ -3383,10 +3385,10 @@ const App = (() => {
       title: 'Đổi mật khẩu',
       body: `
         <div class="stack">
-          <div class="field"><label for="currentPassword">Mật khẩu hiện tại</label><input id="currentPassword" type="password" autocomplete="current-password" required></div>
+          <div class="field"><label for="currentPassword">Mật khẩu hiện tại</label>${passwordInput('currentPassword',{autocomplete:'current-password',required:true})}</div>
           <div class="field">
             <label for="newPassword">Mật khẩu mới</label>
-            <input id="newPassword" type="password" autocomplete="new-password">
+            ${passwordInput('newPassword')}
             <span class="hint">Ít nhất 8 ký tự</span>
           </div>
           <p class="muted tiny m-0">
@@ -5929,7 +5931,16 @@ const App = (() => {
     'notif-open': (el) => openNotification(el),
     'notif-read-all': (el) => readAllNotifications(el),
     'tx-verify-chain': (el) => verifyTxChain(el),
-    'toggle-password':(el)=>{const input=$('#'+el.dataset.target);input.type=input.type==='password'?'text':'password';el.textContent=input.type==='password'?'Hiện mật khẩu':'Ẩn mật khẩu';},
+    'toggle-password':(el)=>{
+      const input=document.getElementById(el.dataset.target);
+      if(!input||input.disabled||el.disabled)return;
+      const show=input.type==='password',start=input.selectionStart,end=input.selectionEnd;
+      input.type=show?'text':'password';
+      const label=show?'Ẩn mật khẩu':'Hiện mật khẩu';
+      el.setAttribute('aria-label',label);el.setAttribute('title',label);el.setAttribute('aria-pressed',String(show));
+      el.innerHTML=ico(show?'eye-off':'eye',20);
+      if(start!==null&&end!==null)input.setSelectionRange(start,end);
+    },
     'auth-terms':()=>openModal({title:'Điều khoản và quyền riêng tư của bản demo',body:'<p>Enclave là hệ thống mô phỏng phục vụ đồ án. Số dư trong ví không phải tiền gửi ngân hàng và không có chức năng rút tiền thật.</p><p>Email dùng để xác minh, thông báo bảo mật và khôi phục. Khóa công khai Passkey được lưu trên máy chủ; khóa riêng và dữ liệu sinh trắc học được xử lý bởi thiết bị hoặc nhà cung cấp Passkey. Không chia sẻ mật khẩu và mã khôi phục.</p>',footer:'<button class="btn" data-act="open-auth-register">Quay lại đăng ký</button>'}),
     'copy-site-link':async()=>{try{await navigator.clipboard.writeText(location.origin+location.pathname);toast('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{toast('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
     'email-verify':verifyEmailUi,
