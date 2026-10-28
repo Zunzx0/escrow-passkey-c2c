@@ -33,7 +33,7 @@ const { db } = require('../src/db');
 const BASE = process.env.BASE_URL || 'http://localhost:3100';
 const RP_ID = process.env.WEBAUTHN_RP_ID || 'localhost';
 const ORIGIN = process.env.WEBAUTHN_ORIGIN || BASE;
-const DEMO_BALANCE = parseInt(process.env.DEMO_BUYER_INITIAL_BALANCE || '5000000', 10);
+const DEMO_BALANCE = require('../src/lib/initialGrant').resolveInitialGrant();
 const ROUNDS = 3;
 
 let failures = 0;

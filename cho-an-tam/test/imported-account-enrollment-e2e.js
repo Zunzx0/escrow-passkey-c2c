@@ -32,6 +32,10 @@ async function fixture({role='BUYER', wallet=false, receipt=false, receiptActor=
  }
  if(receipt) await db.prepare("INSERT INTO security_events (event_type,outcome,actor_id) VALUES ('ACCOUNT_SANDBOX_IMPORTED',?,?)").run(outcome,receiptActor||id);
  const login=await api('/login/password',{username,password}); eq(login.status,200,'pending account password login');
+ // Trusted local fixture: reproduce fresh email proof for this activation session.
+ // No production bypass; the HTTP route still enforces both proof checks.
+ await db.prepare('UPDATE users SET email=?,email_verified_at=? WHERE id=?').run(username+'@example.test',now,id);
+ await db.prepare('UPDATE sessions SET enrollment_verified_at=? WHERE user_id=?').run(now,id);
  return {id,token:login.body.token};
 }
 async function prepare(user) {
