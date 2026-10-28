@@ -14,11 +14,10 @@
 // mức của lối yếu nhất.
 const express = require('express');
 const {
-  generateRegistrationOptions,
-  verifyRegistrationResponse,
   generateAuthenticationOptions,
   verifyAuthenticationResponse,
 } = require('@simplewebauthn/server');
+const { generateRegistrationOptions, verifyRegistrationResponse } = require('../lib/webauthnRegistration');
 
 const { db, uuid, nowIso } = require('../db');
 const {
