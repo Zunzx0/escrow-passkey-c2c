@@ -34,6 +34,7 @@ const App = (() => {
     homeListings: [],           // kết quả tìm gần nhất, để "Xem thêm" không phải gọi lại API
     orderTab: null,             // 'sell' | 'buy' — chỉ người bán có hai tab
     adminTab: 'disputes',       // 'disputes' | 'seller-requests' | 'users' | 'invariants' | 'security-events'
+    disputeCategory: '',       // Display filter only; never used to authorize a decision.
     secEventsType: '',          // bộ lọc loại sự kiện của tab "Sự kiện bảo mật"
     orderFilter: 'active',      // 'active' | 'all' | 'done'
     busy: new Set(),            // id các nút đang chạy, để khoá double-click
@@ -2491,7 +2492,7 @@ const App = (() => {
           <div class="order-tile">${productImage({ category: t.listingCategory,images:t.images,title:t.itemName }, { size: 30 })}</div>
           <div>
             <a class="order-title" href="#/tx/${esc(t.id)}">${esc(t.itemName)}</a>
-            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}</div>
+            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}${disputeCode({caseCode:t.disputeCaseCode})?`<span class="tag">Hồ sơ ${esc(t.disputeCaseCode)}</span>`:''}</div>
             ${progressBar(t)}
           </div>
           <div class="order-amount">
@@ -2914,7 +2915,7 @@ const App = (() => {
         </div>
         <div class="field">
           <label for="dsType">Vấn đề cần hỗ trợ</label>
-          <select id="dsType"><option value="NOT_RECEIVED">Chưa nhận được hàng</option><option value="NOT_SHIPPED">Người bán chưa xử lý / chưa gửi hàng</option><option value="DEFECT">Sản phẩm hỏng, thiếu hoặc sai mô tả</option></select>
+          <select id="dsType" required><option value="">Chọn loại vấn đề</option>${Object.entries(DISPUTE_CATEGORIES).filter(([,c])=>c.manual).map(([code,c])=>`<option value="${esc(c.type)}">${esc(code)} — ${esc(c.label)}</option>`).join('')}</select>
         </div>
         <div class="field">
           <label for="dsReason">Mô tả sự cố</label>
@@ -2929,11 +2930,14 @@ const App = (() => {
 
   async function doDispute(id, btn) {
     const reason = $('#dsReason') ? $('#dsReason').value.trim() : '';
-    const type = $('#dsType')?.value || 'NOT_RECEIVED';
+    const type = $('#dsType')?.value || '';
+    if (!Object.values(DISPUTE_CATEGORIES).some(c=>c.manual&&c.type===type)) return toast('Vui lòng chọn loại vấn đề bạn gặp phải.', 'err');
     if (reason.length<10||reason.length>1000) return toast('Mô tả sự cố từ 10 đến 1000 ký tự.', 'err');
-    const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } }),
+    let response;
+    const scope=await submitMediaForm('dispute:' + id, btn, async imageIds=>{response=await api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } });return response;},
       {successMsg:'Đã gửi yêu cầu giải quyết tranh chấp. Enclave đang giữ tiền của đơn.'});
-    await finishMediaForm(scope,{title:'Đã lưu nội dung tranh chấp',body:'<p>Enclave đang giữ tiền trong khi xem xét vấn đề. Nếu đơn đã có yêu cầu đang xử lý, nội dung mới sẽ được thêm vào đó; bạn không bị trừ tiền thêm.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    const code=disputeCode(response?.dispute||{});
+    await finishMediaForm(scope,{title:code?'Đã lưu hồ sơ '+code:'Đã lưu nội dung tranh chấp',body:`${response?.dispute?disputeTypeSummary(response.dispute):''}<p>Enclave đang giữ tiền trong khi xem xét vấn đề. Nếu đơn đã có yêu cầu đang xử lý, nội dung mới sẽ được thêm vào đó; bạn không bị trừ tiền thêm.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   function openDisputeMessage(id, systemCase = false) {
@@ -5253,7 +5257,28 @@ const App = (() => {
     return `<p class="small order-deadline"><b>${esc(label)}:</b> ${fmtDateTime(due)}. Enclave tự theo dõi thời hạn này.</p>`;
   }
 
-  const DISPUTE_TYPE_LABEL = {INSPECTION_TIMEOUT:'Quá hạn kiểm hàng',SHIPMENT_STALLED:'Vận chuyển chưa hoàn tất',NOT_SHIPPED:'Chưa gửi hàng',NOT_RECEIVED:'Chưa nhận được hàng',DEFECT:'Sản phẩm có vấn đề'};
+  const DISPUTE_CATEGORIES = {
+    A:{type:'DAMAGED_GOODS',label:'Hàng hỏng hoặc có lỗi',manual:true},
+    B:{type:'NOT_AS_DESCRIBED',label:'Hàng không đúng mô tả',manual:true},
+    C:{type:'MISSING_ITEMS',label:'Thiếu hàng hoặc phụ kiện',manual:true},
+    D:{type:'NOT_SHIPPED',label:'Người bán chưa gửi hàng',manual:true},
+    E:{type:'NOT_RECEIVED',label:'Chưa nhận được hàng',manual:true},
+    F:{type:'INSPECTION_TIMEOUT',label:'Quá hạn kiểm hàng — hệ thống tự mở'},
+    G:{type:'SHIPMENT_STALLED',label:'Giao hàng quá hạn — hệ thống tự mở'},
+    L:{type:'DEFECT',label:'Vấn đề sản phẩm — chưa tách loại'},
+  };
+  function disputeCode(d) {
+    return typeof d.caseCode==='string'&&/^(?:[A-G]|L)[1-9]\d*$/.test(d.caseCode) ? d.caseCode : null;
+  }
+  function disputeCategoryCode(d) {
+    if (Object.hasOwn(DISPUTE_CATEGORIES,d.categoryCode)) return d.categoryCode;
+    return Object.keys(DISPUTE_CATEGORIES).find(code=>DISPUTE_CATEGORIES[code].type===d.type)||'L';
+  }
+  function disputeTypeSummary(d) {
+    const code=disputeCategoryCode(d),category=DISPUTE_CATEGORIES[code];
+    const changed=disputeCode(d)&&d.casePrefix&&d.casePrefix!==code;
+    return `<p class="small">Vấn đề cần xem xét: <b>${esc(code)} — ${esc(category.label)}</b></p>${changed?'<p class="hint">Mã hồ sơ được giữ nguyên từ lúc mở. Loại vấn đề hiện tại đã được cập nhật.</p>':''}`;
+  }
 
   function disputeWarnings(d, transaction = {}) {
     const receiptWarning = !d.buyerNeverConfirmedReceipt ? '' : transaction.receivedConfirmedBy === 'SYSTEM'
@@ -5286,13 +5311,13 @@ const App = (() => {
     return `
       <div class="card">
         <div class="card-head">
-          <h2>Tranh chấp</h2>
+          <h2>${disputeCode(d)?'Hồ sơ '+esc(disputeCode(d)):'Hồ sơ tranh chấp'}</h2>
           <span class="tag ${resolved ? 'tag-success' : 'tag-danger'}">${resolved ? 'Đã giải quyết' : 'Đang chờ xử lý'}</span>
         </div>
         <div class="card-body">
           ${disputeWarnings(d, transaction)}
           <p class="small muted m-0-0-6">Mở bởi <b>${d.openedBy === 'SYSTEM' ? 'hệ thống' : d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
-          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
+          ${disputeTypeSummary(d)}
           <p class="m-0-0-6">“${esc(d.reason)}”</p>
           ${disputeEvidence(d)}
           ${renderDisputeMessages(messages || d.messages, transaction)}
@@ -5495,14 +5520,18 @@ const App = (() => {
       return;
     }
 
-    list.innerHTML = `<div class="stack gap-5">${disputes.map((d) => {
+    if (state.disputeCategory && !Object.hasOwn(DISPUTE_CATEGORIES,state.disputeCategory)) state.disputeCategory='';
+    const visible=disputes.filter(d=>!state.disputeCategory||disputeCategoryCode(d)===state.disputeCategory);
+    const counts=Object.fromEntries(Object.keys(DISPUTE_CATEGORIES).map(code=>[code,disputes.filter(d=>disputeCategoryCode(d)===code).length]));
+    const filter=`<div class="card"><div class="card-body"><div class="field"><label for="disputeCategoryFilter">Lọc theo loại vấn đề</label><select id="disputeCategoryFilter"><option value="">Tất cả loại vấn đề (${disputes.length})</option>${Object.entries(DISPUTE_CATEGORIES).map(([code,c])=>`<option value="${code}" ${state.disputeCategory===code?'selected':''}>${esc(code)} — ${esc(c.label)} (${counts[code]})</option>`).join('')}</select></div><p class="hint">Chữ trong mã cho biết nhóm lúc mở hồ sơ; số là thứ tự chung toàn hệ thống. Loại vấn đề đang được xem xét có thể được cập nhật. Việc phân loại chưa phải kết luận bên nào có lỗi.</p></div></div>`;
+    list.innerHTML = filter+(visible.length?`<div class="stack gap-5">${visible.map((d) => {
       const t = d.transaction || {};
       const open = d.status === 'OPEN';
       return `
         <div class="card"><div class="card-body">
           <div class="row-between items-start">
             <div class="grow">
-              <h3>${esc(t.itemName || 'Đơn hàng')}</h3>
+              <h3>${disputeCode(d)?'Hồ sơ '+esc(disputeCode(d))+' · ':''}${esc(t.itemName || 'Đơn hàng')}</h3>
               <div class="muted small">
                 Người mua <b>${esc(t.buyerName || '—')}</b> · Người bán <b>${esc(t.sellerName || '—')}</b>
                 · Mở lúc ${fmtDateTime(d.createdAt)}
@@ -5514,7 +5543,7 @@ const App = (() => {
           <div class="money-strip">
             <div><span>Số tiền</span><b>${money(t.amount || 0)}</b></div>
     
-            <div><span>Ký quỹ đóng băng</span><b>${money(t.amount || 0)}</b></div>
+            <div><span>${open?'Tiền đang giữ để xử lý':'Tiền của đơn'}</span><b>${money(t.amount || 0)}</b></div>
     
           </div>
 
@@ -5522,7 +5551,7 @@ const App = (() => {
           <p class="small m-0-0-4">
             <b>${d.openedBy === 'SYSTEM' ? 'Hồ sơ tự sinh của hệ thống' : (d.openedBy === 'BUYER' ? 'Người mua' : 'Người bán') + ' ' + esc(d.createdByName || '') + ' báo vấn đề'}:</b>
           </p>
-          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
+          ${disputeTypeSummary(d)}
           <p class="small m-0-0-s4 pre-wrap">“${esc(d.reason)}”</p>
           ${disputeEvidence(d)}
           ${d.evidenceDueAt ? `<p class="small muted">Hạn bổ sung nội dung: ${fmtDateTime(d.evidenceDueAt)}</p>` : ''}
@@ -5537,11 +5566,13 @@ const App = (() => {
             <a class="btn btn-ghost btn-sm" href="#/audit/${esc(d.transactionId)}">${ico('link-2', 15)} Nhật ký</a>
           </div>
         </div></div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>`:empty('inbox','Không có hồ sơ thuộc loại này','Chọn loại khác để xem các hồ sơ còn lại.'));
+    $('#disputeCategoryFilter').addEventListener('change',()=>{state.disputeCategory=$('#disputeCategoryFilter').value;loadDisputes().catch(e=>{if(!e.silent)toast(e.message,'err');});});
   }
 
   function confirmClaimDispute(id) {
-    openModal({title:'Nhận xử lý hồ sơ tranh chấp?',body:'<p>Địa chỉ và số điện thoại giao hàng chỉ được mở cho quản trị viên đang xử lý hồ sơ này. Chỉ truy cập khi cần đối chiếu giao nhận; việc nhận xử lý chưa quyết định trả tiền cho người mua hay chuyển tiền cho người bán.</p>',footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="admin-claim-confirm" data-id="${esc(id)}">Nhận xử lý và xem chi tiết</button>`});
+    const code=disputeCode(disputeCache.get(id)||{});
+    openModal({title:code?'Nhận xử lý hồ sơ '+code+'?':'Nhận xử lý hồ sơ tranh chấp?',body:'<p>Địa chỉ và số điện thoại giao hàng chỉ được mở cho quản trị viên đang xử lý hồ sơ này. Chỉ truy cập khi cần đối chiếu giao nhận; việc nhận xử lý chưa quyết định trả tiền cho người mua hay chuyển tiền cho người bán.</p>',footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="admin-claim-confirm" data-id="${esc(id)}">Nhận xử lý và xem chi tiết</button>`});
   }
 
   async function claimDispute(id, btn) {
@@ -5553,7 +5584,7 @@ const App = (() => {
     if (!detail) return;
     const d = detail.dispute || detail, t = detail.transaction || d.transaction || {};
     disputeCache.set(id,{...disputeCache.get(id),...d,transaction:t});
-    openModal({title:'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d, t)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
+    openModal({title:disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · Chi tiết':'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d, t)}${disputeTypeSummary(d)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
   }
 
   /**
@@ -5581,7 +5612,7 @@ const App = (() => {
     const recipient = refund ? 'Người mua' : 'Người bán';
     const recipientName = refund ? t.buyerName : t.sellerName;
     openModal({
-      title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: chuyển tiền cho người bán',
+      title: (disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · ':'')+(refund ? 'Hoàn tiền cho người mua' : 'Chuyển tiền cho người bán'),
       body: `
         <div class="stack">
           ${disputeWarnings(d, t)}

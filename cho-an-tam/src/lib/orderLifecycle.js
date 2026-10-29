@@ -5,6 +5,7 @@ const { applyOrderedWalletUpdates, insertWalletEntry, getUserWallet, getEscrowWa
 const { settleListing } = require('./listingLifecycle');
 const { orderPolicy, orderDeadline, afterHours } = require('./orderPolicy');
 const { maybeFail } = require('./faultInjection');
+const { referenceFields } = require('./disputeReference');
 const { notify, onDisputeOpened, onOrderWaitConfirm } = require('./notifications');
 // The transaction row is the first write for every order event, including audit-only
 // events. CAS is the final authority even if another app process read an older row.
@@ -37,6 +38,7 @@ function serializeDispute(d) {
   if(!d)return null;
   return {
     id:d.id,
+    ...referenceFields(d),
     status:d.status,
     reason:d.reason,
     type:d.type,
@@ -166,6 +168,7 @@ async function openOrderDispute(txn,{ type='DEFECT',actorId=null,reason,at=nowIs
   });
   const id=uuid(),openedBy=system?'SYSTEM':actorId===txn.buyer_id?'BUYER':'SELLER',p=orderPolicy();
   await db.prepare("INSERT INTO disputes(id,transaction_id,created_by,reason,status,type,opened_by,buyer_never_confirmed_receipt,evidence_due_at,admin_due_at,created_at) VALUES(?,?,?,?,'OPEN',?,?,?,?,?,?)").run(id,txn.id,actorId,reason,type,openedBy,txn.received_confirmed_by==='BUYER'?0:1,afterHours(at,p.evidenceHours),afterHours(at,p.adminHours),at);
+  const created=await db.prepare('SELECT * FROM disputes WHERE id=?').get(id);
   await appendAuditLog(db,{
     transactionId:txn.id,
     actorId,
@@ -173,11 +176,11 @@ async function openOrderDispute(txn,{ type='DEFECT',actorId=null,reason,at=nowIs
     oldStatus:txn.status,
     newStatus:'DISPUTED',
     eventData:{
-      disputeId:id,type,openedBy,automatic:system
+      disputeId:id,type,openedBy,automatic:system,caseCode:referenceFields(created).caseCode
     }
   });
   return {
-    dispute:await db.prepare('SELECT * FROM disputes WHERE id=?').get(id),created:true
+    dispute:created,created:true
   };
 }
 
@@ -338,7 +341,7 @@ async function runOrderLifecycle({ now=Date.now() } = {}) {
           type,reason,at
         });
         return {
-          kind:result.created?'opened':null,txn
+          kind:result.created?'opened':null,txn,dispute:result.dispute
         };
       })();
     } catch(error){
@@ -349,7 +352,7 @@ async function runOrderLifecycle({ now=Date.now() } = {}) {
     if(event.kind)counts[event.kind]++;
     // A failed notification must never cause the business transaction to run twice.
     try{
-      if(event.kind==='opened')await onDisputeOpened(event.txn,null);
+      if(event.kind==='opened')await onDisputeOpened(event.txn,null,event.dispute);
       if(event.kind==='received')await onOrderWaitConfirm(event.txn);
       if(event.kind==='cancelled')await notify([event.txn.buyer_id,event.txn.seller_id].map(userId=>({
         userId,type:'ORDER_CANCELLED',key:event.txn.id,transactionId:event.txn.id,title:'Đơn đã hết hạn và được hủy',body:event.txn.status==='CREATED'?'Đơn nháp không giữ tiền.':'Tiền ký quỹ đã hoàn về ví người mua.'

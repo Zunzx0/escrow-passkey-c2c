@@ -27,6 +27,7 @@
     "test:order-money:postgres": "node test/order-money-postgres.js",
     "test:order-money:migration": "node test/order-money-migration.js",
     "test:order-money:ui": "node test/ui/order-money-ui.js",
+    "test:dispute-references": "node test/dispute-reference-migration.js && node test/ui/dispute-reference-ui.js",
     "test:order-money:paypal": "node test/order-money-paypal-regression.js",
     "test:media": "node test/media-upload-e2e.js",
     "test:media:postgres": "node test/media-upload-postgres.js",

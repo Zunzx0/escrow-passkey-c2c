@@ -11,6 +11,7 @@
 //    giao dịch, tranh chấp, yêu cầu nạp tiền. Nhờ vậy mất một thông báo (process chết ngay sau
 //    commit, bảng thông báo lỗi...) không bao giờ làm mất một việc người dùng phải làm.
 const { db, uuid, nowIso } = require('../db');
+const { referenceFields } = require('./disputeReference');
 
 /**
  * Ghi thông báo cho một hoặc nhiều người. Chỉ gọi SAU KHI nghiệp vụ đã commit.
@@ -131,7 +132,9 @@ async function onOrderCompleted(txn) {
   }]);
 }
 
-async function onDisputeOpened(txn, openedByUserId) {
+async function onDisputeOpened(txn, openedByUserId, dispute) {
+  const reference=dispute?referenceFields(dispute):null;
+  const name=reference?.caseCode?'Hồ sơ '+reference.caseCode:'Hồ sơ tranh chấp';
   const recipients = openedByUserId
     ? [openedByUserId === txn.buyer_id ? txn.seller_id : txn.buyer_id]
     : [txn.buyer_id, txn.seller_id];
@@ -139,13 +142,13 @@ async function onDisputeOpened(txn, openedByUserId) {
   await notify([
     ...recipients.map(userId => ({
       userId, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
-      title: openedByUserId ? 'Giao dịch bị mở tranh chấp' : 'Hệ thống mở hồ sơ cần xem xét',
-      body: `"${txn.item_name}" đang tranh chấp; ${money(txn.amount)} bị đóng băng chờ quản trị viên phân xử.`,
+      title: name+(openedByUserId?' cần giải quyết':' do hệ thống tự mở'),
+      body: `"${txn.item_name}": ${reference?.typeLabel||'cần xem xét vấn đề đơn hàng'}. Enclave đang giữ ${money(txn.amount)} trong khi chờ quản trị viên giải quyết.`,
     })),
     ...admins.map((adminId) => ({
       userId: adminId, type: 'DISPUTE_OPENED', key: txn.id, transactionId: txn.id,
-      title: 'Có hồ sơ tranh chấp mới cần phân xử',
-      body: `"${txn.item_name}" — ${money(txn.amount)}.`,
+      title: name+' mới cần xem xét',
+      body: `"${txn.item_name}" — ${money(txn.amount)}${reference?' · '+reference.typeLabel:''}.`,
     })),
   ]);
 }

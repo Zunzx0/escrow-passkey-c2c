@@ -31,6 +31,7 @@ const { settleListing } = require('../lib/listingLifecycle');
 const {transitionOrder,settleOrder}=require('../lib/orderLifecycle');
 const {serializeShipping,loadShipping}=require('../lib/orderShipping');
 const media=require('../lib/mediaService');
+const { referenceFields } = require('../lib/disputeReference');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
 // challenge đều ghi một bản ghi vào cơ sở dữ liệu.
@@ -116,6 +117,7 @@ async function loadTxnDetail(id) {
 function serializeDispute(d) {
   return {
     id: d.id,
+    ...referenceFields(d),
     transactionId: d.transaction_id,
     createdBy: d.created_by,
     createdByName: d.created_by_name || null,
