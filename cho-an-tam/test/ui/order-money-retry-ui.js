@@ -24,7 +24,10 @@ async function main(){
  });
  try{
   p.w.SimpleWebAuthnBrowser.startAuthentication=async()=>{nativeCalls++;return{id:'test-key'};};
-  await click(p,'secure');await click(p,'secure-confirm');
+  await click(p,'secure');
+  const review = p.d.getElementById('modalRoot').textContent;
+  ok(review.includes('Người bán:') && review.includes('Số tiền Enclave sẽ giữ') && review.includes('Người bán chưa nhận được tiền.'),'payment review separates the seller identity from money held by Enclave');
+  await click(p,'secure-confirm');
   ok(nativeCalls===1&&p.count('POST /api/transactions/retry-order/secure')===0,'context mismatch never submits the stale payment');
   ok(/Kiểm tra lại trạng thái/.test(p.d.getElementById('modalRoot').textContent),'context mismatch offers canonical-state checking instead of reusing the old challenge');
   await click(p,'secure-confirm');
@@ -44,7 +47,7 @@ async function main(){
  try{
   p.w.SimpleWebAuthnBrowser.startAuthentication=async()=>{nativeCalls++;return{id:'test-key'};};
   await click(p,'secure');await click(p,'secure-confirm',180);
-  ok(/Đơn đã thanh toán vào ký quỹ/.test(p.d.getElementById('modalRoot').textContent),'lost payment response is reconciled from canonical server state');
+  ok(/Đã thanh toán — tiền đang được giữ an toàn/.test(p.d.getElementById('modalRoot').textContent),'lost payment response is reconciled from canonical server state');
   ok(nativeCalls===1&&p.count('POST /api/transactions/retry-order/secure')===1,'confirmed committed payment never invokes another ceremony or payment');
   ok(!p.d.querySelector('#view [data-act="secure"]'),'reconciled secured order no longer offers payment');
  }finally{p.close();}
@@ -63,7 +66,7 @@ async function main(){
   await click(p,'secure-confirm',100);
   ok(nativeCalls===1&&p.count('POST /api/transactions/retry-order/reauth/options')===1&&p.count('POST /api/transactions/retry-order/secure')===1,'retry while canonical state is unavailable cannot issue a new Passkey challenge or charge');
   readable=true;await click(p,'secure-confirm',150);
-  ok(/Đơn đã thanh toán vào ký quỹ/.test(p.d.getElementById('modalRoot').textContent)&&nativeCalls===1,'restored canonical read resolves success without a second Passkey ceremony');
+  ok(/Đã thanh toán — tiền đang được giữ an toàn/.test(p.d.getElementById('modalRoot').textContent)&&nativeCalls===1,'restored canonical read resolves success without a second Passkey ceremony');
  }finally{p.close();}
 
  const at=new Date().toISOString(),system={...base(),status:'WAIT_CONFIRM',escrowStatus:'LOCKED',receivedConfirmedBy:'SYSTEM',receivedConfirmedAt:at,shipment:{id:'motion-system',status:'ARRIVED',packedAt:at,pickedUpAt:at,arrivedAt:at,serverNow:at}};

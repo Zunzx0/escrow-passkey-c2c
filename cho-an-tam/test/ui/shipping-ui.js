@@ -35,6 +35,14 @@ async function main() {
   ok(motion.snapshot(t, clock + 50000).phase === 'arrival_wait', 'Không báo giao đến khi chưa có arrivedAt');
   ok(motion.snapshot({ ...t, status: 'DISPUTED', escrowStatus: 'FROZEN' }, clock).running === false, 'Tranh chấp dừng chuyển động dù worker chưa đánh STOPPED');
   ok(!/data-act="shipping-open"/.test(motion.render(base())), 'Đơn chưa đóng gói không có chuyến giả để mở');
+  for (const escrowStatus of ['NONE', 'REFUNDED']) {
+    const cancelled = { ...base(), status: 'CANCELLED', escrowStatus };
+    ok(motion.snapshot(cancelled).phase === 'cancelled' && !motion.snapshot(cancelled).running,
+      'Đơn hủy dừng hành trình, không bị gọi là luồng giao nhận cũ: ' + escrowStatus);
+    ok(motion.render(cancelled).includes('Đơn hàng đã hủy') &&
+      (escrowStatus === 'REFUNDED' ? motion.scene(cancelled).includes('Tiền đã trả về ví người mua') : !motion.scene(cancelled).includes('Tiền đã trả về ví người mua')),
+      'Thông báo hoàn tiền chỉ xuất hiện khi đơn hủy thực sự có trạng thái hoàn tiền: ' + escrowStatus);
+  }
 
   let row = base(), resolvePack;
   let p = await page(SELLER, () => row, {

@@ -274,7 +274,7 @@ async function main() {
   p.routes['POST /api/payments/paypal/topup'] = (opts) => { const b = JSON.parse(opts.body); p.topupBodies.push(b); return json(200, ppRow({ requestId: b.requestId })); };
   await press(p, 500);
   ok(p.topupBodies.length === 2 && p.topupBodies[1].requestId === k1 && p.topupBodies[1].amount === AMOUNT, 'Thử lại sau timeout: CÙNG requestId, CÙNG số tiền');
-  ok(/Chờ bạn phê duyệt ở PayPal Sandbox/.test(p.notice()) && !!p.noticeBtn('paypal-approve'), 'AWAITING_APPROVAL: hiện nút "Mở PayPal Sandbox" (chưa tự chuyển trang)');
+  ok(/Chờ bạn xác nhận trên PayPal Sandbox/.test(p.notice()) && !!p.noticeBtn('paypal-approve'), 'AWAITING_APPROVAL: hiện nút "Mở PayPal Sandbox" (chưa tự chuyển trang)');
   ok(p.navs.length === 0, 'Không có URL checkout hợp lệ: không tự dựng đường dẫn PayPal');
   ok(p.intent() && p.intent().paymentId === '5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a', 'Giữ ý định (kèm id yêu cầu) để còn quay lại từ PayPal');
   ok(noMockCalls(p), 'Luồng PayPal không gọi mock topup hay mock-provider');
@@ -324,7 +324,7 @@ async function main() {
 
   p = await wallet({ create: () => json(409, { error: 'PAYPAL_CREATE_RECOVERY_REQUIRED', message: 'x' }) });
   await press(p, 400);
-  ok(/Dừng mọi thao tác tự động/.test(p.notice()) && /KHÔNG tự tạo order mới/.test(p.notice()) && !!p.intent() && p.topupBodies.length === 1,
+  ok(/Enclave đã dừng thử lại để tránh tạo trùng/.test(p.notice()) && !!p.intent() && p.topupBodies.length === 1,
     '409 PAYPAL_CREATE_RECOVERY_REQUIRED: dừng tự động, không tạo order/yêu cầu mới, giữ ý định');
   ok(!p.noticeBtn('topup-retry'), 'Dừng đối soát: không còn nút "Thử lại cùng yêu cầu" (không gửi lại tự động)');
   p.close();
@@ -332,7 +332,7 @@ async function main() {
   for (const code of ['PAYPAL_ORDER_MISMATCH', 'PAYPAL_CAPTURE_CONFLICT']) {
     p = await wallet({ create: () => json(409, { error: code, message: 'x' }) });
     await press(p, 400);
-    ok(/Dừng mọi thao tác tự động/.test(p.notice()) && !!p.intent(), `409 ${code}: dừng tự động, báo cần đối soát thủ công`);
+    ok(/Enclave đã dừng xử lý/.test(p.notice()) && !!p.intent(), `409 ${code}: dừng tự động, báo cần đối soát thủ công`);
     p.close();
   }
 
@@ -563,7 +563,7 @@ async function main() {
   }
   for (const code of ['PAYPAL_CAPTURE_CONFLICT', 'PAYPAL_ORDER_MISMATCH']) {
     await capScenario(code, () => json(409, { error: code, message: 'x' }), { stage: 'RECONCILING' }, (pg, sv) => {
-      ok(sv.captures === 1 && /đối soát/i.test(pg.notice()), `Capture ${code}: dừng tự động, hiển thị trạng thái từ GET`);
+      ok(sv.captures === 1 && /kiểm tra lại với PayPal/i.test(pg.notice()), `Capture ${code}: dừng tự động, hiển thị trạng thái từ GET`);
     });
   }
   for (const outcome of ['APPLIED', 'DUPLICATE', 'BUSY', 'NOT_READY', 'CLOSED', 'NOT_CAPTURED', 'RECOVERY_REQUIRED', 'RECONCILING', 'AWAITING_APPROVAL']) {
@@ -627,11 +627,11 @@ async function main() {
   section('S: đủ 9 giai đoạn (stage) và lịch sử phân biệt provider');
   const stageSpec = [
     ['CREATING', /Đang tạo yêu cầu/, ['topup-check', 'topup-retry'], ['paypal-approve', 'paypal-capture']],
-    ['AWAITING_APPROVAL', /Chờ bạn phê duyệt ở PayPal Sandbox/, ['paypal-approve', 'topup-check'], ['paypal-capture']],
+    ['AWAITING_APPROVAL', /Chờ bạn xác nhận trên PayPal Sandbox/, ['paypal-approve', 'topup-check'], ['paypal-capture']],
     ['CAPTURING', /Đang xác nhận thanh toán/, ['topup-check'], ['paypal-approve', 'paypal-capture', 'topup-retry']],
     ['RECONCILING', /Chưa rõ kết quả thanh toán/, ['topup-check'], ['paypal-approve', 'paypal-capture']],
-    ['CREATE_RECOVERY_REQUIRED', /KHÔNG tự tạo order mới/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture', 'topup-retry']],
-    ['RECOVERY_REQUIRED', /Giao diện không tự cộng ví/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture', 'topup-retry']],
+    ['CREATE_RECOVERY_REQUIRED', /Enclave đã dừng thử lại để tránh tạo trùng/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture', 'topup-retry']],
+    ['RECOVERY_REQUIRED', /Ví chưa được cộng tiền; Enclave cần kiểm tra kết quả trước/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture', 'topup-retry']],
     ['NOT_CAPTURED', /Không tiếp tục thu tiền/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture']],
     ['FAILED', /yêu cầu nạp đã đóng; ví không đổi/, ['topup-dismiss'], ['paypal-approve', 'paypal-capture']],
   ];
@@ -658,7 +658,7 @@ async function main() {
     const pg = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: sv.routes() });
     pg.click(pg.d.querySelector('#topupIntent [data-act="topup-check"]'));
     await sleep(500);
-    ok(/Cần xử lý thủ công|xử lý thủ công/.test(pg.notice()) && !/Thất bại/.test(pg.notice()) && pg.intent() === null,
+    ok(/cần hỗ trợ kiểm tra/i.test(pg.notice()) && !/Thất bại/.test(pg.notice()) && pg.intent() === null,
       'RECOVERY_REQUIRED có status FAILED: ưu tiên "cần xử lý thủ công" (không nói thất bại), mở khoá số tiền');
     pg.close();
   }
@@ -796,7 +796,7 @@ async function main() {
   p = await wallet({});
   const acts = [...p.d.querySelectorAll('[data-act]')].map((e) => e.dataset.act).join(' ');
   ok(!/refund|payout/i.test(acts.replace(/admin-refund/g, '')), 'Trang ví PayPal không có hành động refund/payout PayPal');
-  ok(/không hoàn tiền hay chi tiền qua PayPal/.test(p.viewText()) && /VND trong ví nội bộ/.test(p.viewText()), 'Ghi rõ ví/ký quỹ/tranh chấp vẫn VND nội bộ, không hoàn tiền qua PayPal');
+  ok(/không chuyển ra PayPal/.test(p.viewText()) && /ví Enclave bằng VND mô phỏng/.test(p.viewText()), 'Ghi rõ ví/ký quỹ/tranh chấp vẫn VND nội bộ, không hoàn tiền qua PayPal');
   p.close();
 
   const secretRe = /client[_-]?secret|PAYPAL_SANDBOX_(CLIENT|MERCHANT|WEBHOOK)|WEBHOOK_ID|postgres(ql)?:\/\/|DATABASE_URL|JWT_SECRET|PAYMENT_WEBHOOK_SECRET|Bearer [A-Za-z0-9._-]{20,}|-----BEGIN/i;

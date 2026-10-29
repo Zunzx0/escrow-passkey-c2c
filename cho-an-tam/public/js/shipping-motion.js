@@ -86,11 +86,11 @@
   const COPY = {
     approach: ['Xe đang đến lấy hàng', 'Xe đến điểm lấy của người bán. Không cần thao tác thêm.', 'Lấy hàng'],
     loading: ['Đang lấy kiện hàng', 'Mở cửa sau, đưa kiện hàng vào thùng rồi đóng cửa.', 'Lấy hàng'],
-    pickup_wait: ['Đang xác nhận lấy hàng', 'Máy chủ đang cập nhật kết quả lấy hàng. Bạn không cần bấm lại.', 'Đang cập nhật'],
+    pickup_wait: ['Đang xác nhận lấy hàng', 'Enclave đang cập nhật kết quả lấy hàng. Bạn không cần bấm lại.', 'Đang cập nhật'],
     depart: ['Đã lấy hàng, xe xuất phát', 'Kiện hàng đã ở trong xe. Người bán không cần xác nhận thêm.', 'Đã lấy'],
     handoff: ['Đã bàn giao cho Enclave Delivery', 'Hệ thống tự cập nhật hành trình cho hai bên.', 'Đã lấy'],
     transit: ['Kiện hàng đang đến điểm giao', 'Xe vận chuyển mô phỏng đang di chuyển tới địa chỉ nhận hàng.', 'Đang giao'],
-    arrival_wait: ['Xe đang đến điểm giao', 'Đang chờ máy chủ xác nhận giao đến. Chưa cần xác nhận nhận hàng.', 'Đang giao'],
+    arrival_wait: ['Xe đang đến điểm giao', 'Đang chờ cập nhật kết quả giao hàng. Bạn chỉ xác nhận khi thực sự nhận được hàng.', 'Đang giao'],
     arrival: ['Xe đang dừng tại điểm giao', 'Chuẩn bị đưa kiện hàng ra qua cửa sau xe.', 'Giao hàng'],
     unloading: ['Đang giao kiện hàng', 'Kiện hàng ra qua cửa sau và được đặt trước cửa nhà.', 'Giao hàng'],
     delivered: ['Đơn hàng đã đến', 'Hãy nhận và kiểm tra sản phẩm trước khi xác nhận hoàn tất.', 'Đã đến'],
@@ -98,10 +98,11 @@
     received_system: ['Hệ thống đã mở thời hạn kiểm hàng', 'Chưa có xác nhận nhận kiện của người mua. Nếu chưa nhận được hàng, hãy báo vấn đề trên đơn.', 'Chờ kiểm hàng'],
     completed: ['Giao dịch đã hoàn tất', 'Hàng đã giao và giao dịch đã kết thúc. Xem kết quả trong nhật ký.', 'Hoàn tất'],
     refunded: ['Giao dịch đã hoàn tiền', 'Hành trình giao tự động đã dừng. Theo dõi kết quả hoàn tiền trong ví.', 'Hoàn tiền'],
-    resolved: ['Giao dịch đã được phân xử', 'Hành trình giao tự động đã dừng. Xem quyết định trong hồ sơ tranh chấp.', 'Đã phân xử'],
+    resolved: ['Đã giải quyết tranh chấp', 'Hành trình giao tự động đã dừng. Xem quyết định của quản trị viên trong hồ sơ tranh chấp.', 'Đã giải quyết'],
     stopped: ['Hành trình đã tạm dừng', 'Theo dõi trạng thái giao dịch và hồ sơ tranh chấp; hệ thống không tiếp tục giao tự động.', 'Tạm dừng'],
     preparing: ['Chờ người bán đóng gói', 'Sau khi xác nhận đơn và đóng gói, xe sẽ tự đến lấy hàng.', 'Chuẩn bị'],
-    legacy: ['Theo dõi giao nhận', 'Đơn này dùng luồng giao nhận trước đây. Xem các mốc ở trạng thái giao dịch.', 'Thông tin']
+    cancelled: ['Đơn hàng đã hủy', 'Đơn không tiếp tục giao hàng. Xem tình trạng tiền ở phần thanh toán của đơn.', 'Đã hủy'],
+    legacy: ['Theo dõi giao nhận', 'Xem các mốc giao nhận trong lịch sử đơn hàng.', 'Thông tin']
   };
   let serial = 0;
   let active = null;
@@ -116,6 +117,7 @@
    */
   function snapshot(t, now) {
     t = t || {};
+    if (t.status === 'CANCELLED') return { phase: 'cancelled', elapsed: 0, step: -1, running: false };
     const s = t.shipment;
     if (!s) return { phase: t.status === 'SECURED' ? 'preparing' : 'legacy', elapsed: 0, step: -1, running: false };
     const packed = time(s.packedAt), picked = time(s.pickedUpAt), arrived = time(s.arrivedAt);
@@ -148,9 +150,9 @@
   }
 
   function moneyCopy(t) {
-    if (t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN') return 'Tiền vẫn được giữ trong ký quỹ. Giao đến không tự giải ngân cho người bán.';
-    if (t.status === 'COMPLETED' || t.status === 'RELEASED') return 'Giao dịch đã kết thúc. Xem kết quả giải ngân trong nhật ký.';
-    if (t.status === 'REFUNDED') return 'Giao dịch đã hoàn tiền. Xem bút toán trong ví.';
+    if (t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN') return 'Enclave vẫn giữ tiền. Giao hàng đến nơi không tự chuyển tiền cho người bán.';
+    if (t.status === 'COMPLETED' || t.status === 'RELEASED') return 'Đơn đã hoàn tất. Xem kết quả chuyển tiền trong lịch sử đơn.';
+    if (t.escrowStatus === 'REFUNDED') return 'Tiền đã trả về ví người mua. Xem lịch sử thu, chi trong ví.';
     return 'Minh họa giao nhận không làm thay đổi tiền hoặc trạng thái giao dịch.';
   }
 
@@ -203,7 +205,7 @@
     p['route-scene'].hidden = pickup || e >= 15400;
     p['arrival-scene'].hidden = e < 15400;
     p['mini-route'].hidden = pickup || e >= 15400;
-    if (p['pickup-label']) p['pickup-label'].textContent = currentPhase === 'stopped' ? 'Hành trình tạm dừng' : phase === 'pickup_wait' ? 'Chờ xác nhận lấy hàng từ máy chủ' : phase === 'loading' ? 'Lấy hàng qua cửa sau' : phase === 'approach' ? 'Xe đến điểm lấy hàng' : 'Đã lấy kiện hàng';
+    if (p['pickup-label']) p['pickup-label'].textContent = currentPhase === 'stopped' ? 'Hành trình tạm dừng' : phase === 'pickup_wait' ? 'Chờ cập nhật kết quả lấy hàng' : phase === 'loading' ? 'Lấy hàng qua cửa sau' : phase === 'approach' ? 'Xe đến điểm lấy hàng' : 'Đã lấy kiện hàng';
 
     let truckX = 265;
     if (e < 2400) truckX = -240 + 505 * smooth(e / 2400);
