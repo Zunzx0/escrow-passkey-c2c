@@ -496,6 +496,7 @@ const App = (() => {
     'Đừng thử lại ngay: hãy kiểm tra lại trạng thái (đơn hàng, ví, lịch sử nạp tiền) rồi mới quyết định.';
 
   const API_ERROR_MESSAGES = {
+    DISPUTE_ASSIGNED:()=> 'Hồ sơ đã có quản trị viên khác phụ trách. Hãy tải lại danh sách để xem trạng thái mới.',
     EMAIL_NOT_CONFIGURED:()=> 'Dịch vụ email xác minh chưa được cấu hình. Vui lòng liên hệ quản trị viên để hoàn tất thiết lập.',
     INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
     // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
@@ -5698,11 +5699,11 @@ const App = (() => {
           ${d.adminDueAt ? `<p class="small muted">Mốc nhắc xử lý: ${fmtDateTime(d.adminDueAt)} · không tự phân xử khi quá hạn.</p>` : ''}
 
           <div class="row">
-            ${open ? `
-              ${!d.adminId || d.adminId === state.user.id ? `<button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>` : '<span class="small muted">Địa chỉ chỉ mở cho quản trị viên đã nhận xử lý hồ sơ.</span>'}
+            ${open && (!d.adminId || d.adminId === state.user.id) ? `
+              <button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>
               <button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Hoàn ${money(t.amount || 0)} cho người mua</button>
               <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Chuyển ${money(t.amount || 0)} cho người bán</button>
-            ` : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
+            ` : open ? '<span class="muted small">Hồ sơ đang do quản trị viên khác phụ trách. Bạn không thể quyết định trả tiền cho hồ sơ này.</span>' : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
             <a class="btn btn-ghost btn-sm" href="#/audit/${esc(d.transactionId)}">${ico('link-2', 15)} Nhật ký</a>
           </div>
         </div></div>`;

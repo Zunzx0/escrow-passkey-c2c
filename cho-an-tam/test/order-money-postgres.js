@@ -33,6 +33,7 @@ async function main(){
   for(const file of ['order-money-spec-e2e.js','softwareAuthenticator.js','minicbor.js'])fs.copyFileSync(path.join(root,'test',file),path.join(snapshot,'test',file));
   fs.mkdirSync(path.join(snapshot,'test','helpers'),{recursive:true});
   fs.copyFileSync(path.join(root,'test','helpers','dispute-reference-cases.js'),path.join(snapshot,'test','helpers','dispute-reference-cases.js'));
+  fs.copyFileSync(path.join(root,'test','helpers','dispute-assignment-cases.js'),path.join(snapshot,'test','helpers','dispute-assignment-cases.js'));
   const port=await availablePort();command('initdb.exe',['-D',data,'-U','enclave_order_test','-A','trust','--no-locale','--encoding=UTF8','--no-sync']);
   started=true;command('pg_ctl.exe',['-D',data,'-l',path.join(dir,'postgres.log'),'-o',`-h 127.0.0.1 -p ${port}`,'-w','start']);
   const admin=new Client({connectionString:`postgresql://enclave_order_test@127.0.0.1:${port}/postgres`});await admin.connect();try{await admin.query('CREATE DATABASE enclave_order_test');}finally{await admin.end();}
