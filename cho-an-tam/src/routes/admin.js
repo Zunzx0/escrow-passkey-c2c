@@ -31,6 +31,7 @@ const { settleListing } = require('../lib/listingLifecycle');
 const {transitionOrder,settleOrder}=require('../lib/orderLifecycle');
 const {serializeShipping,loadShipping}=require('../lib/orderShipping');
 const media=require('../lib/mediaService');
+const { referenceFields } = require('../lib/disputeReference');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
 // challenge đều ghi một bản ghi vào cơ sở dữ liệu.
@@ -116,6 +117,7 @@ async function loadTxnDetail(id) {
 function serializeDispute(d) {
   return {
     id: d.id,
+    ...referenceFields(d),
     transactionId: d.transaction_id,
     createdBy: d.created_by,
     createdByName: d.created_by_name || null,
@@ -265,10 +267,17 @@ function assertIndependentAdjudicator(txn, actorId) {
   }
 }
 
+function assertCaseAssignee(dispute, actorId) {
+  if (dispute.admin_id && dispute.admin_id !== actorId) {
+    throw new AppError(409,'DISPUTE_ASSIGNED','Hồ sơ đã có quản trị viên khác phụ trách. Bạn không thể quyết định trả tiền cho hồ sơ này.');
+  }
+}
+
 /** Nạp hồ sơ tranh chấp cùng giao dịch, và kiểm cặp trạng thái bắt buộc của luồng phân xử. */
 async function loadOpenDisputeForAdjudication(disputeId, actorId) {
   const dispute = await db.prepare(`${DISPUTE_SELECT} WHERE d.id = ?`).get(disputeId);
   if (!dispute) throw new AppError(404, 'DISPUTE_NOT_FOUND', 'Không tìm thấy hồ sơ tranh chấp');
+  assertCaseAssignee(dispute,actorId);
   if (dispute.status !== 'OPEN') throw new AppError(409, 'DISPUTE_NOT_OPEN', 'Hồ sơ tranh chấp phải đang mở');
 
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ?').get(dispute.transaction_id);
@@ -461,6 +470,8 @@ async function adjudicate(req,decision) {
     =await (async()=>{
       const d=await db.prepare(`${DISPUTE_SELECT} WHERE d.id=?`).get(req.params.id);
       if(!d)throw new AppError(404,'DISPUTE_NOT_FOUND');
+      // Check inside the settlement transaction too, including the replay path.
+      assertCaseAssignee(d,req.user.id);
       const t=await loadTxnDetail(d.transaction_id);
       assertIndependentAdjudicator(t,req.user.id);
       return {

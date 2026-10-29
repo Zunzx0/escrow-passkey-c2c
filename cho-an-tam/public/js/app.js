@@ -34,6 +34,7 @@ const App = (() => {
     homeListings: [],           // kết quả tìm gần nhất, để "Xem thêm" không phải gọi lại API
     orderTab: null,             // 'sell' | 'buy' — chỉ người bán có hai tab
     adminTab: 'disputes',       // 'disputes' | 'seller-requests' | 'users' | 'invariants' | 'security-events'
+    disputeCategory: '',       // Display filter only; never used to authorize a decision.
     secEventsType: '',          // bộ lọc loại sự kiện của tab "Sự kiện bảo mật"
     orderFilter: 'active',      // 'active' | 'all' | 'done'
     busy: new Set(),            // id các nút đang chạy, để khoá double-click
@@ -60,7 +61,7 @@ const App = (() => {
     SHIPPING:     { label: 'Đang giao',                    tone: 'tag-info' },
     WAIT_CONFIRM: { label: 'Đã nhận hàng · chờ xác nhận',  tone: 'tag-warning' },
     COMPLETED:    { label: 'Hoàn tất',                     tone: 'tag-success' },
-    RELEASED:     { label: 'Hoàn tất theo phân xử',        tone: 'tag-success' },
+    RELEASED:     { label: 'Đã chuyển tiền',                 tone: 'tag-success' },
     REFUNDED:     { label: 'Đã hoàn tiền',                 tone: 'tag-success' },
     DISPUTED:     { label: 'Đang tranh chấp',              tone: 'tag-danger' },
     CANCELLED:    { label: 'Đã hủy',                      tone: '' },
@@ -68,9 +69,9 @@ const App = (() => {
 
   const ESCROW_UI = {
     NONE:     'Chưa thanh toán',
-    LOCKED:   'Ký quỹ đang giữ',
-    FROZEN:   'Đóng băng do tranh chấp',
-    RELEASED: 'Đã giải ngân cho người bán',
+    LOCKED:   'Enclave đang giữ tiền',
+    FROZEN:   'Đang giữ tiền để giải quyết tranh chấp',
+    RELEASED: 'Đã chuyển tiền cho người bán',
     REFUNDED: 'Đã hoàn cho người mua',
   };
 
@@ -116,19 +117,19 @@ const App = (() => {
     SUCCEEDED: { label: 'Thành công',          tone: 'tag-success' },
     FAILED:    { label: 'Thất bại',            tone: 'tag-danger' },
   };
-  const RESOLVED_BY_LABEL = { WEBHOOK: 'qua webhook', RECONCILER: 'qua đối soát tự động' };
+  const RESOLVED_BY_LABEL = { WEBHOOK: 'sau xác nhận của cổng thanh toán', RECONCILER: 'sau khi kiểm tra lại với cổng thanh toán' };
 
   // Giai đoạn (stage) của một yêu cầu nạp PayPal Sandbox do MÁY CHỦ quyết định (HOP-DONG-API-PAYPAL-P2-M2.md §5).
   // Chỉ SUCCEEDED (được GET xác nhận) mới là nạp thành công; mọi giai đoạn khác — kể cả HTTP 200, DUPLICATE, BUSY —
   // KHÔNG phải thành công.
   const PAYPAL_PROVIDER = 'PAYPAL_SANDBOX';
   const PAYPAL_STAGE_UI = {
-    CREATING:                 { label: 'Đang tạo yêu cầu',            tone: 'tag-warning', hint: 'Chưa có order PayPal' },
-    AWAITING_APPROVAL:        { label: 'Chờ phê duyệt PayPal',        tone: 'tag-warning', hint: 'Chờ bạn phê duyệt ở PayPal Sandbox' },
+    CREATING:                 { label: 'Đang tạo yêu cầu',            tone: 'tag-warning', hint: 'Đang chuẩn bị yêu cầu thanh toán trên PayPal' },
+    AWAITING_APPROVAL:        { label: 'Chờ bạn xác nhận trên PayPal',        tone: 'tag-warning', hint: 'Chờ bạn xác nhận trên PayPal Sandbox' },
     CAPTURING:                { label: 'Đang xác nhận thanh toán',    tone: 'tag-warning', hint: 'Đang xác nhận với PayPal' },
-    RECONCILING:              { label: 'Đang đối soát',               tone: 'tag-warning', hint: 'Chưa rõ kết quả — hệ thống đang đối soát' },
-    CREATE_RECOVERY_REQUIRED: { label: 'Cần đối soát',                tone: 'tag-danger',  hint: 'Chưa tạo được order; không tự tạo order mới' },
-    RECOVERY_REQUIRED:        { label: 'Cần xử lý thủ công',          tone: 'tag-danger',  hint: 'Có bằng chứng thu tiền nhưng yêu cầu đã đóng' },
+    RECONCILING:              { label: 'Đang kiểm tra kết quả',               tone: 'tag-warning', hint: 'Chưa rõ kết quả — Enclave đang kiểm tra lại' },
+    CREATE_RECOVERY_REQUIRED: { label: 'Cần hỗ trợ kiểm tra',                tone: 'tag-danger',  hint: 'Chưa tạo được yêu cầu thanh toán; cần hỗ trợ kiểm tra' },
+    RECOVERY_REQUIRED:        { label: 'Cần hỗ trợ kiểm tra',          tone: 'tag-danger',  hint: 'Có bằng chứng thu tiền nhưng yêu cầu đã đóng' },
     NOT_CAPTURED:             { label: 'Không tiếp tục thu tiền',     tone: '',            hint: 'Ví không đổi' },
     SUCCEEDED:                { label: 'Thành công',                  tone: 'tag-success', hint: '' },
     FAILED:                   { label: 'Thất bại',                    tone: 'tag-danger',  hint: 'Yêu cầu đã đóng; ví không đổi' },
@@ -416,7 +417,7 @@ const App = (() => {
     const generation=modalGeneration;
     await route();
     if(scope.epoch!==state.sessionEpoch||scope.hash!==location.hash||generation!==modalGeneration)return;
-    openModal(notice);
+    openResultModal(notice);
   }
   function openMediaOverlay(body,kind='viewer') {
     closeMediaOverlay();const root=$('#modalRoot');
@@ -495,6 +496,7 @@ const App = (() => {
     'Đừng thử lại ngay: hãy kiểm tra lại trạng thái (đơn hàng, ví, lịch sử nạp tiền) rồi mới quyết định.';
 
   const API_ERROR_MESSAGES = {
+    DISPUTE_ASSIGNED:()=> 'Hồ sơ đã có quản trị viên khác phụ trách. Hãy tải lại danh sách để xem trạng thái mới.',
     EMAIL_NOT_CONFIGURED:()=> 'Dịch vụ email xác minh chưa được cấu hình. Vui lòng liên hệ quản trị viên để hoàn tất thiết lập.',
     INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
     // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
@@ -515,12 +517,12 @@ const App = (() => {
     PAYPAL_DISABLED: () =>
       'Nạp tiền bằng PayPal Sandbox hiện chưa được bật hoặc chưa đủ cấu hình. Không có yêu cầu nào được tạo và giao diện không tự chuyển sang cổng khác.',
     PAYPAL_CREATE_RECOVERY_REQUIRED: () =>
-      'Yêu cầu này đã không tạo được order PayPal trong 5 phút đầu và hệ thống KHÔNG tự tạo order mới. Cần hỗ trợ đối soát — ' +
-      'hãy giữ mã tham chiếu của yêu cầu.',
+      'Chưa tạo được yêu cầu thanh toán trên PayPal sau 5 phút. Enclave đã dừng thử lại để tránh tạo trùng. Hãy liên hệ hỗ trợ và ' +
+      'giữ lại mã tham chiếu của yêu cầu.',
     PAYPAL_ORDER_MISMATCH: () =>
-      'Dữ liệu order PayPal không khớp với yêu cầu đã lưu. Dừng mọi thao tác tự động; cần đối soát thủ công.',
+      'Thông tin PayPal trả về không khớp với yêu cầu nạp. Enclave đã dừng xử lý; hãy liên hệ hỗ trợ và giữ lại mã tham chiếu.',
     PAYPAL_CAPTURE_CONFLICT: () =>
-      'Bằng chứng thu tiền của yêu cầu này cần được đối soát thủ công. Dừng mọi thao tác tự động; ví không bị giao diện thay đổi.',
+      'Kết quả thu tiền cần được kiểm tra thêm. Enclave đã dừng xử lý tự động; hãy liên hệ hỗ trợ và giữ lại mã tham chiếu.',
     PAYPAL_CAPTURE_CLAIM_LOST: () =>
       'Một thao tác xác nhận khác đang giữ quyền thu tiền cho yêu cầu này. Không gửi thêm lệnh nào — hãy bấm "Kiểm tra lại" để xem trạng thái.',
     PAYMENT_PROVIDER_MISMATCH: () =>
@@ -662,25 +664,132 @@ const App = (() => {
     return typeof window.matchMedia==='function'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 
+  const deferredToasts = [];
+  const liveToasts = new Map();
+  const seenPaymentResults = new Set();
+  let pendingPaymentResult = null;
+  const feedbackTitle = kind => kind === 'ok' ? 'Thành công' : kind === 'err' ? 'Cần chú ý' : kind === 'warn' ? 'Cần kiểm tra lại' : 'Thông báo';
+  const feedbackAlive = item => item.epoch === state.sessionEpoch && item.hash === location.hash;
+
+  function deferToast(item) {
+    deferredToasts.push(item);
+    while (deferredToasts.length > 3) deferredToasts.shift();
+  }
+
+  function suspendToasts() {
+    for (const [el, item] of liveToasts) {
+      if (!el.hasAttribute('data-leaving')) deferToast(item.context);
+      item.dispose();
+    }
+  }
+
+  function clearFeedback() {
+    deferredToasts.length = 0;
+    pendingPaymentResult = null;
+    seenPaymentResults.clear();
+    for (const item of liveToasts.values()) item.dispose();
+  }
+
+  function drainFeedback() {
+    if (!document?.documentElement) return;
+    if ($('#modalRoot')?.childElementCount) return;
+    if (pendingPaymentResult) {
+      const item = pendingPaymentResult;
+      pendingPaymentResult = null;
+      if (feedbackAlive(item) && currentHead() === 'wallet') {
+        openResultModal({title:'Nạp tiền thành công',body:`<p><b>${money(item.amount)}</b> đã được cộng vào ví Enclave.</p><p class="small">Mã yêu cầu: <b>${esc(shortId(item.id))}</b>.</p>${item.refreshFailed?'<p class="note note-warning">Kết quả nạp đã được xác nhận, nhưng chưa tải lại được số dư trên trang. Hãy kiểm tra lại trạng thái; bạn không cần nạp lại.</p>':''}<p class="hint">Đây là số dư mô phỏng dùng để trải nghiệm hệ thống.</p>`,footer:(item.refreshFailed?'<button class="btn" data-act="feedback-refresh">Kiểm tra lại trạng thái</button>':'')+'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+        return;
+      }
+    }
+    const items = deferredToasts.splice(0);
+    for (const item of items) if (feedbackAlive(item) && Date.now() - item.createdAt < 30000) toast(item.message, item.kind);
+  }
+
+  // Called only after the existing canonical GET/status checks; never changes money.
+  function confirmedTopupFeedback(row, ctx, refreshFailed=false) {
+    if (!ctxAlive(ctx) || currentHead() !== 'wallet' || row.status !== 'SUCCEEDED' || !Number.isSafeInteger(row.amount) || row.amount <= 0) return;
+    const key = ctx.epoch + ':' + row.id;
+    if (seenPaymentResults.has(key)) return;
+    seenPaymentResults.add(key);
+    pendingPaymentResult = {id:row.id,amount:row.amount,epoch:ctx.epoch,hash:location.hash,refreshFailed};
+    drainFeedback();
+  }
+
+  async function presentConfirmedTopup(row,ctx) {
+    let refreshFailed=false;
+    try{await refreshWallet({reportFailure:true});}catch(error){if(error.silent)return;refreshFailed=true;}
+    if(ctxAlive(ctx))confirmedTopupFeedback(row,ctx,refreshFailed);
+  }
+
+  function inlineFeedback(message, kind = 'err') {
+    const body = $('#modalRoot .modal-body');
+    if (!body) return toast(message,kind);
+    body.querySelector('.operation-error')?.remove();
+    const el = document.createElement('div');
+    const tone = kind === 'err' ? 'danger' : kind === 'warn' ? 'warning' : kind === 'ok' ? 'success' : '';
+    el.className = 'note operation-error' + (tone ? ' note-' + tone : '');
+    el.setAttribute('role',kind === 'err' ? 'alert' : 'status');
+    el.dataset.feedbackLevel = kind;
+    el.innerHTML = `${ico(kind==='warn'?'triangle-alert':kind==='err'?'circle-alert':kind==='ok'?'circle-check':'info',18)}<span><b class="feedback-title">${esc(kind==='warn'?'Chưa xác định được kết quả':feedbackTitle(kind))}</b><span>${esc(message)}</span></span>`;
+    body.prepend(el);
+    el.scrollIntoView?.({block:'nearest',behavior:'auto'});
+  }
+
+  function fieldFeedback(id, message) {
+    const input = document.getElementById(id);
+    if (!input) return inlineFeedback(message);
+    let error = document.getElementById(id+'Error');
+    if (!error) { error=document.createElement('span');error.id=id+'Error';error.className='field-error';(input.closest('.field')||input.parentElement).append(error); }
+    error.textContent=message;error.hidden=false;error.setAttribute('role','alert');
+    input.dataset.feedbackError=error.id;input.setAttribute('aria-invalid','true');
+    const ids=new Set((input.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));ids.add(error.id);input.setAttribute('aria-describedby',[...ids].join(' '));
+    input.focus({preventScroll:true});
+  }
+
+  function clearFieldFeedback(input) {
+    const id=input?.dataset?.feedbackError;if(!id)return;
+    const error=document.getElementById(id);if(error){error.textContent='';error.hidden=true;}
+    const ids=(input.getAttribute('aria-describedby')||'').split(/\s+/).filter(value=>value&&value!==id);
+    if(ids.length)input.setAttribute('aria-describedby',ids.join(' '));else input.removeAttribute('aria-describedby');
+    input.removeAttribute('aria-invalid');delete input.dataset.feedbackError;
+  }
+
+  function confirmedTransactionResult(row, id, outcomes) {
+    if (id && row?.id === id && outcomes.some(([status,escrow]) => row.status === status && row.escrowStatus === escrow)) return row;
+    throw Object.assign(new Error('Chưa xác nhận được kết quả của đơn này. Hãy kiểm tra lại trạng thái trước khi thao tác tiếp.'),{code:'UI_RESULT_UNCONFIRMED',unknownOutcome:true});
+  }
+
   function toast(message, kind = 'info') {
-    const glyph = kind === 'ok' ? 'circle-check' : kind === 'err' ? 'circle-alert' : 'info';
+    const context = {message,kind,epoch:state.sessionEpoch,hash:location.hash,createdAt:Date.now()};
+    if ($('#modalRoot')?.childElementCount) {deferToast(context);return;}
+    const glyph = kind === 'ok' ? 'circle-check' : kind === 'err' ? 'circle-alert' : kind === 'warn' ? 'triangle-alert' : 'info';
     const box = $('#toasts');
+    while(liveToasts.size>=3)liveToasts.values().next().value.dispose();
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
     el.setAttribute('role',kind==='err'?'alert':'status');
-    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>`+
+    el.setAttribute('aria-atomic','true');
+    el.innerHTML = `${ico(glyph, 18)}<span class="grow"><b class="feedback-title">${esc(feedbackTitle(kind))}</b><span>${esc(message)}</span></span>`+
       `<button type="button" class="toast-x" aria-label="Đóng thông báo">${ico('x',16)}</button>`;
-    let autoTimer;
+    let autoTimer, exitTimer, remaining=kind==='err'?8000:5000, started=Date.now(), hovered=false, paused=false;
+    const dispose=()=>{clearTimeout(autoTimer);clearTimeout(exitTimer);liveToasts.delete(el);el.remove();};
     const leave=()=>{
       if(!el.isConnected||el.hasAttribute('data-leaving'))return;
       clearTimeout(autoTimer);
-      if(prefersReducedMotion()){el.remove();return;}
+      if(prefersReducedMotion()){dispose();return;}
       el.setAttribute('data-leaving','');
-      setTimeout(()=>el.remove(),200);
+      exitTimer=setTimeout(dispose,200);
     };
+    const pause=()=>{if(paused)return;paused=true;clearTimeout(autoTimer);remaining=Math.max(0,remaining-(Date.now()-started));};
+    const resume=()=>{if(hovered||el.contains(document.activeElement)||el.hasAttribute('data-leaving')||!paused)return;paused=false;started=Date.now();autoTimer=setTimeout(leave,remaining);};
+    el.addEventListener('mouseenter',()=>{if(!hovered){hovered=true;pause();}});
+    el.addEventListener('mouseleave',()=>{hovered=false;resume();});
+    el.addEventListener('focusin',()=>{if(!hovered)pause();});
+    el.addEventListener('focusout',event=>{if(!el.contains(event.relatedTarget))resume();});
     el.querySelector('.toast-x').addEventListener('click',leave);
     box.appendChild(el);
-    autoTimer=setTimeout(leave,kind==='err'?8000:5000);
+    liveToasts.set(el,{context,dispose});
+    autoTimer=setTimeout(leave,remaining);
   }
 
   /** Bọc một handler async: khoá nút, hiện spinner, bắt lỗi thành toast. */
@@ -695,7 +804,7 @@ const App = (() => {
       : key === 'order' && btn?.closest('.pd-buy') ? Array.from(btn.closest('.pd-buy').querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled}))
       : btn?.dataset?.id && /^(prepare-secure:|secure:|ack:|pack:|wc:|release:|inspect:|dispute:|cancel-order:|shipping-address:|relist:|adm:)/.test(key)
         ? Array.from(document.querySelectorAll('button[data-id]')).filter(el=>el.dataset.id===btn.dataset.id).map(el=>({el,disabled:el.disabled})) : [];
-    if(inModal) {modalDismissible=false;controls.forEach(({el})=>{el.disabled=true;});}
+    if(inModal) {modalDismissible=false;inModal.setAttribute('aria-busy','true');controls.forEach(({el})=>{el.disabled=true;});}
     else controls.forEach(({el})=>{el.disabled=true;});
     if (btn) { btn.disabled = true; btn.innerHTML = ico('loader-circle', 17, 'spin') + ' Đang xử lý…'; }
     try {
@@ -706,10 +815,13 @@ const App = (() => {
       // Lỗi của một phản hồi cũ (phiên đã đổi) mang cờ silent: không được hiện thông báo cho người đang dùng phiên mới.
       if (!(e && e.silent)) {
         const body=$('#modalRoot .modal-body');
-        if(body && inModal && generation===modalGeneration) {
-          body.querySelector('.operation-error')?.remove();
-          const message=document.createElement('div');message.className='note note-danger operation-error';message.setAttribute('role','alert');message.textContent=e.message;body.prepend(message);
-          message.scrollIntoView?.({block:'nearest',behavior:'auto'});
+        if(body && inModal && generation===modalGeneration && e.code !== 'DISPUTE_NOT_OPEN') {
+          inlineFeedback(e.message,e.unknownOutcome||inModal.dataset.outcomeUnconfirmed==='true'?'warn':'err');
+          if((e.unknownOutcome||inModal.dataset.outcomeUnconfirmed==='true') && /^(release:|cancel-order:|adm:|paypal-abandon$|feedback-refresh$)/.test(key)) {
+            inModal.dataset.outcomeUnconfirmed='true';
+            const refresh=document.createElement('button');refresh.type='button';refresh.className='btn btn-sm mt-2';refresh.dataset.act='feedback-refresh';refresh.textContent='Kiểm tra lại trạng thái';
+            body.querySelector('.operation-error span').append(refresh);
+          }
         } else toast(e.message, 'err');
       }
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
@@ -721,9 +833,14 @@ const App = (() => {
       throw e;
     } finally {
       state.busy.delete(key);
+      if(inModal?.isConnected)inModal.removeAttribute('aria-busy');
       if(inModal && generation===modalGeneration) {modalDismissible=oldDismissible;controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});}
       if(!inModal) controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});
       if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = original; }
+      if(inModal?.isConnected&&inModal.dataset.outcomeUnconfirmed==='true') {
+        if(btn?.isConnected&&/^(release:|cancel-order:|adm:|paypal-abandon$)/.test(key)){btn.disabled=true;btn.textContent='Chờ kiểm tra kết quả';}
+        inModal.querySelectorAll('.modal-foot [data-act="modal-close"]').forEach(button=>{button.textContent='Đóng';});
+      }
       refreshPasskeyPreparationControls();
     }
   }
@@ -739,7 +856,7 @@ const App = (() => {
   //
   // Vì vậy việc diễn giải phải do ứng dụng làm, dựa trên NGỮ CẢNH — cùng một mã lỗi
   // NotAllowedError mang ý nghĩa khác nhau ở lúc đăng nhập, lúc gắn passkey và lúc xác thực
-  // lại để chuyển tiền. Nguyên văn lỗi kỹ thuật được ghi ra console cho người phát triển,
+  // lại để chuyển tiền. Console chỉ ghi loại thao tác và tên/mã lỗi,
   // không đưa lên giao diện.
 
   const WEBAUTHN_HINTS = {
@@ -897,9 +1014,8 @@ const App = (() => {
     try {
       return await fn();
     } catch (e) {
-      // Nguyên văn giữ lại cho người phát triển; giao diện chỉ nhận câu đã diễn giải.
-      console.error(`[webauthn:${kind}]`, e && e.name, e && e.code, e && e.message,
-        e && e.cause && e.cause.name, e && e.cause && e.cause.message);
+      // Chỉ ghi loại thao tác và mã lỗi; không ghi phản hồi xác thực hay lỗi lồng thô.
+      console.error(`[webauthn:${kind}]`, {name:e?.name,code:e?.code});
       const byKind = WEBAUTHN_HINTS[kind] || {};
       const errorName = (e && e.name) || (e && e.cause && e.cause.name);
       const message = byKind[errorName] || WEBAUTHN_CODE_HINTS[e && e.code] || WEBAUTHN_COMMON[errorName];
@@ -960,15 +1076,37 @@ const App = (() => {
     window.scrollTo(saved.x, saved.y);
   }
 
-  function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
+  function openResultModal(options) {
+    // The final result replaces brief progress feedback from the completed action.
+    deferredToasts.length=0;
+    for(const item of liveToasts.values())item.dispose();
+    openModal({...options,purpose:'result'});
+  }
+
+  async function finishMoneyFeedback(options, refreshBalance=true) {
+    const epoch=state.sessionEpoch,hash=location.hash;
+    closeModal();
+    let refreshFailed=false;
+    try {if(refreshBalance)await refreshWallet({reportFailure:true});await route();}
+    catch(error){if(error.silent)return;refreshFailed=true;}
+    if(epoch!==state.sessionEpoch||hash!==location.hash)return;
+    openResultModal({...options,
+      body:options.body+(refreshFailed?'<p class="note note-warning">Kết quả thao tác đã được xác nhận, nhưng chưa tải lại được thông tin trên trang. Hãy kiểm tra lại trạng thái; bạn không cần thực hiện lại thao tác vừa xong.</p>':''),
+      footer:(refreshFailed?'<button class="btn" data-act="feedback-refresh">Kiểm tra lại trạng thái</button>':'')+(options.footer||''),
+    });
+  }
+
+  function openModal({ title, body, footer = '', wide = false, dismissible = true, purpose = 'form', tone = 'ok' }) {
     closeModal({ keepScrollLock: true });
+    suspendToasts();
     modalDismissible = dismissible;
+    const resultIcon = tone === 'warn' ? 'triangle-alert' : tone === 'err' ? 'circle-alert' : tone === 'info' ? 'info' : 'circle-check';
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
-        <div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
+        <div class="modal${wide ? ' wide' : ''}" data-dialog-purpose="${esc(purpose)}" data-result-level="${esc(tone)}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
           <div class="modal-head">
-            <h2 id="modalTitle">${esc(title)}</h2>
+            <h2 id="modalTitle">${purpose==='result'?`<span class="result-symbol" aria-hidden="true">${ico(resultIcon,22)}</span>`:''}${esc(title)}</h2>
             ${dismissible ? `<button class="icon-btn" data-act="modal-close" aria-label="Đóng">${ico('x', 18)}</button>` : ''}
           </div>
           <div class="modal-body">${body}</div>
@@ -999,6 +1137,7 @@ const App = (() => {
     if (!keepScrollLock) unlockModalScroll();
     modalDismissible = true;
     state.paypalAbandonConfirmation = null;
+    Promise.resolve().then(drainFeedback);
   }
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
@@ -1026,6 +1165,7 @@ const App = (() => {
       clearPasskeyPreparations();
       orderIntents.clear();
       state.sessionEpoch++;
+      clearFeedback();
       resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
       stopShippingWatch();
     }
@@ -1033,6 +1173,7 @@ const App = (() => {
   }
 
   function clearSession() {
+    clearFeedback();
     disposeMediaDraft();for(const controller of mediaControllers)controller.abort();cleanupMediaImages(true);
     clearPasskeyPreparations();
     orderIntents.clear();
@@ -1053,15 +1194,16 @@ const App = (() => {
     resetTopupFlow();
   }
 
-  async function refreshWallet() {
+  async function refreshWallet({reportFailure=false}={}) {
     const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role === 'ADMIN') { state.wallet = null; return; }
     if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){state.wallet=null;return;}
     try {
       const wallet = await api('/wallets/me');
       if (state.sessionEpoch === epoch) state.wallet = wallet;
-    } catch (_) {
+    } catch (error) {
       if (state.sessionEpoch === epoch) state.wallet = null;
+      if(reportFailure)throw error;
     }
   }
 
@@ -1255,7 +1397,7 @@ const App = (() => {
         </div>`,
     });
     if (!bootstrap) Promise.resolve(refreshPasskeyReadiness('setupPasskeyReadiness')).catch((error) => {
-      console.error('[passkey-readiness:setup]', error);
+      console.error('[passkey-readiness:setup]', {name:error?.name,code:error?.code});
       renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
     if (!bootstrap) preparePasskeyOptions('enroll');
@@ -1347,13 +1489,14 @@ const App = (() => {
   }
 
   async function doRegister(btn) {
-    for(const input of document.querySelectorAll('#authPanel input')) {if(!input.reportValidity()) return;}
+    for(const input of document.querySelectorAll('#authPanel input')) {if(!input.checkValidity()) return fieldFeedback(input.id,input.validationMessage||'Vui lòng kiểm tra thông tin này.');}
     const email=$('#regEmail').value.trim();
     const username = $('#regUsername').value.trim();
     const displayName = $('#regDisplayName').value.trim();
     const password = $('#regPassword').value;
-    if (!username || !displayName) return toast('Vui lòng nhập tên đăng nhập hoặc email và tên hiển thị', 'err');
-    if (!password) return toast('Vui lòng đặt mật khẩu', 'err');
+    if (!username) return fieldFeedback('regUsername','Vui lòng nhập tên đăng nhập.');
+    if (!displayName) return fieldFeedback('regDisplayName','Vui lòng nhập tên hiển thị.');
+    if (!password) return fieldFeedback('regPassword','Vui lòng đặt mật khẩu.');
 
     await guard('register', btn, async () => {
       const result = await api('/passkeys/register/account', {
@@ -1399,7 +1542,8 @@ const App = (() => {
   async function doBootstrapPassword(btn) {
     const currentPassword = $('#bootCurrent').value;
     const newPassword = $('#bootNew').value;
-    if (!currentPassword || !newPassword) return toast('Nhập cả mật khẩu tạm và mật khẩu mới', 'err');
+    if (!currentPassword) return fieldFeedback('bootCurrent','Nhập mật khẩu tạm hiện tại.');
+    if (!newPassword) return fieldFeedback('bootNew','Nhập mật khẩu mới.');
 
     await guard('bootpw', btn, async () => {
       const result = await api('/passkeys/bootstrap/password', {
@@ -1430,7 +1574,8 @@ const App = (() => {
   async function doLoginPassword(btn) {
     const username = ($('#loginUsername').value || '').trim();
     const password = $('#loginPassword').value;
-    if (!username || !password) return toast('Nhập tên đăng nhập hoặc email và mật khẩu', 'err');
+    if (!username) return fieldFeedback('loginUsername','Nhập tên đăng nhập hoặc email.');
+    if (!password) return fieldFeedback('loginPassword','Nhập mật khẩu của bạn.');
 
     await guard('loginpw', btn, async () => {
       const result = await api('/passkeys/login/password', { method: 'POST', body: { username, password } });
@@ -1742,7 +1887,7 @@ const App = (() => {
   async function submitSellerRequest(btn) {
     const shopName = $('#srShopName').value.trim();
     const pitch = $('#srPitch').value.trim();
-    if (shopName.length < 2) return toast('Tên cửa hàng phải từ 2 ký tự trở lên', 'err');
+    if (shopName.length < 2) return fieldFeedback('srShopName','Tên cửa hàng phải từ 2 ký tự trở lên.');
 
     await guard('seller-request', btn, () => api('/users/me/seller-request', {
       method: 'POST', body: { shopName, pitch },
@@ -1765,7 +1910,7 @@ const App = (() => {
           <div class="pcard-title">${esc(l.title)}</div>
           <div class="pcard-price-row">
             <span class="pcard-price">${money(l.price)}</span>
-            ${!l.isSold ? `<span class="escrow-mini" title="Tiền giữ trong ký quỹ tới khi bạn xác nhận">${ico('shield-check', 13)} Ký quỹ</span>` : ''}
+            ${!l.isSold ? `<span class="escrow-mini" title="Enclave giữ tiền trong khi giao hàng và giải quyết vấn đề của đơn">${ico('shield-check', 13)} Giữ tiền</span>` : ''}
           </div>
           <div class="pcard-foot">
             <span class="pcard-meta">${ico('map-pin', 12)} ${esc(l.location || 'Toàn quốc')}</span>
@@ -1837,7 +1982,7 @@ const App = (() => {
   //   "Người bán xác nhận" là MỐC sự kiện (seller_ack_at), không phải trạng thái máy.
   const TX_STEPS = [
     { key: 'CREATED', label: 'Đã tạo đơn', actions: ['ORDER_CREATED', 'TRANSACTION_CREATED'] },
-    { key: 'LOCKED', label: 'Đã khoá tiền vào ký quỹ', actions: ['ESCROW_LOCKED'] },
+    { key: 'LOCKED', label: 'Đã thanh toán — Enclave đang giữ tiền', actions: ['ESCROW_LOCKED'] },
     { key: 'ACK', label: 'Người bán xác nhận đơn', actions: ['SELLER_ACKNOWLEDGED'] },
     { key: 'SHIPPED', label: 'Đã bàn giao cho vận chuyển', actions: ['SELLER_SHIPPED', 'SIMULATED_CARRIER_PICKED_UP'] },
     { key: 'RECEIVED', label: 'Người mua đã nhận hàng', actions: ['BUYER_RECEIVED_PACKAGE'] },
@@ -1876,22 +2021,22 @@ const App = (() => {
   /** "Bước tiếp theo" — một câu, theo đúng vai trò người xem. */
   function nextStepText(t, isBuyer) {
     switch (t.status) {
-      case 'CREATED': return isBuyer ? 'Thanh toán để tiền được giữ trong ký quỹ' : 'Chờ người mua thanh toán';
+      case 'CREATED': return isBuyer ? 'Thanh toán để Enclave giữ tiền trong khi giao hàng' : 'Chờ người mua thanh toán';
       case 'SECURED':
         if (t.shipment && t.shipment.status === 'PICKUP_PENDING') return 'Đã đóng gói · xe đang đến lấy hàng, không cần thao tác thêm';
         if (!t.sellerAckAt) return isBuyer ? 'Chờ người bán xác nhận đơn' : 'Xác nhận đơn và chuẩn bị gửi hàng';
         return isBuyer ? 'Người bán đang đóng gói kiện hàng' : 'Đóng gói xong rồi bấm "Đã đóng gói" để xe đến lấy';
       case 'SHIPPING':
-        if (t.shipment && t.shipment.status === 'IN_TRANSIT') return 'Enclave Delivery đang vận chuyển · tiền vẫn ở ký quỹ';
+        if (t.shipment && t.shipment.status === 'IN_TRANSIT') return 'Enclave Delivery đang vận chuyển · người bán chưa nhận tiền';
         if (!t.shipment) return isBuyer ? 'Bấm "Xác nhận đã nhận hàng" khi kiện hàng tới' : 'Chờ người mua nhận hàng';
         return isBuyer ? 'Kiện hàng đã đến · nhận và kiểm tra hàng trước khi xác nhận' : 'Chờ người mua nhận và kiểm tra hàng';
-      case 'WAIT_CONFIRM': return isBuyer ? (t.inspectedAt ? 'Đã kiểm hàng · bạn có thể xác nhận giải ngân hoặc báo vấn đề' : 'Kiểm tra sản phẩm rồi bấm Đã kiểm hàng; thao tác này chưa chuyển tiền') : 'Chờ người mua kiểm hàng và xác nhận giải ngân';
+      case 'WAIT_CONFIRM': return isBuyer ? (t.inspectedAt ? 'Đã kiểm hàng · bạn có thể chuyển tiền cho người bán hoặc báo vấn đề' : 'Kiểm tra sản phẩm rồi bấm Đã kiểm hàng; thao tác này chưa chuyển tiền') : 'Chờ người mua kiểm hàng và đồng ý chuyển tiền';
       case 'DISPUTED': return buyerTimeoutOpen(t) && isBuyer
-        ? (t.inspectedAt ? 'Hồ sơ quá hạn còn mở · bạn có thể xác nhận giải ngân bằng Passkey hoặc bổ sung vấn đề' : 'Hồ sơ được mở tự động do quá hạn · bạn vẫn có thể bấm Đã kiểm hàng nếu đã thực sự nhận và kiểm tra sản phẩm')
-        : 'Tiền đang bị đóng băng, chờ quản trị viên phân xử';
-      case 'COMPLETED': return 'Người mua đã giải ngân — giao dịch kết thúc';
-      case 'RELEASED': return 'Đã giải ngân cho người bán theo phân xử';
-      case 'REFUNDED': return 'Đã hoàn tiền cho người mua theo phân xử';
+        ? (t.inspectedAt ? 'Đơn đang chờ xử lý do quá hạn · bạn có thể đồng ý chuyển tiền cho người bán hoặc báo vấn đề' : 'Hồ sơ được mở tự động do quá hạn · bạn vẫn có thể bấm Đã kiểm hàng nếu đã thực sự nhận và kiểm tra sản phẩm')
+        : 'Tiền đang được giữ, chờ quản trị viên xem xét tranh chấp';
+      case 'COMPLETED': return 'Người mua đã đồng ý chuyển tiền cho người bán — đơn đã hoàn tất';
+      case 'RELEASED': return 'Tiền đã chuyển cho người bán theo quyết định quản trị viên';
+      case 'REFUNDED': return 'Tiền đã trả về ví người mua theo quyết định quản trị viên';
       case 'CANCELLED': return t.escrowStatus === 'REFUNDED' ? 'Đơn đã hủy · tiền đã hoàn vào ví người mua' : 'Đơn nháp đã hủy · không có khoản tiền nào bị trừ';
       default: return '';
     }
@@ -1902,7 +2047,7 @@ const App = (() => {
       <div class="money-strip">
         <div><span>Giá trị giao dịch</span><b>${money(t.amount)}</b></div>
         <div><span>Trạng thái tiền</span><b>${esc(ESCROW_UI[t.escrowStatus] || t.escrowStatus)}</b></div>
-        <div><span>Người bán nhận</span><b>${money(t.amount)}</b></div>
+        <div><span>Người bán đã nhận</span><b>${money(t.escrowStatus === 'RELEASED' ? t.amount : 0)}</b></div>
       </div>`;
   }
 
@@ -2112,10 +2257,10 @@ const App = (() => {
         </section>
 
         <div class="trust-strip">
-          <div class="trust-item">${ico('shield-check', 20)}<div><b>Không mất tiền oan</b><span>Người bán chỉ nhận tiền khi bạn xác nhận</span></div></div>
+          <div class="trust-item">${ico('shield-check', 20)}<div><b>Tiền được giữ trước khi giao hàng</b><span>Bạn kiểm hàng rồi quyết định chuyển tiền</span></div></div>
           <div class="trust-item">${ico('fingerprint', 20)}<div><b>Xác nhận bằng Passkey</b><span>Vân tay, khuôn mặt hoặc mã PIN thiết bị</span></div></div>
-          <div class="trust-item">${ico('scale', 20)}<div><b>Có người phân xử</b><span>Mở tranh chấp là tiền được đóng băng</span></div></div>
-          <div class="trust-item">${ico('link-2', 20)}<div><b>Nhật ký có thể kiểm chứng</b><span>Đối chiếu các sự kiện qua chuỗi băm</span></div></div>
+          <div class="trust-item">${ico('scale', 20)}<div><b>Có người hỗ trợ giải quyết</b><span>Khi có tranh chấp, tiền được giữ để xem xét</span></div></div>
+          <div class="trust-item">${ico('link-2', 20)}<div><b>Lịch sử đơn có thể kiểm tra</b><span>Các bước của đơn được lưu để đối chiếu</span></div></div>
         </div>
 
         ${shopCta()}
@@ -2255,7 +2400,7 @@ const App = (() => {
             <div class="note note-trust">
               ${ico('shield-check', 18)}
               <span>Bạn <b>không chuyển khoản thẳng</b> cho người bán. Nhận kiện và ghi nhận kiểm hàng chưa chuyển tiền.
-                Bạn đồng ý giải ngân bằng Passkey (vân tay, khuôn mặt hoặc mã PIN thiết bị); nếu có tranh chấp, quản trị viên quyết định theo hồ sơ.</span>
+                Bạn xác nhận chuyển tiền bằng Passkey (vân tay, khuôn mặt hoặc mã PIN thiết bị). Nếu có tranh chấp, quản trị viên xem xét thông tin hai bên rồi quyết định trả tiền cho người mua hay chuyển cho người bán.</span>
             </div>
           </div>
         </div>
@@ -2307,7 +2452,7 @@ const App = (() => {
       <div>
         <div class="price-row"><span>Giá sản phẩm</span><span class="val">${money(l.price)}</span></div>
         <div class="price-row"><span>Vận chuyển mô phỏng</span><span>Miễn phí</span></div>
-        <div class="price-row total"><span>Số tiền giữ trong ký quỹ</span><span class="val">${money(l.price)}</span></div>
+        <div class="price-row total"><span>Số tiền Enclave sẽ giữ</span><span class="val">${money(l.price)}</span></div>
       </div>
       <fieldset class="order-shipping-form"><legend>Địa chỉ nhận hàng</legend>${shippingForm()}</fieldset>
       <div class="field">
@@ -2317,7 +2462,7 @@ const App = (() => {
       ${!enough ? `<div class="note note-danger">${ico('circle-alert', 18)}
         <span>Số dư khả dụng (${money(state.wallet.availableBalance)}) chưa đủ. <a href="#/wallet"><b>Nạp tiền vào ví</b></a></span></div>` : ''}
       <button class="btn btn-primary btn-lg btn-block" data-act="do-order" data-id="${esc(l.id)}">${ico('shopping-bag', 18)} Mua ngay</button>
-      <p class="muted tiny center m-0">Chưa trừ tiền ở bước này — bạn xác nhận thanh toán vào ký quỹ ở bước sau.</p>`;
+      <p class="muted tiny center m-0">Chưa trừ tiền ở bước này. Bạn sẽ xem lại và xác nhận thanh toán ở bước sau.</p>`;
   }
 
   const orderIntents = new Map();
@@ -2389,7 +2534,7 @@ const App = (() => {
     orderIntents.delete(listingId);
 
     openModal({
-      title: 'Đã tạo đơn hàng',
+      purpose: 'result', tone: 'info', title: 'Đã tạo đơn hàng',
       body: `
         <p>Đơn <b>${esc(txn.itemName)}</b> đã được tạo nhưng <b>chưa trừ tiền</b>.</p>
         ${moneyStrip(txn)}
@@ -2491,12 +2636,12 @@ const App = (() => {
           <div class="order-tile">${productImage({ category: t.listingCategory,images:t.images,title:t.itemName }, { size: 30 })}</div>
           <div>
             <a class="order-title" href="#/tx/${esc(t.id)}">${esc(t.itemName)}</a>
-            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}</div>
+            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}${disputeCode({caseCode:t.disputeCaseCode})?`<span class="tag">Hồ sơ ${esc(t.disputeCaseCode)}</span>`:''}</div>
             ${progressBar(t)}
           </div>
           <div class="order-amount">
             <b>${money(t.amount)}</b>
-            <span class="muted">${t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN' ? 'đang giữ trong ký quỹ' : ''}</span>
+            <span class="muted">${t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN' ? 'Enclave đang giữ' : ''}</span>
           </div>
         </div>
         <div class="order-foot">
@@ -2531,7 +2676,7 @@ const App = (() => {
         out.push(`<button class="btn btn-primary btn-sm" data-act="open-inspected" data-id="${id}">${ico('circle-check', 15)} Đã kiểm hàng</button>`);
       }
       if (canReleaseOrder(t)) {
-        out.push(`<button class="btn btn-trust btn-sm" data-act="open-release" data-id="${id}">${ico('fingerprint', 15)} Xác nhận bằng Passkey &amp; giải ngân</button>`);
+        out.push(`<button class="btn btn-trust btn-sm" data-act="open-release" data-id="${id}">${ico('fingerprint', 15)} Chuyển tiền cho người bán</button>`);
       }
       if (t.status === 'SECURED' && !t.sellerAckAt && !t.shipment) {
         out.push(`<button class="btn btn-danger btn-sm" data-act="open-order-cancel" data-id="${id}">Hủy đơn và nhận hoàn tiền</button>`);
@@ -2552,7 +2697,7 @@ const App = (() => {
     }
     if (t.status === 'DISPUTED' && (!t.dispute || t.dispute.status === 'OPEN')) {
       out.push(`<button class="btn btn-sm" data-act="open-dispute-message" data-system="${t.dispute?.openedBy === 'SYSTEM' || buyerTimeoutOpen(t) ? '1' : '0'}" data-id="${id}">Bổ sung nội dung hồ sơ</button>`);
-      if (t.dispute?.openedBy === 'SYSTEM' || buyerTimeoutOpen(t)) out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-system="1" data-id="${id}">Báo vấn đề và yêu cầu phân xử</button>`);
+      if (t.dispute?.openedBy === 'SYSTEM' || buyerTimeoutOpen(t)) out.push(`<button class="btn btn-danger btn-sm" data-act="open-dispute" data-system="1" data-id="${id}">Báo vấn đề, nhờ Enclave giải quyết</button>`);
     }
     if (t.shipment) out.push(`<button class="btn btn-sm" data-act="shipping-open" data-id="${id}">${ico('truck', 15)} Theo dõi giao hàng</button>`);
     return out.join('');
@@ -2725,7 +2870,7 @@ const App = (() => {
   function showSecureReview(pending, notice) {
     const context = pending.prepared?.context || pending.lastContext || {};
     const checking = pending.attempted || pending.needsReconcile || !pending.prepared;
-    openModal({title:'Xác nhận thanh toán vào ký quỹ',body:`${notice ? `<div class="note note-warning" role="status">${esc(notice)}</div>` : ''}<p>Sản phẩm: <b>${esc(context.itemName)}</b></p><div class="price-row total"><span>Thanh toán cho ${esc(context.sellerName)}</span><b>${money(context.amount)}</b></div><div class="note note-trust mt-3">Tiền được giữ trong ký quỹ. Nhận kiện và kiểm hàng không tự chuyển tiền; giải ngân cần sự đồng ý riêng của bạn hoặc quyết định phân xử hợp lệ.</div><p class="hint">${checking ? 'Hệ thống sẽ đọc lại trạng thái đơn trước. Nếu chưa thanh toán, bạn được xem lại nội dung mới trước khi xác nhận Passkey.' : 'Xác nhận bằng Passkey để khóa tiền. Mỗi lần thanh toán đều cần xác nhận, kể cả khi đã đăng nhập bằng Passkey.'}</p>`,footer:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="secure-confirm">${checking ? 'Kiểm tra lại trạng thái' : 'Xác nhận bằng Passkey'}</button>`});
+    openModal({title:'Xác nhận thanh toán đơn hàng',body:`${notice ? `<div class="note note-warning" role="status">${esc(notice)}</div>` : ''}<p>Sản phẩm: <b>${esc(context.itemName)}</b></p><p>Người bán: <b>${esc(context.sellerName)}</b></p><div class="price-row total"><span>Số tiền Enclave sẽ giữ</span><b>${money(context.amount)}</b></div><div class="note note-trust mt-3">Số tiền này sẽ được trừ khỏi ví và do Enclave giữ. Người bán chưa nhận được tiền. Nhận hàng và bấm Đã kiểm hàng không tự chuyển tiền. Tiền chỉ chuyển cho người bán khi bạn đồng ý ở bước riêng, hoặc khi quản trị viên quyết định sau khi xem xét tranh chấp.</div><p class="hint">${checking ? 'Enclave sẽ kiểm tra kết quả trước. Nếu chưa thanh toán, bạn sẽ được xem lại số tiền và người bán trước khi xác nhận.' : 'Xác nhận bằng Passkey: dùng vân tay, khuôn mặt hoặc mã PIN thiết bị. Mỗi lần thanh toán đều cần bước này, kể cả khi bạn đã đăng nhập.'}</p>`,footer:`<button class="btn" data-act="modal-close">Đóng</button><button class="btn btn-primary" data-act="secure-confirm">${checking ? 'Kiểm tra lại trạng thái' : 'Xác nhận thanh toán'}</button>`});
   }
 
   async function finishSecureOutcome(pending, txn) {
@@ -2736,7 +2881,7 @@ const App = (() => {
     else await route();
     if (pending.epoch !== state.sessionEpoch) return;
     const refunded=txn.escrowStatus==='REFUNDED',released=txn.escrowStatus==='RELEASED',frozen=txn.escrowStatus==='FROZEN';
-    openModal({title:refunded?'Đơn đã được hoàn tiền':released?'Đơn đã được giải ngân':'Đơn đã thanh toán vào ký quỹ',body:`<p>${refunded?'Máy chủ xác nhận khoản giữ của đơn đã hoàn vào ví người mua.':released?'Máy chủ xác nhận giao dịch đã kết thúc và tiền đã được chuyển cho người bán.':frozen?'Máy chủ xác nhận tiền đã vào ký quỹ và hiện đang bị đóng băng trong hồ sơ tranh chấp.':'Máy chủ xác nhận tiền đã được giữ trong ký quỹ, chưa chuyển cho người bán.'}</p><p>Không cần xác nhận thanh toán lại cho đơn này.</p>`,footer:`<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button><a class="btn" href="#/tx/${esc(pending.id)}">Xem chi tiết đơn</a>`});
+    openResultModal({tone:frozen?'warn':'ok',title:refunded?'Đã hoàn tiền về ví người mua':released?'Đã chuyển tiền cho người bán':frozen?'Đã thanh toán — tiền đang chờ giải quyết tranh chấp':'Đã thanh toán — tiền đang được giữ an toàn',body:`<p>${refunded?'Tiền của đơn này đã được trả lại vào ví người mua.':released?'Tiền của đơn này đã được chuyển cho người bán. Giao dịch đã kết thúc.':frozen?'Enclave đang giữ tiền trong khi quản trị viên xem xét tranh chấp. Người bán chưa nhận được tiền.':'Enclave đang giữ tiền của đơn này. Người bán chưa nhận được tiền.'}</p><p>Bạn không cần thanh toán lại cho đơn này.</p>`,footer:`<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button><a class="btn" href="#/tx/${esc(pending.id)}">Xem chi tiết đơn</a>`});
   }
 
   async function confirmSecureOrder(btn){
@@ -2788,7 +2933,7 @@ const App = (() => {
   function confirmPackedOrder(id) {
     openModal({
       title: 'Kiện hàng đã sẵn sàng?',
-      body: '<p>Hãy đóng gói chắc chắn và chuẩn bị kiện hàng tại điểm lấy. Sau khi xác nhận, Enclave Delivery sẽ tự mô phỏng lấy và giao hàng.</p><div class="note note-trust">' + ico('shield-check', 18) + '<span>Tiền vẫn ở ký quỹ. Giao hàng đến nơi chưa phải là xác nhận nhận hàng hay giải ngân.</span></div>',
+      body: '<p>Hãy đóng gói chắc chắn và chuẩn bị kiện hàng tại điểm lấy. Sau khi xác nhận, Enclave Delivery sẽ tự mô phỏng lấy và giao hàng.</p><div class="note note-trust">' + ico('shield-check', 18) + '<span>Enclave vẫn giữ tiền. Giao hàng đến nơi không tự xác nhận người mua đã nhận hàng và không tự chuyển tiền.</span></div>',
       footer: `<button class="btn" data-act="modal-close">Chưa sẵn sàng</button><button class="btn btn-primary" data-act="pack-confirm" data-id="${esc(id)}">${ico('package', 16)} Xác nhận đã đóng gói</button>`,
     });
   }
@@ -2822,17 +2967,22 @@ const App = (() => {
   }
 
   async function waitConfirmOrder(id, btn) {
-    await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }),
-      'Đã ghi nhận bạn nhận được kiện hàng. Tiền chưa chuyển cho người bán.');
+    const result = await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }));
+    if (!result) return;
     closeModal();
     await route();
-    openModal({title:'Đã xác nhận nhận kiện',body:'<p>Hãy kiểm tra tình trạng, phụ kiện và mô tả của sản phẩm, rồi bấm <b>Đã kiểm hàng</b>. Nếu có vấn đề, bạn vẫn có thể mở tranh chấp.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Tiếp tục kiểm hàng</button>'});
+    openResultModal({tone:'info',title:'Đã xác nhận nhận kiện',body:'<p>Hãy kiểm tra tình trạng, phụ kiện và mô tả của sản phẩm, rồi bấm <b>Đã kiểm hàng</b>. Nếu có vấn đề, bạn vẫn có thể mở tranh chấp.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Tiếp tục kiểm hàng</button>'});
   }
 
   async function loadOrderForModal(id) {
     const epoch = state.sessionEpoch, generation = modalGeneration;
-    const t = await api('/transactions/' + encodeURIComponent(id));
-    return epoch === state.sessionEpoch && generation === modalGeneration ? t : null;
+    try {
+      const t = await api('/transactions/' + encodeURIComponent(id));
+      return epoch === state.sessionEpoch && generation === modalGeneration ? t : null;
+    } catch(error) {
+      if(!error.silent&&epoch===state.sessionEpoch&&generation===modalGeneration)inlineFeedback(error.message);
+      return null;
+    }
   }
 
   async function openOrderCancel(id, seller) {
@@ -2841,7 +2991,7 @@ const App = (() => {
     const draft = t.status === 'CREATED' && t.escrowStatus === 'NONE';
     openModal({
       title: draft ? 'Hủy đơn nháp?' : seller ? (t.sellerAckAt ? 'Hủy đơn đã xác nhận?' : 'Từ chối đơn hàng?') : 'Hủy đơn và nhận hoàn tiền?',
-      body: `<p>Đơn <b>${esc(t.itemName)}</b> · ${money(t.amount)}.</p>${draft ? '<p>Đơn này chưa giữ tiền và chưa giữ hàng. Hủy nháp không tạo bút toán hay khoản hoàn tiền.</p>' : '<p>Toàn bộ tiền đang giữ sẽ hoàn vào ví người mua. Không thực hiện hoàn tiền qua PayPal.</p>'}
+      body: `<p>Đơn <b>${esc(t.itemName)}</b> · ${money(t.amount)}.</p>${draft ? '<p>Đơn này chưa thanh toán và chưa giữ hàng. Hủy đơn không làm thay đổi số dư ví, nên không có tiền cần hoàn lại.</p>' : '<p>Toàn bộ tiền đang giữ sẽ hoàn vào ví người mua. Không thực hiện hoàn tiền qua PayPal.</p>'}
         ${seller && t.sellerAckAt ? '<div class="note note-warning">Tin sẽ được ẩn để bạn kiểm tra lại tình trạng hàng trước khi chủ động mở bán lại.</div>' : '<p class="small muted">Tin đăng có thể nhận người mua khác sau khi hủy thành công.</p>'}
         ${seller ? '<div class="field"><label for="orderRejectReason">Lý do không thể giao hàng *</label><textarea id="orderRejectReason" maxlength="1000" placeholder="Ví dụ: sản phẩm bị hỏng, không thể giao như mô tả"></textarea></div>' : ''}`,
       footer:`<button class="btn" data-act="modal-close">Giữ đơn hàng</button><button class="btn btn-danger" data-act="order-cancel-confirm" data-id="${esc(id)}" data-seller="${seller ? '1' : '0'}">${seller ? 'Xác nhận không giao hàng' : 'Xác nhận hủy đơn'}</button>`,
@@ -2850,19 +3000,17 @@ const App = (() => {
 
   async function cancelOrder(id, seller, btn) {
     const reason = seller ? ($('#orderRejectReason')?.value || '').trim() : undefined;
-    if (seller && !reason) return toast('Vui lòng nêu lý do không thể giao hàng.', 'err');
-    const result = await guard('cancel-order:' + id, btn, () => api('/transactions/' + encodeURIComponent(id) + (seller ? '/reject' : '/cancel'), {method:'POST',body:seller ? {reason} : {}}));
-    closeModal();
-    await refreshWallet();
-    await route();
-    openModal({title:result?.escrowStatus === 'NONE' ? 'Đã hủy đơn nháp' : 'Đã hủy đơn hàng',body:result?.escrowStatus === 'NONE' ? '<p>Nháp đã đóng. Ví không thay đổi và không có khoản hoàn tiền vì đơn chưa thanh toán.</p>' : '<p>Tiền đã hoàn vào ví người mua. Đơn không tiếp tục giao hàng và không có khoản tiền nào chuyển cho người bán.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    if (seller && !reason) return fieldFeedback('orderRejectReason','Vui lòng nêu lý do không thể giao hàng.');
+    const result = await guard('cancel-order:' + id, btn, async () => confirmedTransactionResult(await api('/transactions/' + encodeURIComponent(id) + (seller ? '/reject' : '/cancel'), {method:'POST',body:seller ? {reason} : {}}),id,[['CANCELLED','NONE'],['CANCELLED','REFUNDED']]));
+    if (!result) return;
+    await finishMoneyFeedback({title:result.escrowStatus === 'NONE' ? 'Đã hủy đơn nháp' : 'Đã hủy đơn hàng',body:result.escrowStatus === 'NONE' ? '<p>Nháp đã đóng. Ví không thay đổi và không có khoản hoàn tiền vì đơn chưa thanh toán.</p>' : '<p>Tiền đã hoàn vào ví người mua. Đơn không tiếp tục giao hàng và không có khoản tiền nào chuyển cho người bán.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   async function openInspected(id) {
     const t = await loadOrderForModal(id);
     if (!t) return;
     if (!canInspectOrder(t)) return toast('Đơn không còn ở bước có thể ghi nhận kiểm hàng. Hãy tải lại trạng thái.', 'err');
-    openModal({title:'Bạn đã kiểm tra sản phẩm?',body:`<p>Đơn <b>${esc(t.itemName)}</b>.</p><p>Chỉ xác nhận khi bạn đã thực sự nhận, mở kiện và kiểm tra sản phẩm. Thao tác này ghi nhận mốc kiểm hàng, <b>chưa giải ngân</b> và không đóng hồ sơ tranh chấp đang mở.</p>`,footer:`<button class="btn" data-act="modal-close">Chưa kiểm xong</button><button class="btn btn-primary" data-act="inspected-confirm" data-id="${esc(id)}">Xác nhận đã kiểm hàng</button>`});
+    openModal({title:'Bạn đã kiểm tra sản phẩm?',body:`<p>Đơn <b>${esc(t.itemName)}</b>.</p><p>Chỉ xác nhận khi bạn đã thực sự nhận, mở kiện và kiểm tra sản phẩm. Bấm nút này chỉ xác nhận bạn đã kiểm hàng, <b>chưa chuyển tiền cho người bán</b> và không kết thúc tranh chấp đang xử lý.</p>`,footer:`<button class="btn" data-act="modal-close">Chưa kiểm xong</button><button class="btn btn-primary" data-act="inspected-confirm" data-id="${esc(id)}">Xác nhận đã kiểm hàng</button>`});
   }
 
   async function inspectOrder(id, btn) {
@@ -2870,11 +3018,11 @@ const App = (() => {
     if (!t) return;
     closeModal();
     await route();
-    openModal({title:'Đã ghi nhận kiểm hàng',body:'<p>Tiền vẫn ở ký quỹ. Bạn có thể xác nhận giải ngân bằng Passkey nếu đồng ý nhận sản phẩm, hoặc báo vấn đề để quản trị viên xem xét.</p>',footer:`<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-trust" data-act="open-release" data-id="${esc(id)}">Xem lại và giải ngân</button>`});
+    openResultModal({tone:'info',title:'Đã ghi nhận kiểm hàng',body:'<p>Enclave vẫn giữ tiền. Nếu hàng đúng như thỏa thuận, bạn có thể xác nhận chuyển tiền cho người bán bằng Passkey. Nếu có vấn đề, hãy báo để quản trị viên xem xét.</p>',footer:`<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-trust" data-act="open-release" data-id="${esc(id)}">Xem lại trước khi chuyển tiền</button>`});
   }
 
   function shippingSummary(shipping) {
-    if (!shipping) return '<p class="small muted">Đơn cũ chưa có bản chụp địa chỉ nhận hàng. Hệ thống không tự điền địa chỉ thay bạn.</p>';
+    if (!shipping) return '<p class="small muted">Đơn này chưa lưu địa chỉ nhận hàng. Hệ thống không tự điền địa chỉ thay bạn.</p>';
     return `<dl class="spec-list order-address"><div class="spec"><dt>Người nhận</dt><dd>${esc(shipping.recipientName)}</dd></div><div class="spec"><dt>Điện thoại</dt><dd>${esc(shipping.phone)}</dd></div><div class="spec"><dt>Địa chỉ</dt><dd>${esc([shipping.address,shipping.ward,shipping.district,shipping.province].filter(Boolean).join(', '))}</dd></div></dl>`;
   }
 
@@ -2888,7 +3036,7 @@ const App = (() => {
   async function openOrderShipping(id) {
     const t = await loadOrderForModal(id);
     if (!t) return;
-    openModal({title:'Cập nhật địa chỉ nhận hàng',body:`<p class="small">Chỉ thay đổi bản chụp của đơn này. Sau thanh toán, việc cập nhật được lưu vết và chỉ được phép trước khi vận chuyển lấy hàng.</p>${shippingForm(t.shipping || {})}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="save-order-shipping" data-id="${esc(id)}">Lưu địa chỉ đơn hàng</button>`});
+    openModal({title:'Cập nhật địa chỉ nhận hàng',body:`<p class="small">Địa chỉ mới chỉ áp dụng cho đơn này. Bạn có thể sửa trước khi xe lấy hàng; lịch sử thay đổi được lưu lại.</p>${shippingForm(t.shipping || {})}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="save-order-shipping" data-id="${esc(id)}">Lưu địa chỉ đơn hàng</button>`});
   }
 
   async function saveOrderShipping(id, btn) {
@@ -2899,22 +3047,22 @@ const App = (() => {
     } catch(error) { if (error.fieldErrors) showShippingErrors(error.fieldErrors); throw error; }
     closeModal();
     await route();
-    openModal({title:'Đã lưu địa chỉ nhận hàng',body:'<p>Bản chụp địa chỉ của đơn đã được cập nhật. Số tiền ký quỹ không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    openResultModal({tone:'info',title:'Đã lưu địa chỉ nhận hàng',body:'<p>Đã cập nhật địa chỉ nhận hàng của đơn này. Số tiền đang giữ không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   function openDisputeModal(id, systemCase = false) {
     openModal({
       title: 'Mở tranh chấp',
       body: `
-        ${systemCase ? '<div class="note note-warning">Đây là yêu cầu quản trị viên phân xử vì có vấn đề thực tế. Sau khi gửi, hồ sơ sẽ do quản trị viên quyết định; đường tự giải ngân của hồ sơ quá hạn không còn áp dụng. Nếu chỉ muốn bổ sung thông tin, hãy đóng và chọn Bổ sung nội dung hồ sơ.</div>' : ''}
+        ${systemCase ? '<div class="note note-warning">Chọn bước này khi đơn có vấn đề cần quản trị viên giải quyết. Sau khi gửi, bạn không thể tự chuyển tiền cho người bán; quản trị viên sẽ xem xét và quyết định. Nếu chỉ muốn thêm thông tin, hãy đóng cửa sổ này và chọn Bổ sung nội dung hồ sơ.</div>' : ''}
         <div class="note note-warning mb-4">
           ${ico('triangle-alert', 18)}
-          <span>Khi mở tranh chấp, toàn bộ tiền trong ký quỹ bị <b>đóng băng</b> — không bên nào rút được — cho tới khi
-            quản trị viên xem xét và quyết định hoàn tiền cho người mua hay giải ngân cho người bán.</span>
+          <span>Khi báo tranh chấp, Enclave <b>tiếp tục giữ toàn bộ tiền của đơn</b>. Hai bên không thể tự lấy số tiền này cho tới khi
+            quản trị viên xem xét và quyết định trả tiền về ví người mua hay chuyển tiền cho người bán.</span>
         </div>
         <div class="field">
           <label for="dsType">Vấn đề cần hỗ trợ</label>
-          <select id="dsType"><option value="NOT_RECEIVED">Chưa nhận được hàng</option><option value="NOT_SHIPPED">Người bán chưa xử lý / chưa gửi hàng</option><option value="DEFECT">Sản phẩm hỏng, thiếu hoặc sai mô tả</option></select>
+          <select id="dsType" required><option value="">Chọn loại vấn đề</option>${Object.entries(DISPUTE_CATEGORIES).filter(([,c])=>c.manual).map(([code,c])=>`<option value="${esc(c.type)}">${esc(code)} — ${esc(c.label)}</option>`).join('')}</select>
         </div>
         <div class="field">
           <label for="dsReason">Mô tả sự cố</label>
@@ -2929,21 +3077,24 @@ const App = (() => {
 
   async function doDispute(id, btn) {
     const reason = $('#dsReason') ? $('#dsReason').value.trim() : '';
-    const type = $('#dsType')?.value || 'NOT_RECEIVED';
-    if (reason.length<10||reason.length>1000) return toast('Mô tả sự cố từ 10 đến 1000 ký tự.', 'err');
-    const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } }),
-      {successMsg:'Đã mở tranh chấp. Tiền trong ký quỹ đã bị đóng băng.'});
-    await finishMediaForm(scope,{title:'Đã lưu nội dung tranh chấp',body:'<p>Tiền đang được giữ và đóng băng trong ký quỹ. Nếu đơn đã có hồ sơ mở, nội dung vừa gửi được bổ sung vào hồ sơ đó; hệ thống không tạo khoản giữ tiền thứ hai.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    const type = $('#dsType')?.value || '';
+    if (!Object.values(DISPUTE_CATEGORIES).some(c=>c.manual&&c.type===type)) return fieldFeedback('dsType','Vui lòng chọn loại vấn đề bạn gặp phải.');
+    if (reason.length<10||reason.length>1000) return fieldFeedback('dsReason','Mô tả sự cố từ 10 đến 1000 ký tự.');
+    let response;
+    const scope=await submitMediaForm('dispute:' + id, btn, async imageIds=>{response=await api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } });return response;},
+      {});
+    const code=disputeCode(response?.dispute||{});
+    await finishMediaForm(scope,{title:code?'Đã lưu hồ sơ '+code:'Đã lưu nội dung tranh chấp',body:`${response?.dispute?disputeTypeSummary(response.dispute):''}<p>Enclave đang giữ tiền trong khi xem xét vấn đề. Nếu đơn đã có yêu cầu đang xử lý, nội dung mới sẽ được thêm vào đó; bạn không bị trừ tiền thêm.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   function openDisputeMessage(id, systemCase = false) {
-    openModal({title:'Bổ sung nội dung hồ sơ',body:`<p>Nội dung này được thêm vào hồ sơ đang mở, không thay đổi người mở hay loại hồ sơ.${systemCase ? ' Nếu bạn đang có sự cố cần quản trị viên quyết định, hãy dùng <b>Báo vấn đề và yêu cầu phân xử</b>.' : ''}</p><div class="field"><label for="disputeMessage">Nội dung bổ sung *</label><textarea id="disputeMessage" maxlength="1000" placeholder="Bổ sung thông tin giao nhận hoặc mô tả liên quan, không ghi mật khẩu hay mã xác thực."></textarea></div>${mediaPickerHTML('EVIDENCE')}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="send-dispute-message" data-id="${esc(id)}">Gửi nội dung bổ sung</button>`});
+    openModal({title:'Bổ sung nội dung hồ sơ',body:`<p>Nội dung này được thêm vào hồ sơ đang mở, không thay đổi người mở hay loại hồ sơ.${systemCase ? ' Nếu bạn đang có sự cố cần quản trị viên quyết định, hãy dùng <b>Báo vấn đề, nhờ Enclave giải quyết</b>.' : ''}</p><div class="field"><label for="disputeMessage">Nội dung bổ sung *</label><textarea id="disputeMessage" maxlength="1000" placeholder="Bổ sung thông tin giao nhận hoặc mô tả liên quan, không ghi mật khẩu hay mã xác thực."></textarea></div>${mediaPickerHTML('EVIDENCE')}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="send-dispute-message" data-id="${esc(id)}">Gửi nội dung bổ sung</button>`});
     beginMediaDraft('EVIDENCE',id);
   }
 
   async function sendDisputeMessage(id, btn) {
     const message = ($('#disputeMessage')?.value || '').trim();
-    if (message.length<5 || message.length>1000) return toast('Nhập nội dung từ 5 đến 1000 ký tự.', 'err');
+    if (message.length<5 || message.length>1000) return fieldFeedback('disputeMessage','Nhập nội dung từ 5 đến 1000 ký tự.');
     const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api('/transactions/' + encodeURIComponent(id) + '/dispute/messages',{method:'POST',body:{message,imageIds}}));
     await finishMediaForm(scope,{title:'Đã lưu nội dung bổ sung',body:'<p>Nội dung được thêm vào hồ sơ hiện có. Thao tác này không chuyển tiền và không tự thay đổi loại hồ sơ.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
@@ -2955,10 +3106,10 @@ const App = (() => {
     let t;
     try { t = await loadOrderForModal(id); } catch (e) { return toast(e.message, 'err'); }
     if (!t) return;
-    if (!canReleaseOrder(t)) return toast('Bạn cần bấm Đã kiểm hàng trước; hồ sơ cũng phải còn cho phép người mua giải ngân.', 'err');
+    if (!canReleaseOrder(t)) return toast('Bạn cần xác nhận Đã kiểm hàng trước. Nếu đã nhờ quản trị viên giải quyết tranh chấp, bạn cần chờ quyết định.', 'err');
 
     openModal({
-      title: 'Đồng ý giải ngân cho người bán',
+      title: 'Xác nhận chuyển tiền cho người bán',
       body: `
         <p>Sản phẩm: <b>${esc(t.itemName)}</b></p>
         ${moneyStrip(t)}
@@ -2967,8 +3118,7 @@ const App = (() => {
         </div>
         <div class="note note-warning mt-4">
           ${ico('triangle-alert', 18)}
-          <span>Chỉ xác nhận khi bạn đã nhận và kiểm hàng. Sau bước này tiền thuộc về người bán
-            và không rút lại được — nếu hàng có vấn đề, hãy mở tranh chấp thay vì xác nhận.</span>
+          <span>Chỉ xác nhận khi bạn đã nhận và kiểm tra hàng. Tiền sẽ chuyển cho người bán; sau đó bạn không thể tự hủy để lấy lại tiền. Nếu hàng có vấn đề, hãy báo tranh chấp trước khi chuyển tiền.</span>
         </div>
         <div class="note mt-3">
           ${ico('key-round', 18)}
@@ -2977,27 +3127,24 @@ const App = (() => {
         </div>`,
       footer: `
         <button class="btn" data-act="modal-close">Huỷ</button>
-        <button class="btn btn-trust" data-act="do-release" data-id="${esc(t.id)}">${ico('fingerprint', 17)} Xác nhận bằng Passkey &amp; giải ngân</button>`,
+        <button class="btn btn-trust" data-act="do-release" data-id="${esc(t.id)}">${ico('fingerprint', 17)} Chuyển tiền cho người bán</button>`,
     });
   }
 
   async function doRelease(id, btn) {
-    await guard('release:' + id, btn, async () => {
+    const result = await guard('release:' + id, btn, async () => {
       const { reauthSessionId, options } = await api(`/transactions/${id}/reauth/options`, { method: 'POST', body:{action:'RELEASE_ESCROW'} });
       const assertion = await webauthn('reauth', () =>
         SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
       const { reauthGrant } = await api(`/transactions/${id}/reauth/verify`, {
         method: 'POST', body: { reauthSessionId, response: assertion },
       });
-      return api(`/transactions/${id}/release`, {
+      return confirmedTransactionResult(await api(`/transactions/${id}/release`, {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
-      });
-    }, 'Đã giải ngân. Toàn bộ số tiền đã chuyển cho người bán.');
-
-    closeModal();
-    await refreshWallet();
-    await route();
-    openModal({title:'Đã giải ngân cho người bán',body:'<p>Khoản ký quỹ của đơn đã được chuyển cho người bán. Giao dịch đã kết thúc và không thể hủy lại từ đơn này.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+      }),id,[['COMPLETED','RELEASED']]);
+    });
+    if (!result) return;
+    await finishMoneyFeedback({title:'Đã chuyển tiền cho người bán',body:'<p>Tiền của đơn đã chuyển cho người bán. Đơn đã hoàn tất; bạn không thể tự hủy để lấy lại số tiền này.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   /**
@@ -3164,7 +3311,7 @@ const App = (() => {
     else openModal({title:'Xác nhận email',dismissible:false,body:`${who}<p>Bấm xác nhận để xác minh email cho phiên đăng nhập này. Việc này không tạo ví hay Passkey.</p>`,footer:dismiss+'<button class="btn btn-primary" data-act="email-link-confirm">Xác nhận email</button>'});
   }
   async function verifyEmailUi(btn){
-    const code=$('#emailVerificationCode').value.trim();if(!/^\d{6}$/.test(code))return toast('Hãy nhập đủ 6 chữ số.','err');
+    const code=$('#emailVerificationCode').value.trim();if(!/^\d{6}$/.test(code))return fieldFeedback('emailVerificationCode','Hãy nhập đủ 6 chữ số.');
     await guard('verify-email',btn,async()=>{const result=await api('/passkeys/email/verify',{method:'POST',body:{code}});setSession(result.token,result.user);renderChrome();if(authUi.activation)openSetupModal(result.user);else{closeModal();await route();}});
   }
   function openLegacyEmailSetup(){
@@ -3191,12 +3338,12 @@ const App = (() => {
     openEmailRecoveryRequest('recovery');
   }
   function openRecoveryCode(){
-    if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return toast('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
+    if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return inlineFeedback('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
     openModal({title:'Khôi phục bằng mã dự phòng',body:`${authField('recoveryCurrentPassword','Mật khẩu hiện tại','password')}${authField('recoveryCode','Mã khôi phục (XXXXX-XXXXX)')}<p class="hint">Mã được dùng một lần. Sau khi tạo Passkey mới, Passkey và các phiên cũ sẽ bị thu hồi.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-code-verify">Xác minh và tiếp tục</button>'});
   }
   function openEmailRecoveryRequest(kind='recovery'){
     authUi.action=kind;authUi.recoveryOtp=null;
-    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục Passkey qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Nhận mã 6 số qua email, sau đó tạo Passkey mới theo hướng dẫn. Sau khi xác nhận mã, yêu cầu chờ 24 giờ để bảo vệ tài khoản; thanh toán khóa tiền và giải ngân bị hạn chế 72 giờ sau khôi phục.'}</p>${kind==='password'?'':'<p class="hint">Nếu Passkey vẫn dùng được trên thiết bị khác, bạn có thể đăng nhập bằng nó. <button class="btn btn-ghost btn-sm" data-act="recovery-code-open">Tôi có mã dự phòng đã lưu</button></p>'}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">${kind==='password'?'Gửi hướng dẫn':'Gửi mã xác nhận'}</button>`});
+    openModal({title:kind==='password'?'Quên mật khẩu':'Khôi phục Passkey qua email',body:`${authField('recoveryEmail','Email đã xác minh','email')}<p>${kind==='password'?'Bạn sẽ nhận liên kết đặt lại mật khẩu có hiệu lực 30 phút.':'Nhận mã 6 số qua email, sau đó tạo Passkey mới theo hướng dẫn. Sau khi xác nhận mã, yêu cầu chờ 24 giờ để bảo vệ tài khoản; thanh toán đơn và chuyển tiền cho người bán bị hạn chế 72 giờ sau khôi phục.'}</p>${kind==='password'?'':'<p class="hint">Nếu Passkey vẫn dùng được trên thiết bị khác, bạn có thể đăng nhập bằng nó. <button class="btn btn-ghost btn-sm" data-act="recovery-code-open">Tôi có mã dự phòng đã lưu</button></p>'}`,footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-email-request">${kind==='password'?'Gửi hướng dẫn':'Gửi mã xác nhận'}</button>`});
   }
   function openRecoveryEmailCode(result,email){
     const skew=Date.parse(result.serverNow)-Date.now(),offset=Number.isFinite(skew)?skew:0;
@@ -3217,7 +3364,7 @@ const App = (() => {
     const passwordInput=$('#recoveryNewPassword');
     // Reject a missing required password before creating a credential on the
     // device. This synchronous check preserves the next valid tap's ceremony.
-    if(passwordInput&&!passwordInput.reportValidity())return;
+    if(passwordInput&&!passwordInput.checkValidity())return fieldFeedback(passwordInput.id,passwordInput.validationMessage||'Kiểm tra lại mật khẩu.');
     const scope=ceremonyScope(),prepared=takePreparedPasskey('recovery');if(!prepared)return;
     await guard('recovery-create',btn,async()=>{
       try {
@@ -3249,7 +3396,7 @@ const App = (() => {
     }
     const titles={'recovery-start':'Xác nhận bắt đầu khôi phục','recovery-cancel':'Hủy yêu cầu khôi phục','recovery-finish':'Tiếp tục khôi phục tài khoản'};
     if(!titles[kind]||!authUi.linkToken)return;
-    openModal({title:titles[kind],body:`<p>${kind==='recovery-start'?'Sau khi xác nhận, thời gian chờ 24 giờ bắt đầu. Trong thời gian này tài khoản không thể khóa tiền thanh toán hoặc giải ngân.':kind==='recovery-cancel'?'Xác nhận hủy yêu cầu khôi phục. Các Passkey hiện có vẫn được giữ.':'Bạn sẽ tạo Passkey mới và đặt mật khẩu mới. Sau khi hoàn tất, các phiên và Passkey cũ bị thu hồi.'}</p>`,footer:'<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-primary" data-act="recovery-link-confirm">Xác nhận</button>'});
+    openModal({title:titles[kind],body:`<p>${kind==='recovery-start'?'Sau khi xác nhận, thời gian chờ 24 giờ bắt đầu. Trong thời gian này tài khoản không thể thanh toán đơn hoặc chuyển tiền cho người bán.':kind==='recovery-cancel'?'Xác nhận hủy yêu cầu khôi phục. Các Passkey hiện có vẫn được giữ.':'Bạn sẽ tạo Passkey mới và đặt mật khẩu mới. Sau khi hoàn tất, các phiên và Passkey cũ bị thu hồi.'}</p>`,footer:'<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-primary" data-act="recovery-link-confirm">Xác nhận</button>'});
   }
   async function loadSecurityDetails(){
     const box=$('#securityDetails');if(!box)return;
@@ -3267,7 +3414,7 @@ const App = (() => {
     }
     if(!['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){box.innerHTML='';return;}
     const user=state.user;
-    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán hoặc giải ngân đều cần xác nhận Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Thanh toán khóa tiền và giải ngân tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Thanh toán khóa tiền, giải ngân và phân xử tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'');
+    box.innerHTML=(user.authMethod==='password'?`<div class="note mt-3">Bạn đang dùng phiên mật khẩu. Mỗi lần thanh toán đơn hoặc chuyển tiền cho người bán đều cần xác nhận bằng Passkey. <button class="btn btn-sm" data-act="upgrade-session">Nâng cấp bằng Passkey</button></div>`:'')+(user.accountStatus==='RECOVERING'?'<div class="note note-danger mt-3">Đang có yêu cầu khôi phục tài khoản. Thanh toán đơn và chuyển tiền cho người bán tạm khóa. Nếu không phải bạn, hãy đăng nhập bằng Passkey cũ để hủy.</div>':'')+(user.recoveryRestrictedUntil&&Date.parse(user.recoveryRestrictedUntil)>Date.now()?`<div class="note note-warning mt-3">Tài khoản vừa được khôi phục qua email. Thanh toán đơn, chuyển tiền cho người bán và quyết định trả tiền sau tranh chấp tạm khóa đến ${fmtDateTime(user.recoveryRestrictedUntil)}.</div>`:'');
   }
 
   // =====================================================================
@@ -3404,7 +3551,7 @@ const App = (() => {
   async function doChangePassword(btn) {
     const currentPassword=$('#currentPassword').value;
     const newPassword = $('#newPassword').value;
-    if (!newPassword) return toast('Nhập mật khẩu mới', 'err');
+    if (!newPassword) return fieldFeedback('newPassword','Nhập mật khẩu mới.');
 
     await guard('chpw', btn, async () => {
       const reauthGrant = await getAccountGrant('CHANGE_PASSWORD');
@@ -3518,7 +3665,7 @@ const App = (() => {
     await guard('relist:' + id, btn, () => api('/listings/' + encodeURIComponent(id) + '/relist',{method:'POST',body:{confirmed:true}}));
     closeModal();
     await route();
-    openModal({title:'Đã mở bán lại',body:'<p>Tin đăng có thể nhận người mua mới. Đơn và bút toán của lần giao dịch trước được giữ nguyên.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    openResultModal({tone:'info',title:'Đã mở bán lại',body:'<p>Tin đăng có thể nhận người mua mới. Đơn và lịch sử thanh toán của lần mua bán trước được giữ nguyên.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   // ---------- Form đăng / sửa tin ----------
@@ -3549,7 +3696,7 @@ const App = (() => {
         <div class="field">
           <label for="lsPrice">Giá bán (₫) *</label>
           <input id="lsPrice" type="number" min="1000" step="1000" value="${esc(v.price || '')}" placeholder="Nhập giá bán...">
-          <span class="hint">Người mua trả đúng số tiền này vào ký quỹ; bạn nhận đủ khi người mua xác nhận.</span>
+          <span class="hint">Enclave giữ số tiền này sau khi người mua thanh toán. Tiền sẽ vào ví bạn khi người mua đồng ý chuyển, hoặc theo quyết định giải quyết tranh chấp.</span>
         </div>
         <div class="field">
           <label for="lsLocation">Khu vực</label>
@@ -3613,8 +3760,8 @@ const App = (() => {
   async function saveListing(btn) {
     const id = btn.dataset.id;
     const payload = readListingForm();
-    if (!payload.title) return toast('Nhập tiêu đề tin', 'err');
-    if (!payload.price || payload.price < 1000) return toast('Giá bán tối thiểu 1.000₫', 'err');
+    if (!payload.title) return fieldFeedback('lsTitle','Nhập tiêu đề tin.');
+    if (!payload.price || payload.price < 1000) return fieldFeedback('lsPrice','Giá bán tối thiểu 1.000₫.');
 
     // Tin đã có người thanh toán: máy chủ chặn đổi giá, nên không gửi trường này lên.
     if (id && btn.dataset.busy === '1') delete payload.price;
@@ -3623,11 +3770,12 @@ const App = (() => {
       imageIds => {if(imageIds!==undefined)payload.imageIds=imageIds;return id
         ? api('/listings/' + encodeURIComponent(id), { method: 'PATCH', body: payload })
         : api('/listings', { method: 'POST', body: payload });},
-      {editing:!!id,successMsg:id ? 'Đã lưu thay đổi.' : 'Đã đăng tin.'});
+      {editing:!!id});
 
     if(!scope||!mediaSubmissionAlive(scope))return;
     closeModal();
-    if (!id && currentHead() !== 'shop') { location.hash = '#/shop'; return; }
+    if (!id && currentHead() !== 'shop') { location.hash = '#/shop'; toast('Đã đăng tin.','ok'); return; }
+    toast(id?'Đã lưu thay đổi.':'Đã đăng tin.','ok');
     route();
   }
 
@@ -3657,11 +3805,11 @@ const App = (() => {
   const ENTRY_LABEL = {
     DEMO_TOPUP: 'Số dư khởi tạo (demo)',
     TOPUP_CREDIT: 'Nạp tiền qua cổng mô phỏng',
-    ESCROW_LOCK_DEBIT: 'Thanh toán đơn — chuyển vào ký quỹ',
-    ESCROW_LOCK_CREDIT: 'Ký quỹ nhận tiền',
-    ESCROW_RELEASE_DEBIT: 'Ký quỹ giải ngân',
+    ESCROW_LOCK_DEBIT: 'Thanh toán đơn — Enclave giữ tiền',
+    ESCROW_LOCK_CREDIT: 'Enclave nhận giữ tiền của đơn',
+    ESCROW_RELEASE_DEBIT: 'Chuyển tiền cho người bán',
     ESCROW_RELEASE_CREDIT: 'Nhận tiền bán hàng',
-    ESCROW_REFUND_DEBIT: 'Ký quỹ hoàn tiền',
+    ESCROW_REFUND_DEBIT: 'Trả tiền về ví người mua',
     ESCROW_REFUND_CREDIT: 'Nhận hoàn tiền',
   };
 
@@ -3680,7 +3828,7 @@ const App = (() => {
 
     view().innerHTML = `
       <div class="page">
-        ${banner('Ví & nạp tiền', 'Mọi biến động số dư được ghi thành bút toán và có khoá chống ghi trùng')}
+        ${banner('Ví & nạp tiền', 'Xem số dư và lịch sử thu, chi của bạn')}
         <div class="stat-grid" id="walletStats"></div>
         ${walletTopupCard(cfg)}
         <div class="card">
@@ -3710,7 +3858,7 @@ const App = (() => {
       </div>
       <div class="card stat trust">
         <span class="ico-box">${ico('shield-check', 22)}</span>
-        <span><span class="k">Tiền bạn đã trả, đang giữ trong ký quỹ</span><span class="v">${money(holding(buying.transactions))}</span></span>
+        <span><span class="k">Tiền mua hàng Enclave đang giữ</span><span class="v">${money(holding(buying.transactions))}</span></span>
       </div>
       ${state.user.role === 'SELLER' ? `
       <div class="card stat trust">
@@ -4075,7 +4223,7 @@ const App = (() => {
     let intent = loadIntent();
     if (!intent) {
       const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      if (!Number.isInteger(amount) || amount < 1000) return fieldFeedback('topupAmount','Nhập số tiền là số nguyên, tối thiểu 1.000₫.');
       intent = startIntent(amount); // lưu TRƯỚC khi gửi: tải lại giữa chừng vẫn phục hồi được
     }
     const ctx = topupCtx(intent.requestId); // lấy dấu phiên + ý định lúc bắt đầu; không có await nào trước guard
@@ -4181,8 +4329,7 @@ const App = (() => {
   async function announceTerminal(row, ctx) {
     if (!ctxAlive(ctx)) return;
     if (row.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[row.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[row.resolvedBy] : ''}: ${money(row.amount)} đã vào ví.`, 'ok');
-      await refreshWallet();
+      await presentConfirmedTopup(row,ctx);
     } else if (row.status === 'FAILED') {
       toast('Yêu cầu nạp này đã thất bại. Ví của bạn không thay đổi.', 'err');
     }
@@ -4318,7 +4465,7 @@ const App = (() => {
     CLOSED: 'Yêu cầu này đã đóng.',
     NOT_CAPTURED: 'Không thu tiền cho yêu cầu này.',
     RECOVERY_REQUIRED: 'Cần xử lý thủ công; giao diện không tự cộng ví.',
-    RECONCILING: 'Chưa rõ kết quả; hệ thống đang đối soát.',
+    RECONCILING: 'Chưa rõ kết quả; Enclave đang kiểm tra lại với PayPal.',
     AWAITING_APPROVAL: 'Vẫn chờ phê duyệt ở PayPal Sandbox.',
   };
 
@@ -4392,13 +4539,11 @@ const App = (() => {
           <div class="note">
             ${ico('info', 18)}
             <span>Đây là <b>PayPal Sandbox</b> (môi trường thử): dùng tài khoản Sandbox, không chuyển tiền thật. Sau khi tạo yêu cầu,
-              <b>máy chủ</b> chốt số VND ghi vào ví và số USD Sandbox phải trả theo tỷ giá mô phỏng; giao diện không tự tính.</span>
+              <b>Enclave sẽ hiển thị</b> số tiền vào ví (VND) và số USD thử nghiệm bạn cần xác nhận trên PayPal. Tỷ giá chỉ dùng để mô phỏng.</span>
           </div>
           <div class="note">
             ${ico('info', 18)}
-            <span>Số dư chỉ tăng khi <b>máy chủ xác nhận</b> đã thu tiền. Quay lại từ PayPal, đóng cửa sổ hay huỷ không làm tăng số dư và
-              cũng không làm yêu cầu thất bại. Ví, ký quỹ, hoàn tiền và giải ngân tranh chấp vẫn tính bằng VND trong ví nội bộ; hệ thống
-              không hoàn tiền hay chi tiền qua PayPal.</span>
+            <span>Số dư chỉ tăng khi <b>Enclave nhận được kết quả thu tiền thành công từ PayPal</b>. Quay lại hoặc đóng cửa sổ PayPal chưa cho biết việc nạp đã xong hay chưa. Tiền mua hàng và tiền hoàn lại được xử lý trong ví Enclave bằng VND mô phỏng, không chuyển ra PayPal.</span>
           </div>
           <div><button class="btn btn-primary btn-lg" data-act="topup-create">${ico('wallet', 18)} Tạo yêu cầu nạp PayPal</button></div>
         </div>
@@ -4484,7 +4629,7 @@ const App = (() => {
             ? '<b>Đang kiểm tra kết quả thanh toán PayPal.</b> Số dư chỉ tăng khi máy chủ xác nhận đã thu tiền.'
             : notice.cancelled
               ? '<b>Bạn đã quay lại mà chưa hoàn tất phê duyệt.</b> Huỷ hay đóng cửa sổ không làm yêu cầu thất bại; yêu cầu vẫn mở và chưa thu tiền.'
-              : '<b>Chờ bạn phê duyệt ở PayPal Sandbox.</b> Số dư chỉ tăng sau khi bạn phê duyệt và máy chủ xác nhận.';
+              : '<b>Chờ bạn xác nhận trên PayPal Sandbox.</b> Số dư chỉ tăng sau khi bạn phê duyệt và máy chủ xác nhận.';
         return wrap('', 'shield-check', `${note}${quote}`,
           `<button class="btn btn-sm btn-primary" data-act="paypal-approve" data-id="${id}">${notice.returned || notice.cancelled ? 'Mở lại PayPal Sandbox' : 'Mở PayPal Sandbox'}</button>`
           + check + paypalAbandonButton(r));
@@ -4494,14 +4639,14 @@ const App = (() => {
           `<b>Đang xác nhận thanh toán với PayPal…</b> Đừng thao tác lặp; chưa phải thành công cũng chưa phải thất bại.${quote}`, check);
       case 'RECONCILING':
         return wrap('note-warning', 'clock',
-          `<b>Chưa rõ kết quả thanh toán; hệ thống đang đối soát.</b> Đây không phải thất bại và cũng chưa phải thành công; số dư chưa đổi.${quote}`, check);
+          `<b>Chưa rõ kết quả thanh toán; Enclave đang kiểm tra lại với PayPal.</b> Đây không phải thất bại và cũng chưa phải thành công; số dư chưa đổi.${quote}`, check);
       case 'CREATE_RECOVERY_REQUIRED':
         return wrap('note-warning', 'triangle-alert',
-          `<b>Chưa tạo được order PayPal và hệ thống KHÔNG tự tạo order mới.</b> Cần hỗ trợ đối soát — hãy gửi mã tham chiếu <b>${esc(ref)}</b>.`,
+          `<b>Chưa tạo được yêu cầu thanh toán trên PayPal. Enclave đã dừng thử lại để tránh tạo trùng.</b> Hãy liên hệ hỗ trợ và cung cấp mã tham chiếu <b>${esc(ref)}</b>.`,
           (intent ? fresh : '') + dismiss);
       case 'RECOVERY_REQUIRED':
         return wrap('note-warning', 'triangle-alert',
-          `<b>Có bằng chứng thu tiền nhưng yêu cầu đã đóng — cần xử lý thủ công.</b> Giao diện không tự cộng ví. Mã tham chiếu <b>${esc(ref)}</b>.`, dismiss);
+          `<b>PayPal có ghi nhận thu tiền nhưng yêu cầu nạp đã đóng — cần hỗ trợ kiểm tra.</b> Ví chưa được cộng tiền; Enclave cần kiểm tra kết quả trước. Mã tham chiếu <b>${esc(ref)}</b>.`, dismiss);
       case 'NOT_CAPTURED':
         return wrap('', 'info', '<b>Không tiếp tục thu tiền cho yêu cầu này.</b> Ví không đổi. (Đóng hay huỷ cửa sổ PayPal không tự là trạng thái này.)', dismiss);
       default: // FAILED
@@ -4540,8 +4685,7 @@ const App = (() => {
       }
       if (ctx.requestId && !ctx.released) releaseIntent(ctx);
       setTopupNotice(null);
-      toast(`Nạp tiền thành công: ${money(confirmed.amount)} đã vào ví (PayPal Sandbox ${confirmed.quote.usdValue} USD).`, 'ok');
-      await refreshWallet();
+      await presentConfirmedTopup(confirmed,ctx);
       if (!ctxAlive(ctx)) return;
       if (currentHead() === 'wallet') route(); else renderChrome();
       return;
@@ -4568,7 +4712,7 @@ const App = (() => {
     let intent = loadIntent();
     if (!intent) {
       const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      if (!Number.isInteger(amount) || amount < 1000) return fieldFeedback('topupAmount','Nhập số tiền là số nguyên, tối thiểu 1.000₫.');
       intent = startIntent(amount, PAYPAL_PROVIDER); // lưu TRƯỚC khi gửi
     }
     const ctx = topupCtx(intent.requestId);
@@ -4703,8 +4847,8 @@ const App = (() => {
     }
     stopTopupPoll();
     openModal({ title: 'Bỏ yêu cầu nạp PayPal?', body: `<p>Bạn muốn bỏ yêu cầu nạp <b>${money(row.amount)}</b> này?</p>
-      <p>Máy chủ chỉ đóng khi xác nhận chưa gửi lệnh thu tiền. Đây không phải hoàn tiền và không huỷ order tại PayPal.</p>
-      <p>Nếu đã thu tiền hoặc chưa rõ kết quả, yêu cầu sẽ được giữ để đối soát. Đóng cửa sổ PayPal không tự bỏ yêu cầu.</p>`,
+      <p>Enclave chỉ dừng yêu cầu này nếu chưa bắt đầu thu tiền qua PayPal. Thao tác này không hoàn tiền và không hủy yêu cầu bên PayPal.</p>
+      <p>Nếu đã bắt đầu thu tiền hoặc kết quả chưa rõ, Enclave sẽ tiếp tục kiểm tra. Đóng cửa sổ PayPal không tự dừng yêu cầu nạp.</p>`,
       footer: '<button class="btn" data-act="modal-close">Giữ yêu cầu</button><button class="btn btn-primary" data-act="paypal-abandon-confirm">Xác nhận bỏ yêu cầu</button>' });
     state.paypalAbandonConfirmation = { ctx, row };
   }
@@ -4713,36 +4857,35 @@ const App = (() => {
     const pending = state.paypalAbandonConfirmation;
     if (!pending || !ctxAlive(pending.ctx) || state.busy.has('paypal-abandon')) return;
     const { ctx, row } = pending;
-    closeModal();
-    let body = null;
-    try {
-      body = await guard('paypal-abandon', btn, () => api('/payments/paypal/' + encodeURIComponent(row.id) + '/abandon',
-        { method: 'POST', body: {}, allowAuthRetry: false }));
-    } catch (e) { if ((e && e.stale) || !ctxAlive(ctx)) return; }
-    if (!ctxAlive(ctx)) return;
-    // POST (including 409/timeout) is never proof of the final state. Do not retry it automatically.
-    const fresh = await confirmPaypalByGet(row, ctx);
-    if (!ctxAlive(ctx)) return;
-    if (!fresh) {
-      setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
-      toast('Chưa xác nhận được kết quả bỏ yêu cầu. Hãy kiểm tra lại trạng thái.');
-      return;
-    }
-    if (fresh.stage === 'SUCCEEDED') {
-      await settlePaypalRow(fresh, { ctx, fromGet: true });
-      return;
-    }
-    // Recovery evidence wins over FAILED. Keep the intent and never report an abandoned outcome for it.
-    setTopupNotice({ kind: 'paypal', row: fresh });
-    if (fresh.status === 'FAILED' && fresh.stage === 'FAILED') {
-      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
-      renderTopupIntent();
-      const confirmed = readPaypalRow(body, { id: row.id, requestId: row.requestId, amount: row.amount });
-      const abandoned = confirmed && confirmed.status === 'FAILED' && confirmed.stage === 'FAILED'
-        && ['ABANDONED', 'ALREADY_ABANDONED'].includes(body.outcome);
-      toast(abandoned ? 'Đã bỏ yêu cầu nạp. Ví không đổi; lần nạp mới sẽ dùng mã mới.' : 'Yêu cầu nạp đã đóng theo trạng thái máy chủ.');
-    }
-    await loadTopupHistory().catch(() => {});
+    await guard('paypal-abandon',btn,async()=>{
+      let body=null;
+      try {
+        body=await api('/payments/paypal/'+encodeURIComponent(row.id)+'/abandon',{method:'POST',body:{},allowAuthRetry:false});
+      } catch(error) {if(error.silent||!ctxAlive(ctx))throw error;}
+      if(!ctxAlive(ctx))return;
+      // Even a successful POST is not final proof. Keep the dialog locked through the canonical GET.
+      const fresh=await confirmPaypalByGet(row,ctx);
+      if(!ctxAlive(ctx))return;
+      if(!fresh){
+        setTopupNotice({kind:'unconfirmed',paymentId:row.id});
+        throw Object.assign(new Error('Chưa xác nhận được kết quả hủy yêu cầu nạp. Hãy kiểm tra lại trạng thái trước khi tạo lần nạp mới.'),{unknownOutcome:true});
+      }
+      if(fresh.stage==='SUCCEEDED'){
+        closeModal();await settlePaypalRow(fresh,{ctx,fromGet:true});return;
+      }
+      setTopupNotice({kind:'paypal',row:fresh});
+      if(fresh.status==='FAILED'&&fresh.stage==='FAILED'){
+        if(ctx.requestId&&!ctx.released)releaseIntent(ctx);
+        renderTopupIntent();
+        const confirmed=readPaypalRow(body,{id:row.id,requestId:row.requestId,amount:row.amount});
+        const abandoned=confirmed&&confirmed.status==='FAILED'&&confirmed.stage==='FAILED'&&['ABANDONED','ALREADY_ABANDONED'].includes(body.outcome);
+        openResultModal({tone:'info',title:abandoned?'Đã hủy yêu cầu nạp':'Yêu cầu nạp đã đóng',body:abandoned?'<p>Đã bỏ yêu cầu nạp. Ví không đổi. Lần nạp mới sẽ dùng một mã yêu cầu mới.</p>':'<p>Enclave xác nhận yêu cầu nạp này đã đóng. Ví không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+      } else {
+        closeModal();
+        toast('Yêu cầu chưa được hủy. Hãy xem trạng thái xử lý bên dưới.','warn');
+      }
+      await loadTopupHistory().catch(()=>{});
+    });
   }
 
   /** Tự hoàn tất một lần sau return đã xác minh. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
@@ -4934,6 +5077,7 @@ const App = (() => {
       // Mất kết nối giữa chừng: cổng có thể đã ghi nhận. Hỏi lại máy chủ — không coi là thất bại, không coi là thành công.
       if (e && e.unknownOutcome) {
         closeModal();
+        toast(e.message, 'err');
         await waitForTopupResult(id);
       }
       return;
@@ -4951,10 +5095,9 @@ const App = (() => {
     if (result.cancelled || !ctxAlive(ctx)) return; // đã rời trang ví / đăng xuất / đổi tài khoản: không báo gì thay họ
     const p = result.row;
     if (p && p.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[p.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[p.resolvedBy] : ''}: ${money(p.amount)} đã vào ví.`, 'ok');
-      await refreshWallet();
-      if (!ctxAlive(ctx)) return;
       setTopupNotice(null);
+      await presentConfirmedTopup(p,ctx);
+      if (!ctxAlive(ctx)) return;
     } else if (p && p.status === 'FAILED') {
       toast('Cổng thanh toán báo thất bại. Ví của bạn không thay đổi.', 'err');
       setTopupNotice(null);
@@ -5071,11 +5214,11 @@ const App = (() => {
   // sách, nên hai nơi không thể lệch nhau; máy chủ vẫn tự kiểm lại mọi điều kiện.
 
   const ESCROW_BOX = {
-    NONE:     { cls: 'done',   label: 'Chưa thanh toán',             text: 'Tiền vẫn ở ví người mua, chưa vào ký quỹ.', here: 0 },
+    NONE:     { cls: 'done',   label: 'Chưa thanh toán',             text: 'Tiền vẫn ở ví người mua. Đơn chưa được thanh toán.', here: 0 },
     LOCKED:   { cls: '',       label: 'Đang được giữ an toàn',       text: 'Người bán chưa nhận tiền. Hủy hoặc giải quyết tranh chấp theo trạng thái của đơn.', here: 1 },
-    FROZEN:   { cls: 'frozen', label: 'Đang bị đóng băng',           text: 'Tiền được giữ trong khi hồ sơ tranh chấp đang xử lý.', here: 1 },
-    RELEASED: { cls: 'done',   label: 'Đã giải ngân cho người bán',  text: 'Giao dịch đã tất toán.', here: 2 },
-    REFUNDED: { cls: 'done',   label: 'Đã hoàn cho người mua',       text: 'Giao dịch đã tất toán.', here: 0 },
+    FROZEN:   { cls: 'frozen', label: 'Đang giữ tiền để xem xét tranh chấp',           text: 'Enclave đang giữ tiền. Chưa bên nào nhận được số tiền này trong khi tranh chấp đang xử lý.', here: 1 },
+    RELEASED: { cls: 'done',   label: 'Đã chuyển tiền cho người bán',  text: 'Khoản thanh toán của đơn đã hoàn tất.', here: 2 },
+    REFUNDED: { cls: 'done',   label: 'Đã hoàn cho người mua',       text: 'Khoản thanh toán của đơn đã hoàn tất.', here: 0 },
   };
 
   async function viewTransaction(id) {
@@ -5124,12 +5267,12 @@ const App = (() => {
           <div class="stack">
             ${window.EnclaveShippingMotion ? window.EnclaveShippingMotion.render(t) : ''}
             <div class="card">
-              <div class="card-head"><h2>Trạng thái giao dịch</h2><span class="tag tag-navy">${ico('link-2', 12)} ${logs.length} bản ghi trong chuỗi băm</span></div>
+              <div class="card-head"><h2>Trạng thái giao dịch</h2><span class="tag tag-navy">${ico('link-2', 12)} ${logs.length} mốc trong lịch sử đơn</span></div>
               <div class="card-body"><ol class="steps">${txSteps(t, logs)}</ol></div>
             </div>
             ${t.dispute ? disputeCard(t.dispute, t.disputeMessages, t) : ''}
             <div class="card">
-              <div class="card-head"><h3>Nhật ký chi tiết</h3></div>
+              <div class="card-head"><h3>Lịch sử đơn hàng</h3></div>
               <div class="card-body">
                 ${logs.map((l) => `
                   <div class="log-row">
@@ -5148,13 +5291,13 @@ const App = (() => {
               <div class="card-head"><h3>Bảo mật của giao dịch</h3></div>
               <div class="card-body stack gap-3">
                 <div class="small layout-grid gap-8px">
-                  <div class="row flex-nowrap items-start">${ico('fingerprint', 16)}<span>Giải ngân và phân xử luôn đòi <b>xác thực lại bằng Passkey</b>, kể cả khi đang đăng nhập.</span></div>
-                  <div class="row flex-nowrap items-start">${ico('key-round', 16)}<span>Phiếu uỷ quyền dùng một lần, ràng buộc đúng giao dịch này, đúng số tiền, đúng người nhận.</span></div>
-                  <div class="row flex-nowrap items-start">${ico('link-2', 16)}<span>Các sự kiện có nhật ký kiểm chứng chuỗi băm riêng của giao dịch. Bấm Kiểm chứng chuỗi nhật ký để đối chiếu liên kết giữa các bản ghi.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('fingerprint', 16)}<span>Khi chuyển tiền cho người bán hoặc quyết định trả tiền sau tranh chấp, người thực hiện phải <b>xác nhận bằng Passkey</b>, kể cả khi đã đăng nhập.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('key-round', 16)}<span>Mỗi lần xác nhận chỉ dùng một lần, cho đúng đơn, đúng số tiền và đúng người nhận.</span></div>
+                  <div class="row flex-nowrap items-start">${ico('link-2', 16)}<span>Các bước của đơn được lưu lại. Bạn có thể kiểm tra xem lịch sử hiện tại có khớp nhau hay không.</span></div>
                 </div>
                 <div class="row">
-                  <button class="btn btn-sm" data-act="tx-verify-chain" data-id="${esc(t.id)}">${ico('shield-check', 15)} Kiểm chứng chuỗi nhật ký</button>
-                  <a class="btn btn-sm btn-ghost" href="#/audit/${esc(t.id)}">Xem mã băm</a>
+                  <button class="btn btn-sm" data-act="tx-verify-chain" data-id="${esc(t.id)}">${ico('shield-check', 15)} Kiểm tra lịch sử đơn</button>
+                  <a class="btn btn-sm btn-ghost" href="#/audit/${esc(t.id)}">Xem chi tiết lịch sử</a>
                 </div>
                 <div id="txChainResult"></div>
               </div>
@@ -5172,8 +5315,8 @@ const App = (() => {
     };
     const steps = TX_STEPS.map((s) => ({ ...s, actions:[...s.actions] }));
     const last = steps[steps.length - 1];
-    if (t.status === 'COMPLETED') last.label = 'Người mua giải ngân — hoàn tất';
-    if (t.status === 'RELEASED') last.label = 'Giải ngân cho người bán theo phân xử';
+    if (t.status === 'COMPLETED') last.label = 'Đã chuyển tiền cho người bán — hoàn tất';
+    if (t.status === 'RELEASED') last.label = 'Chuyển tiền cho người bán theo quyết định quản trị viên';
     if (t.status === 'REFUNDED') last.label = 'Đã hoàn tiền cho người mua';
     if (t.status === 'CANCELLED') last.label = t.escrowStatus === 'REFUNDED' ? 'Đã hủy đơn và hoàn tiền cho người mua' : 'Đã hủy đơn nháp — chưa giữ tiền';
     if (t.receivedConfirmedBy === 'SYSTEM') {
@@ -5209,10 +5352,10 @@ const App = (() => {
 
   function escrowBox(t) {
     const b = ESCROW_BOX[t.escrowStatus] || ESCROW_BOX.NONE;
-    const flow = ['Ví người mua', 'Ký quỹ', 'Ví người bán'];
+    const flow = ['Ví người mua', 'Enclave', 'Ví người bán'];
     return `
       <div class="escrow-box ${b.cls}">
-        <div class="label">${ico('shield-check', 15)} Tiền ký quỹ</div>
+        <div class="label">${ico('shield-check', 15)} Tiền của đơn hàng</div>
         <div class="amount">${money(t.amount)}</div>
         <div><b>${esc(b.label)}</b></div>
         ${b.text ? `<div class="small mt-2px">${esc(b.text)}</div>` : ''}
@@ -5231,7 +5374,7 @@ const App = (() => {
       : nextStepText(t, isBuyer);
     const warn = isBuyer && (t.status === 'WAIT_CONFIRM' || buyerTimeoutOpen(t))
       ? `<div class="note note-warning mt-3">${ico('triangle-alert', 18)}
-          <span>Chỉ giải ngân khi đã kiểm hàng. Sau bước này tiền thuộc về người bán và không rút lại được.</span></div>`
+          <span>Chỉ chuyển tiền sau khi bạn đã nhận và kiểm tra hàng. Sau đó bạn không thể tự hủy để lấy lại tiền.</span></div>`
       : '';
     return `
       <div class="action-box ${acts ? '' : 'idle'}">
@@ -5252,14 +5395,38 @@ const App = (() => {
     else if (t.status === 'WAIT_CONFIRM') label = 'Hạn kiểm hàng';
     else if (t.status === 'SECURED' && !t.shipment) label = t.sellerAckAt ? 'Hạn người bán đóng gói' : 'Hạn người bán xác nhận';
     else if (t.shipment?.status === 'ARRIVED' || t.status === 'ARRIVED') label = 'Hạn xác nhận nhận kiện';
-    return `<p class="small order-deadline"><b>${esc(label)}:</b> ${fmtDateTime(due)}. Thời hạn do máy chủ quản lý.</p>`;
+    return `<p class="small order-deadline"><b>${esc(label)}:</b> ${fmtDateTime(due)}. Enclave tự theo dõi thời hạn này.</p>`;
   }
 
-  const DISPUTE_TYPE_LABEL = {INSPECTION_TIMEOUT:'Quá hạn kiểm hàng',SHIPMENT_STALLED:'Vận chuyển chưa hoàn tất',NOT_SHIPPED:'Chưa gửi hàng',NOT_RECEIVED:'Chưa nhận được hàng',DEFECT:'Sản phẩm có vấn đề'};
+  const DISPUTE_CATEGORIES = {
+    A:{type:'DAMAGED_GOODS',label:'Hàng hỏng hoặc có lỗi',manual:true},
+    B:{type:'NOT_AS_DESCRIBED',label:'Hàng không đúng mô tả',manual:true},
+    C:{type:'MISSING_ITEMS',label:'Thiếu hàng hoặc phụ kiện',manual:true},
+    D:{type:'NOT_SHIPPED',label:'Người bán chưa gửi hàng',manual:true},
+    E:{type:'NOT_RECEIVED',label:'Chưa nhận được hàng',manual:true},
+    F:{type:'INSPECTION_TIMEOUT',label:'Quá hạn kiểm hàng — hệ thống tự mở'},
+    G:{type:'SHIPMENT_STALLED',label:'Giao hàng quá hạn — hệ thống tự mở'},
+    L:{type:'DEFECT',label:'Vấn đề sản phẩm — chưa tách loại'},
+  };
+  function disputeCode(d) {
+    return typeof d.caseCode==='string'&&/^(?:[A-G]|L)[1-9]\d*$/.test(d.caseCode) ? d.caseCode : null;
+  }
+  function disputeCategoryCode(d) {
+    if (Object.hasOwn(DISPUTE_CATEGORIES,d.categoryCode)) return d.categoryCode;
+    return Object.keys(DISPUTE_CATEGORIES).find(code=>DISPUTE_CATEGORIES[code].type===d.type)||'L';
+  }
+  function disputeTypeSummary(d) {
+    const code=disputeCategoryCode(d),category=DISPUTE_CATEGORIES[code];
+    const changed=disputeCode(d)&&d.casePrefix&&d.casePrefix!==code;
+    return `<p class="small">Vấn đề cần xem xét: <b>${esc(code)} — ${esc(category.label)}</b></p>${changed?'<p class="hint">Mã hồ sơ được giữ nguyên từ lúc mở. Loại vấn đề hiện tại đã được cập nhật.</p>':''}`;
+  }
 
-  function disputeWarnings(d) {
+  function disputeWarnings(d, transaction = {}) {
+    const receiptWarning = !d.buyerNeverConfirmedReceipt ? '' : transaction.receivedConfirmedBy === 'SYSTEM'
+      ? 'Hệ thống tự mở thời hạn kiểm hàng. Điều này không có nghĩa người mua đã nhận được hàng; cần kiểm tra thông tin giao nhận.'
+      : 'Chưa đủ thông tin để biết người mua đã tự xác nhận nhận hàng hay chưa. Cần kiểm tra lịch sử đơn và thông tin hai bên cung cấp.';
     return `${d.openedBy === 'SYSTEM' ? '<div class="note note-warning">Hồ sơ do hệ thống tự mở để bảo vệ tiền đang giữ, không phải lời khiếu nại và không quy lỗi cho bên nào.</div>' : ''}
-      ${d.buyerNeverConfirmedReceipt ? '<div class="note note-danger">Người mua chưa từng tự xác nhận đã nhận kiện. Không được coi mốc nhận do hệ thống ghi là bằng chứng giao hàng.</div>' : ''}`;
+      ${receiptWarning ? `<div class="note note-danger">${esc(receiptWarning)}</div>` : ''}`;
   }
 
   function disputeEvidence(d) {
@@ -5285,21 +5452,21 @@ const App = (() => {
     return `
       <div class="card">
         <div class="card-head">
-          <h2>Tranh chấp</h2>
+          <h2>${disputeCode(d)?'Hồ sơ '+esc(disputeCode(d)):'Hồ sơ tranh chấp'}</h2>
           <span class="tag ${resolved ? 'tag-success' : 'tag-danger'}">${resolved ? 'Đã giải quyết' : 'Đang chờ xử lý'}</span>
         </div>
         <div class="card-body">
-          ${disputeWarnings(d)}
+          ${disputeWarnings(d, transaction)}
           <p class="small muted m-0-0-6">Mở bởi <b>${d.openedBy === 'SYSTEM' ? 'hệ thống' : d.openedBy === 'BUYER' ? 'người mua' : 'người bán'}</b> lúc ${fmtDateTime(d.createdAt)}</p>
-          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
+          ${disputeTypeSummary(d)}
           <p class="m-0-0-6">“${esc(d.reason)}”</p>
           ${disputeEvidence(d)}
           ${renderDisputeMessages(messages || d.messages, transaction)}
           ${renderImageEvidence(d.imageEvidence || transaction?.imageEvidence, transaction)}
           ${d.evidenceDueAt && !resolved ? `<p class="small muted">Hai bên bổ sung nội dung trước ${fmtDateTime(d.evidenceDueAt)}.</p>` : ''}
           ${d.adminDueAt && !resolved ? `<p class="small muted">Mốc nhắc quản trị viên xử lý: ${fmtDateTime(d.adminDueAt)}. Quá mốc này không tự quyết định bên thắng.</p>` : ''}
-          ${resolved ? `<p class="small m-0">Kết quả: <b>${d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã kiểm hàng và tự xác nhận giải ngân' : d.adminDecision === 'REFUND'
-            ? 'Hoàn tiền cho người mua' : 'Giải ngân cho người bán'}</b> lúc ${fmtDateTime(d.resolvedAt)}</p>` : ''}
+          ${resolved ? `<p class="small m-0">Kết quả: <b>${d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã kiểm hàng và đồng ý chuyển tiền cho người bán' : d.adminDecision === 'REFUND'
+            ? 'Hoàn tiền cho người mua' : 'Chuyển tiền cho người bán'}</b> lúc ${fmtDateTime(d.resolvedAt)}</p>` : ''}
         </div>
       </div>`;
   }
@@ -5310,8 +5477,8 @@ const App = (() => {
     const box = $('#txChainResult');
     if (!box || !r) return;
     box.innerHTML = r.valid
-      ? `<div class="note note-success">${ico('shield-check', 18)}<span>Chuỗi nhật ký hợp lệ — đã kiểm ${esc(r.checkedCount)} bản ghi.</span></div>`
-      : `<div class="note note-danger">${ico('triangle-alert', 18)}<span>Chuỗi nhật ký không hợp lệ tại bản ghi #${esc(r.invalidLogId)}.</span></div>`;
+      ? `<div class="note note-success">${ico('shield-check', 18)}<span>Lịch sử đơn khớp — đã kiểm tra ${esc(r.checkedCount)} bản ghi.</span></div>`
+      : `<div class="note note-danger">${ico('triangle-alert', 18)}<span>Phát hiện lịch sử đơn không khớp tại mốc #${esc(r.invalidLogId)}.</span></div>`;
   }
 
 
@@ -5320,7 +5487,7 @@ const App = (() => {
   // =====================================================================
 
   const ADMIN_PAGES = {
-    disputes: { title: 'Tranh chấp', subtitle: 'Tiền của các đơn dưới đây đang bị đóng băng trong ví ký quỹ. Quyết định của bạn được ghi vĩnh viễn vào chuỗi nhật ký của đơn' },
+    disputes: { title: 'Tranh chấp', subtitle: 'Enclave đang giữ tiền của các đơn dưới đây để giải quyết tranh chấp. Quyết định của bạn được lưu trong lịch sử đơn.' },
     'seller-requests': { title: 'Yêu cầu mở cửa hàng', subtitle: 'Duyệt là nâng chính tài khoản đó từ Người mua lên Người bán — ví, passkey và lịch sử đơn của họ giữ nguyên' },
     users:    { title: 'Người dùng', subtitle: 'Toàn bộ tài khoản đang có trên hệ thống, theo vai trò' },
     invariants: { title: 'Bất biến hệ thống', subtitle: 'Chín tính chất phải luôn đúng, kiểm trực tiếp trên dữ liệu chứ không dựa vào cảm nhận' },
@@ -5470,7 +5637,7 @@ const App = (() => {
 
   async function rejectSellerRequest(id, btn) {
     const note = $('#srReject') ? $('#srReject').value.trim() : '';
-    if (!note) return toast('Vui lòng nêu lý do từ chối', 'err');
+    if (!note) return fieldFeedback('srReject','Vui lòng nêu lý do từ chối.');
     await guard('sr-reject:' + id, btn, () => api(`/admin/seller-requests/${id}/reject`, {
       method: 'POST', body: { note },
     }), 'Đã từ chối yêu cầu.');
@@ -5494,53 +5661,59 @@ const App = (() => {
       return;
     }
 
-    list.innerHTML = `<div class="stack gap-5">${disputes.map((d) => {
+    if (state.disputeCategory && !Object.hasOwn(DISPUTE_CATEGORIES,state.disputeCategory)) state.disputeCategory='';
+    const visible=disputes.filter(d=>!state.disputeCategory||disputeCategoryCode(d)===state.disputeCategory);
+    const counts=Object.fromEntries(Object.keys(DISPUTE_CATEGORIES).map(code=>[code,disputes.filter(d=>disputeCategoryCode(d)===code).length]));
+    const filter=`<div class="card"><div class="card-body"><div class="field"><label for="disputeCategoryFilter">Lọc theo loại vấn đề</label><select id="disputeCategoryFilter"><option value="">Tất cả loại vấn đề (${disputes.length})</option>${Object.entries(DISPUTE_CATEGORIES).map(([code,c])=>`<option value="${code}" ${state.disputeCategory===code?'selected':''}>${esc(code)} — ${esc(c.label)} (${counts[code]})</option>`).join('')}</select></div><p class="hint">Chữ trong mã cho biết nhóm lúc mở hồ sơ; số là thứ tự chung toàn hệ thống. Loại vấn đề đang được xem xét có thể được cập nhật. Việc phân loại chưa phải kết luận bên nào có lỗi.</p></div></div>`;
+    list.innerHTML = filter+(visible.length?`<div class="stack gap-5">${visible.map((d) => {
       const t = d.transaction || {};
       const open = d.status === 'OPEN';
       return `
         <div class="card"><div class="card-body">
           <div class="row-between items-start">
             <div class="grow">
-              <h3>${esc(t.itemName || 'Đơn hàng')}</h3>
+              <h3>${disputeCode(d)?'Hồ sơ '+esc(disputeCode(d))+' · ':''}${esc(t.itemName || 'Đơn hàng')}</h3>
               <div class="muted small">
                 Người mua <b>${esc(t.buyerName || '—')}</b> · Người bán <b>${esc(t.sellerName || '—')}</b>
                 · Mở lúc ${fmtDateTime(d.createdAt)}
               </div>
             </div>
-            <span class="tag ${open ? 'tag-danger' : 'tag-success'}">${open ? 'Chờ xử lý' : d.status === 'RESOLVED_REFUND' ? 'Đã hoàn tiền' : d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã giải ngân' : 'Đã giải ngân cho người bán'}</span>
+            <span class="tag ${open ? 'tag-danger' : 'tag-success'}">${open ? 'Chờ xử lý' : d.status === 'RESOLVED_REFUND' ? 'Đã hoàn tiền' : d.status === 'RESOLVED_BY_BUYER_RELEASE' ? 'Người mua đã đồng ý chuyển tiền' : 'Đã chuyển tiền cho người bán'}</span>
           </div>
 
           <div class="money-strip">
             <div><span>Số tiền</span><b>${money(t.amount || 0)}</b></div>
     
-            <div><span>Ký quỹ đóng băng</span><b>${money(t.amount || 0)}</b></div>
+            <div><span>${open?'Tiền đang giữ để xử lý':'Tiền của đơn'}</span><b>${money(t.amount || 0)}</b></div>
     
           </div>
 
-          ${disputeWarnings(d)}
+          ${disputeWarnings(d, t)}
           <p class="small m-0-0-4">
             <b>${d.openedBy === 'SYSTEM' ? 'Hồ sơ tự sinh của hệ thống' : (d.openedBy === 'BUYER' ? 'Người mua' : 'Người bán') + ' ' + esc(d.createdByName || '') + ' báo vấn đề'}:</b>
           </p>
-          ${d.type ? `<p class="small">Loại hồ sơ: ${esc(DISPUTE_TYPE_LABEL[d.type] || d.type)}</p>` : ''}
+          ${disputeTypeSummary(d)}
           <p class="small m-0-0-s4 pre-wrap">“${esc(d.reason)}”</p>
           ${disputeEvidence(d)}
           ${d.evidenceDueAt ? `<p class="small muted">Hạn bổ sung nội dung: ${fmtDateTime(d.evidenceDueAt)}</p>` : ''}
           ${d.adminDueAt ? `<p class="small muted">Mốc nhắc xử lý: ${fmtDateTime(d.adminDueAt)} · không tự phân xử khi quá hạn.</p>` : ''}
 
           <div class="row">
-            ${open ? `
-              ${!d.adminId || d.adminId === state.user.id ? `<button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>` : '<span class="small muted">Địa chỉ chỉ mở cho quản trị viên đã nhận xử lý hồ sơ.</span>'}
+            ${open && (!d.adminId || d.adminId === state.user.id) ? `
+              <button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>
               <button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Hoàn ${money(t.amount || 0)} cho người mua</button>
               <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Chuyển ${money(t.amount || 0)} cho người bán</button>
-            ` : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
+            ` : open ? '<span class="muted small">Hồ sơ đang do quản trị viên khác phụ trách. Bạn không thể quyết định trả tiền cho hồ sơ này.</span>' : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
             <a class="btn btn-ghost btn-sm" href="#/audit/${esc(d.transactionId)}">${ico('link-2', 15)} Nhật ký</a>
           </div>
         </div></div>`;
-    }).join('')}</div>`;
+    }).join('')}</div>`:empty('inbox','Không có hồ sơ thuộc loại này','Chọn loại khác để xem các hồ sơ còn lại.'));
+    $('#disputeCategoryFilter').addEventListener('change',()=>{state.disputeCategory=$('#disputeCategoryFilter').value;loadDisputes().catch(e=>{if(!e.silent)toast(e.message,'err');});});
   }
 
   function confirmClaimDispute(id) {
-    openModal({title:'Nhận xử lý hồ sơ tranh chấp?',body:'<p>Địa chỉ và số điện thoại giao hàng chỉ được mở cho quản trị viên đang xử lý hồ sơ này. Chỉ truy cập khi cần đối chiếu giao nhận; việc nhận xử lý chưa quyết định hoàn tiền hay giải ngân.</p>',footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="admin-claim-confirm" data-id="${esc(id)}">Nhận xử lý và xem chi tiết</button>`});
+    const code=disputeCode(disputeCache.get(id)||{});
+    openModal({title:code?'Nhận xử lý hồ sơ '+code+'?':'Nhận xử lý hồ sơ tranh chấp?',body:'<p>Địa chỉ và số điện thoại giao hàng chỉ được mở cho quản trị viên đang xử lý hồ sơ này. Chỉ truy cập khi cần đối chiếu giao nhận; việc nhận xử lý chưa quyết định trả tiền cho người mua hay chuyển tiền cho người bán.</p>',footer:`<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="admin-claim-confirm" data-id="${esc(id)}">Nhận xử lý và xem chi tiết</button>`});
   }
 
   async function claimDispute(id, btn) {
@@ -5552,7 +5725,7 @@ const App = (() => {
     if (!detail) return;
     const d = detail.dispute || detail, t = detail.transaction || d.transaction || {};
     disputeCache.set(id,{...disputeCache.get(id),...d,transaction:t});
-    openModal({title:'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
+    openModal({title:disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · Chi tiết':'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d, t)}${disputeTypeSummary(d)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
   }
 
   /**
@@ -5580,13 +5753,13 @@ const App = (() => {
     const recipient = refund ? 'Người mua' : 'Người bán';
     const recipientName = refund ? t.buyerName : t.sellerName;
     openModal({
-      title: refund ? 'Xem lại: hoàn tiền cho người mua' : 'Xem lại: giải ngân cho người bán',
+      title: (disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · ':'')+(refund ? 'Hoàn tiền cho người mua' : 'Chuyển tiền cho người bán'),
       body: `
         <div class="stack">
-          ${disputeWarnings(d)}
+          ${disputeWarnings(d, t)}
           <div class="note note-warning">
             ${ico('triangle-alert', 18)}
-            <span>Quyết định này <b>không thể hoàn tác</b>: tiền rời ví ký quỹ và được ghi vĩnh viễn vào nhật ký của đơn.</span>
+            <span>Quyết định này <b>không thể tự hủy lại</b>: Enclave sẽ trả tiền cho bên được chọn và lưu quyết định trong lịch sử đơn.</span>
           </div>
           <div class="price-row"><span>Đơn hàng</span><span>${esc(t.itemName || 'Đơn hàng')}</span></div>
           <div class="price-row"><span>Hành động</span><span><b>${refund ? 'Hoàn toàn bộ tiền' : 'Chuyển toàn bộ tiền'}</b></span></div>
@@ -5597,13 +5770,14 @@ const App = (() => {
       footer: `
         <button class="btn" data-act="modal-close">Huỷ</button>
         <button class="btn btn-primary" data-act="admin-confirm" data-kind="${refund ? 'refund' : 'release'}"
-          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận giải ngân'} và dùng Passkey</button>`,
+          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận chuyển tiền'} và dùng Passkey</button>`,
     });
   }
 
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
-    await guard('adm:' + disputeId, btn, async () => {
+    const dispute = disputeCache.get(disputeId);
+    const result = await guard('adm:' + disputeId, btn, async () => {
       const { reauthSessionId, options } = await api(`/admin/disputes/${disputeId}/reauth/options`, {
         method: 'POST', body: { decision },
       });
@@ -5612,12 +5786,15 @@ const App = (() => {
       const { reauthGrant } = await api(`/admin/disputes/${disputeId}/reauth/verify`, {
         method: 'POST', body: { reauthSessionId, response: assertion },
       });
-      return api(`/admin/disputes/${disputeId}/${kind}`, {
+      const outcome = await api(`/admin/disputes/${disputeId}/${kind}`, {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
       });
-    }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
-    closeModal();
-    route();
+      confirmedTransactionResult(outcome?.transaction,dispute?.transactionId || dispute?.transaction?.id,kind === 'refund' ? [['REFUNDED','REFUNDED']] : [['RELEASED','RELEASED']]);
+      if (outcome?.dispute?.id !== disputeId) throw Object.assign(new Error('Chưa xác nhận được kết quả xử lý hồ sơ. Hãy kiểm tra lại trạng thái.'),{unknownOutcome:true});
+      return outcome;
+    });
+    if (!result) return;
+    await finishMoneyFeedback({title:kind === 'refund' ? 'Đã hoàn tiền cho người mua' : 'Đã chuyển tiền cho người bán',body:`<p>Hồ sơ đã được xử lý. Toàn bộ tiền của đơn ${kind === 'refund' ? 'đã về ví người mua' : 'đã chuyển vào ví người bán'}.</p><p>Kết quả được lưu trong lịch sử đơn hàng.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'},false);
   }
 
   // ---------- Quản trị: người dùng ----------
@@ -5732,7 +5909,7 @@ const App = (() => {
   const ACTION_LABEL = {
     TRANSACTION_CREATED: 'Tạo giao dịch',
     ORDER_CREATED: 'Tạo đơn hàng',
-    ESCROW_LOCKED: 'Khoá tiền vào ký quỹ',
+    ESCROW_LOCKED: 'Đã thanh toán — Enclave giữ tiền',
     SELLER_ACKNOWLEDGED: 'Người bán xác nhận đơn',
     SELLER_SHIPPED: 'Người bán gửi hàng',
     SELLER_PACKED: 'Người bán đã đóng gói',
@@ -5740,10 +5917,10 @@ const App = (() => {
     SIMULATED_CARRIER_ARRIVED: 'Đơn hàng đã đến điểm giao (mô phỏng)',
     SIMULATED_SHIPMENT_STOPPED: 'Tạm dừng vận chuyển mô phỏng',
     BUYER_RECEIVED_PACKAGE: 'Người mua đã nhận hàng',
-    ESCROW_RELEASED: 'Tất toán & giải ngân',
+    ESCROW_RELEASED: 'Đã chuyển tiền cho người bán',
     DISPUTE_OPENED: 'Mở tranh chấp',
     ADMIN_REFUND: 'Quản trị viên hoàn tiền',
-    ADMIN_RELEASE: 'Quản trị viên giải ngân',
+    ADMIN_RELEASE: 'Quản trị viên quyết định chuyển tiền cho người bán',
   };
 
   async function viewAudit(txId) {
@@ -5751,21 +5928,22 @@ const App = (() => {
 
     view().innerHTML = `
       <div class="page">
-        ${banner('Nhật ký & Hash Chain',
-          'Mỗi đơn hàng có một chuỗi băm riêng: log sau chứa hash của log trước. Sửa lén một dòng trong database sẽ làm gãy chuỗi và bị phát hiện ngay')}
+        ${banner('Lịch sử và kiểm tra đơn hàng',
+          'Các bước xử lý được lưu theo thời gian. Bạn có thể kiểm tra xem những bản ghi hiện có có khớp với chuỗi băm của đơn hay không.')}
 
         <div class="card"><div class="card-body">
           <div class="row">
             <div class="input-wrap grow">
               ${ico('search', 16)}
-              <input id="auditTxId" type="text" placeholder="Dán mã giao dịch..." value="${esc(txId || '')}">
+              <input id="auditTxId" aria-label="Mã đơn hàng cần tra cứu" type="text" placeholder="Dán mã đơn hàng..." value="${esc(txId || '')}">
             </div>
             <button class="btn" data-act="audit-load">Xem nhật ký</button>
-            <button class="btn btn-primary" data-act="audit-verify">${ico('shield-check', 17)} Kiểm chứng chuỗi</button>
+            <button class="btn btn-primary" data-act="audit-verify">${ico('shield-check', 17)} Kiểm tra lịch sử</button>
           </div>
-          <p class="muted tiny mt-10px">Mã giao dịch nằm ở trang chi tiết giao dịch (nút "Xem mã băm").</p>
+          <p class="muted tiny mt-10px">Bạn có thể lấy mã đơn ở trang chi tiết đơn hàng.</p>
         </div></div>
 
+        <div id="auditVerification" hidden></div>
         <div id="auditResult"></div>
       </div>`;
 
@@ -5775,12 +5953,16 @@ const App = (() => {
   async function loadAudit(txId) {
     const box = $('#auditResult');
     if (!box) return;
-    if (!txId) return toast('Nhập mã đơn hàng', 'err');
+    if (!txId) return fieldFeedback('auditTxId','Nhập mã đơn hàng cần tra cứu.');
+    const epoch=state.sessionEpoch;
+    const current=()=>box.isConnected&&epoch===state.sessionEpoch&&$('#auditTxId')?.value.trim()===txId;
+    const verification=$('#auditVerification');if(verification){verification.hidden=true;verification.textContent='';}
     box.innerHTML = '<div class="skeleton h-160"></div>';
     try {
       const { logs } = await api(`/transactions/${encodeURIComponent(txId)}/logs`);
+      if(!current())return;
       if (logs.length === 0) {
-        box.innerHTML = empty('file-text', 'Đơn này chưa có log', 'Có thể mã đơn chưa đúng.');
+        box.innerHTML = empty('file-text', 'Đơn này chưa có lịch sử', 'Có thể mã đơn chưa đúng.');
         return;
       }
       box.innerHTML = `
@@ -5805,22 +5987,28 @@ const App = (() => {
           </div>
         </div>`;
     } catch (e) {
-      box.innerHTML = empty('ban', 'Không xem được nhật ký', e.message);
+      if(current()&&!e.silent)box.innerHTML = empty('ban', 'Không xem được lịch sử', e.message);
     }
   }
 
   async function verifyAudit(btn) {
     const txId = $('#auditTxId').value.trim();
-    if (!txId) return toast('Nhập mã đơn hàng', 'err');
-    const result = await guard('verify', btn, () => api(`/transactions/${encodeURIComponent(txId)}/logs/verify`));
-    if (!result) return;
-
-    if (result.valid) {
-      toast(`Hash Chain hợp lệ — đã kiểm tra ${result.checkedCount} bản ghi, không có dấu hiệu bị sửa.`, 'ok');
-    } else {
-      toast(`Hash Chain không hợp lệ — phát hiện sai lệch tại bản ghi #${result.invalidLogId}.`, 'err');
-    }
+    if (!txId) return fieldFeedback('auditTxId','Nhập mã đơn hàng cần tra cứu.');
+    if(state.busy.has('verify'))return;
+    const box=$('#auditVerification'),epoch=state.sessionEpoch;
+    const current=()=>box?.isConnected&&epoch===state.sessionEpoch&&$('#auditTxId')?.value.trim()===txId;
+    const show=(kind,message)=>{if(!current())return;box.hidden=false;box.className='note mb-4'+(kind==='err'?' note-danger':kind==='ok'?' note-success':kind==='warn'?' note-warning':'');box.setAttribute('role',kind==='err'?'alert':'status');box.textContent=message;};
+    show('info','Đang kiểm tra lịch sử đơn hàng…');
+    const result = await guard('verify', btn, async()=>{
+      try{return await api(`/transactions/${encodeURIComponent(txId)}/logs/verify`);}
+      catch(error){if(!error.silent)show('warn','Chưa kiểm tra được lịch sử. '+error.message);return null;}
+    });
+    if (!result||!current()) return;
+    // Loading the rows must not erase the separate, persistent verification result.
     await loadAudit(txId);
+    if(result.valid===true&&Number.isSafeInteger(result.checkedCount)&&result.checkedCount>=0)show('ok',`Lần kiểm tra này: ${result.checkedCount} bản ghi hiện có khớp với chuỗi băm của đơn. Kết quả này không xác nhận chất lượng hàng hay việc giao nhận thực tế.`);
+    else if(result.valid===false)show('err',`Lịch sử có điểm không khớp${result.invalidLogId!=null?' tại bản ghi #'+result.invalidLogId:''}. Cần quản trị viên kiểm tra; đây không phải kết luận về bên mua hay bên bán.`);
+    else show('warn','Chưa nhận được kết quả kiểm tra đầy đủ. Hãy kiểm tra lại sau.');
   }
 
   // =====================================================================
@@ -5861,6 +6049,7 @@ const App = (() => {
     'media-overlay-close': () => closeMediaOverlay(),
     'media-discard-confirm': () => { if (!mediaDraftBusy()) closeModal(); },
     'reload': () => route(),
+    'feedback-refresh': async (el) => {await guard('feedback-refresh',el,async()=>{await refreshWallet({reportFailure:true});closeModal();await route();});},
     'open-sell': () => openSell(),
     'passkey-check': (el) => refreshPasskeyReadiness(el.dataset.target),
     'go-home': () => resetAndGoHome(),
@@ -5942,11 +6131,11 @@ const App = (() => {
       if(start!==null&&end!==null)input.setSelectionRange(start,end);
     },
     'auth-terms':()=>openModal({title:'Điều khoản và quyền riêng tư của bản demo',body:'<p>Enclave là hệ thống mô phỏng phục vụ đồ án. Số dư trong ví không phải tiền gửi ngân hàng và không có chức năng rút tiền thật.</p><p>Email dùng để xác minh, thông báo bảo mật và khôi phục. Khóa công khai Passkey được lưu trên máy chủ; khóa riêng và dữ liệu sinh trắc học được xử lý bởi thiết bị hoặc nhà cung cấp Passkey. Không chia sẻ mật khẩu và mã khôi phục.</p>',footer:'<button class="btn" data-act="open-auth-register">Quay lại đăng ký</button>'}),
-    'copy-site-link':async()=>{try{await navigator.clipboard.writeText(location.origin+location.pathname);toast('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{toast('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
+    'copy-site-link':async()=>{const generation=modalGeneration,epoch=state.sessionEpoch;const notify=(text,kind)=>{if(generation===modalGeneration&&epoch===state.sessionEpoch)($('#modalRoot')?.childElementCount?inlineFeedback:toast)(text,kind);};try{await navigator.clipboard.writeText(location.origin+location.pathname);notify('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{notify('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
     'email-verify':verifyEmailUi,
     'email-resend':(el)=>requestEmailCode(el,false),
     'legacy-email':async(el)=>{const email=$('#legacyEmail').value;await guard('legacy-email',el,async()=>{const result=await api('/passkeys/email/enroll/request',{method:'POST',body:{email}});state.user.email=email;state.user.emailVerified=false;state.user.accountStatus='BASIC';openEmailVerification({...state.user,...result});});},
-    'device-name-save':async(el)=>{const name=$('#deviceNameInput').value.trim(),callback=authUi.nameCallback;if(!name)return toast('Hãy đặt tên Passkey.','err');await guard('device-name',el,()=>callback(name));},
+    'device-name-save':async(el)=>{const name=$('#deviceNameInput').value.trim(),callback=authUi.nameCallback;if(!name)return fieldFeedback('deviceNameInput','Hãy đặt tên Passkey.');await guard('device-name',el,()=>callback(name));},
     'restart-setup':()=>{authUi.nameCallback=null;openSetupModal(state.user);},
     'resume-setup':()=>state.user?.authMethod==='recovery'?openRecoveryPasskey(authUi.recoveryEmail):beginActivation('Kích hoạt ví để bắt đầu mua bán.',()=>route()),
     'activate-wallet':()=>beginActivation('Bạn đang kích hoạt ví để nạp tiền.',()=>route()),
@@ -5987,7 +6176,7 @@ const App = (() => {
     'recovery-email-open':()=>openEmailRecoveryRequest('recovery'),
     'recovery-email-request':async(el)=>{
       const email=$('#recoveryEmail').value.trim(),kind=authUi.action,generation=modalGeneration;
-      if(!$('#recoveryEmail').reportValidity())return;
+      if(!$('#recoveryEmail').checkValidity())return fieldFeedback('recoveryEmail','Nhập địa chỉ email hợp lệ.');
       await guard('recovery-email',el,async()=>{
         const result=await api(kind==='password'?'/passkeys/password-reset/request':'/passkeys/recovery/email/request',{method:'POST',body:{email}});
         if(generation!==modalGeneration)return;
@@ -6005,7 +6194,7 @@ const App = (() => {
     },
     'recovery-email-code-verify':async(el)=>{
       const context=authUi.recoveryOtp,generation=modalGeneration,input=$('#recoveryEmailCode');
-      if(!context||!input?.reportValidity())return;
+      if(!context||!input)return;if(!input.checkValidity())return fieldFeedback('recoveryEmailCode','Nhập mã xác minh hợp lệ trong email.');
       await guard('recovery-email-code',el,async()=>{
         const result=await api('/passkeys/recovery/email/verify',{method:'POST',body:{requestToken:context.requestToken,code:input.value}});
         if(generation!==modalGeneration||authUi.recoveryOtp!==context)return;
@@ -6017,9 +6206,9 @@ const App = (() => {
     'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
     'recovery-passkey-create':(el)=>createRecoveryPasskey(el),
     'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
-    'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');toast('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
+    'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');inlineFeedback('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
     'recovery-regenerate':async(el)=>{await guard('regenerate-codes',el,async()=>{const reauthGrant=await getAccountGrant('REGENERATE_RECOVERY');const result=await api('/passkeys/recovery-codes/regenerate',{method:'POST',body:{reauthGrant}});showRecoveryCodes(result.recoveryCodes);});},
-    'recovery-codes-copy':async()=>{try{await navigator.clipboard.writeText(authUi.codes.join('\n'));codesSaved();toast('Đã sao chép mã khôi phục.','ok');}catch{toast('Không thể sao chép. Hãy dùng nút Tải xuống.','err');}},
+    'recovery-codes-copy':async()=>{const codes=authUi.codes,generation=modalGeneration;try{if(!codes)return;await navigator.clipboard.writeText(codes.join('\n'));if(generation!==modalGeneration||authUi.codes!==codes)return;codesSaved();inlineFeedback('Đã sao chép mã khôi phục. Hãy lưu ở nơi riêng tư.','ok');}catch{if(generation===modalGeneration)inlineFeedback('Không thể sao chép. Hãy dùng nút Tải xuống.','err');}},
     'recovery-codes-download':()=>{const blob=new Blob(['Mã khôi phục Enclave — giữ riêng tư, mỗi mã dùng một lần.\n'+authUi.codes.join('\n')],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='enclave-ma-khoi-phuc.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);codesSaved();},
     'recovery-codes-done':async(el)=>{if(!authUi.codesSaved||!$('#recoveryCodesAcknowledged').checked)return;await guard('ack-codes',el,async()=>{await api('/passkeys/recovery-codes/acknowledge',{method:'POST',body:{}});authUi.codes=null;state.user.recoveryAcknowledged=true;await finishActivation();if(currentHead()==='security')await loadSecurityDetails();});},
     'sessions-revoke-others':async(el)=>{await guard('sessions-revoke',el,()=>api('/passkeys/sessions/revoke-others',{method:'POST',body:{}}),'Đã đăng xuất các phiên khác.');await loadSecurityDetails();},
@@ -6051,7 +6240,8 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
-    document.addEventListener('change', (e) => { if (e.target && e.target.id === 'mediaFiles') selectMediaFiles(e.target); });
+    document.addEventListener('change', (e) => { clearFieldFeedback(e.target); if (e.target && e.target.id === 'mediaFiles') selectMediaFiles(e.target); });
+    document.addEventListener('input',e=>{clearFieldFeedback(e.target);if(e.target?.id==='auditTxId'){const box=$('#auditVerification');if(box){box.hidden=true;box.textContent='';}}});
     // Mọi chỉnh sửa trong hộp thoại đang có lựa chọn ảnh đều được coi là chưa lưu: đóng sẽ hỏi lại.
     document.addEventListener('input', (e) => { if (mediaDraft && e.target && e.target.closest && e.target.closest('#modalRoot') && e.target.id !== 'mediaFiles') mediaDraft.dirty = true; });
     startMediaObserver();

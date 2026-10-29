@@ -54,6 +54,8 @@ async function main() {
     finishCreate(json(201,transaction({status:'CREATED',escrowStatus:'NONE',buyerId:SELLER.id,sellerId:'other-seller',shipping:createdBody.shipping,draftExpiresAt:'2026-10-28T00:00:00Z'})));await sleep(90);
     ok(/Đã tạo đơn hàng/.test(p.d.getElementById('modalRoot').textContent)&&/chưa trừ tiền/.test(p.d.getElementById('modalRoot').textContent),'created draft has a centered outcome explaining no debit');
     ok(p.d.getElementById('modalRoot').textContent.includes(shipping.address),'order confirmation displays the actual shipping snapshot');
+    const sellerReceipt = [...p.d.querySelectorAll('#modalRoot .money-strip > div')].find(cell => /Người bán đã nhận/.test(cell.textContent));
+    ok(sellerReceipt && sellerReceipt.querySelector('b').textContent === '0₫','unpaid draft does not present the full order amount as already paid to the seller');
     ok(!JSON.stringify(p.store()).includes(shipping.phone),'shipping phone is not persisted in localStorage');
   } finally {p.close();}
 
@@ -64,7 +66,7 @@ async function main() {
   });
   try {
     ok(!!find(p,'open-order-cancel')&&!find(p,'secure'),'old draft offers cancellation and requires shipping before payment');
-    ok(/chưa có bản chụp địa chỉ/.test(p.viewText())&&!p.viewText().includes(shipping.phone),'old draft does not receive a fake shipping address');
+    ok(/chưa lưu địa chỉ nhận hàng/.test(p.viewText())&&!p.viewText().includes(shipping.phone),'old draft does not receive a fake shipping address');
     await click(p,'edit-order-shipping');
     ok([...p.d.querySelectorAll('[data-shipping-field]')].every(input=>input.value===''),'old draft shipping form starts empty');
     await click(p,'save-order-shipping');
@@ -72,7 +74,7 @@ async function main() {
     fillShipping(p);await click(p,'save-order-shipping',130);await click(p,'modal-close');
     ok(!!find(p,'secure')&&p.viewText().includes(shipping.address),'saving the server shipping snapshot unlocks payment on the draft');
     await click(p,'open-order-cancel');
-    ok(/không tạo bút toán hay khoản hoàn tiền/.test(p.d.getElementById('modalRoot').textContent),'draft cancellation explicitly explains there is no refund');
+    ok(/không làm thay đổi số dư ví, nên không có tiền cần hoàn lại/.test(p.d.getElementById('modalRoot').textContent),'draft cancellation explicitly explains there is no refund');
     await click(p,'order-cancel-confirm',140);
     ok(/Đã hủy đơn nháp/.test(p.d.getElementById('modalRoot').textContent)&&/Ví không thay đổi/.test(p.d.getElementById('modalRoot').textContent),'draft cancellation outcome never claims a monetary refund');
   } finally {p.close();}
@@ -147,15 +149,15 @@ async function main() {
   p=await txPage(BUYER,()=>row,{'POST /api/transactions/order-ui/dispute/messages':opts=>{row={...row,disputeMessages:[{id:'message-ui',actorId:BUYER.id,message:JSON.parse(opts.body).message,createdAt:iso}]};return json(201,{dispute:row.dispute,transaction:row,message:row.disputeMessages[0]});}});
   try {
     ok(!!find(p,'open-inspected')&&!find(p,'open-release'),'system inspection-timeout dispute still allows inspection but not premature release');
-    ok(/không phải lời khiếu nại/.test(p.viewText())&&/Người mua chưa từng tự xác nhận/.test(p.viewText()),'SYSTEM dispute does not blame a participant or pretend the buyer confirmed receipt');
+    ok(/không phải lời khiếu nại/.test(p.viewText())&&/không có nghĩa người mua đã nhận được hàng/.test(p.viewText()),'SYSTEM dispute does not blame a participant or pretend the buyer confirmed receipt');
     ok(!!find(p,'open-dispute'),'timeout dispute retains a path to supplement the case');
-    ok(!!find(p,'open-dispute-message')&&/Báo vấn đề và yêu cầu phân xử/.test(find(p,'open-dispute').textContent),'system case separates append-only information from an actual complaint');
+    ok(!!find(p,'open-dispute-message')&&/Báo vấn đề, nhờ Enclave giải quyết/.test(find(p,'open-dispute').textContent),'system case separates append-only information from an actual complaint');
     await click(p,'open-dispute-message');fill(p,'disputeMessage','Thông tin bổ sung <img src=x onerror=alert(1)>');
     await click(p,'send-dispute-message',120);await click(p,'modal-close');
     ok(p.count('POST /api/transactions/order-ui/dispute/messages')===1&&p.count('POST /api/transactions/order-ui/dispute')===0,'information supplement uses the append-only endpoint without converting the SYSTEM case');
     ok(p.viewText().includes('Thông tin bổ sung <img')&&!p.d.querySelector('.card-body .note img'),'participant sees escaped stored dispute messages');
     await click(p,'open-dispute');
-    ok(/đường tự giải ngân.*không còn áp dụng/.test(p.d.getElementById('modalRoot').textContent),'actual complaint explains that admin adjudication replaces unilateral timeout release');
+    ok(/không thể tự chuyển tiền cho người bán; quản trị viên sẽ xem xét và quyết định/.test(p.d.getElementById('modalRoot').textContent),'actual complaint explains that admin adjudication replaces unilateral timeout release');
     ok(p.d.getElementById('dsReason').maxLength===1000,'complaint length matches the server limit');
   } finally {p.close();}
   row={...row,inspectedAt:iso,canInspect:false,canBuyerRelease:true};
@@ -182,7 +184,7 @@ async function main() {
     'GET /api/notifications/todo':()=>json(200,{items:[]}),
   }});
   try {
-    ok(/Người mua chưa từng tự xác nhận/.test(p.viewText()),'admin sees missing buyer receipt warning before adjudication');
+    ok(/Chưa đủ thông tin để biết người mua đã tự xác nhận/.test(p.viewText())&&!/chưa từng tự xác nhận/.test(p.viewText()),'unknown receipt data stays unknown instead of inventing a buyer action or lack of action');
     ok(!p.viewText().includes(shipping.phone),'admin dispute list does not invent or display shipping details');
     await click(p,'admin-claim-dispute');
     ok(p.count('POST /api/admin/disputes/dispute-ui/claim')===0,'claiming address access requires explicit confirmation');

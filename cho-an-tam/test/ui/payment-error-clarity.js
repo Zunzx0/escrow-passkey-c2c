@@ -54,6 +54,7 @@ const HANG = Symbol('hang');
 async function openPage({ hash, user, routes }) {
   const html0 = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8').replace(/<script\b[^>]*\bsrc=[^>]*><\/script>/g, '');
   const log = [];
+  let bootstrapRefresh = true; // Auth v3 restores the fixture session once before exercising errors.
   const table = { 'GET /api/payments/paypal/config': () => json(200, { paypalSandbox: { enabled: false, mode: 'sandbox' }, mockPayments: { enabled: true } }), ...routes };
   const dom = new JSDOM(html0, {
     url: `${ORIGIN}/`,
@@ -68,14 +69,18 @@ async function openPage({ hash, user, routes }) {
       w.fetch = (url, opts = {}) => new Promise((resolve, reject) => {
         const u = new URL(url, ORIGIN);
         const key = `${opts.method || 'GET'} ${u.pathname}`;
-        log.push(key);
+        const startup = bootstrapRefresh && key === 'POST /api/passkeys/session/refresh';
+        if (startup) bootstrapRefresh = false;
+        else log.push(key);
         const abort = () => reject(Object.assign(new Error('The operation was aborted'), { name: 'AbortError' }));
         if (opts.signal) {
           if (opts.signal.aborted) return abort();
           opts.signal.addEventListener('abort', abort);
         }
         const handler = table[key];
-        const r = handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
+        const r = startup
+          ? json(200, { token: 'tok-test', user: { ...user, authMethod: 'passkey', emailVerified: true, recoveryAcknowledged: true } })
+          : handler ? handler(opts, u) : json(404, { error: 'NOT_FOUND', message: 'Không tìm thấy tài nguyên' });
         if (r === HANG) return; // không bao giờ trả lời; chỉ kết thúc khi bị huỷ
         Promise.resolve(r).then((x) => {
           if (x === HANG) return;
@@ -86,7 +91,8 @@ async function openPage({ hash, user, routes }) {
       // Nối thành MỘT lần eval: các tệp khai báo `const` ở mức script và dùng chung phạm vi đó khi nạp
       // bằng thẻ <script>, còn mỗi lần eval riêng lại có phạm vi riêng.
       w.eval(['config.js', 'icons.js', 'simplewebauthn-browser.js', 'shipping-motion.js', 'app.js']
-        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')).join('\n;\n'));
+        .map((f) => fs.readFileSync(path.join(PUBLIC, 'js', f), 'utf8')
+          .replace('return { init };', 'window.__authTestSnapshot=()=>({token:state.token,user:state.user}); return { init };')).join('\n;\n'));
     },
   });
   await sleep(600);
@@ -147,7 +153,8 @@ async function main() {
     ok(t.length === 1 && t[0].kind === 'err' && check(t[0].text), `${code}: thông báo tiếng Việt cụ thể (“${(t[0] || {}).text || ''}”)`);
     ok(!NO_RAW.test((t[0] || {}).text || ''), `${code}: không lộ mã lỗi thô`);
   }
-  ok(p.w.localStorage.getItem('cat_token') === 'tok-test', 'REAUTH_REQUIRED KHÔNG đăng xuất (token còn nguyên)');
+  ok(p.w.__authTestSnapshot().token === 'tok-test' && p.w.localStorage.getItem('cat_token') === null,
+    'REAUTH_REQUIRED không đăng xuất; token chỉ ở bộ nhớ, không lưu localStorage');
   ok(p.count('POST /api/passkeys/session/refresh') === 0, 'REAUTH_REQUIRED không kích hoạt làm mới phiên như một 401 hết hạn');
   ok(p.d.querySelector('#topupAmount') !== null, 'Vẫn ở trang ví sau REAUTH_REQUIRED (không bị đẩy về đăng nhập)');
   p.close();
@@ -223,7 +230,8 @@ async function main() {
   });
   await submitTopup(p, 500);
   ok(p.count('POST /api/passkeys/session/refresh') === 1, 'Thử làm mới phiên đúng một lần');
-  ok(p.w.localStorage.getItem('cat_token') === null, 'Làm mới thất bại -> xoá phiên (đăng xuất)');
+  ok(p.w.__authTestSnapshot().token === null && p.w.localStorage.getItem('cat_token') === null,
+    'Làm mới thất bại -> xoá phiên trong bộ nhớ và không lưu token ở localStorage');
   ok(p.toasts().some((t) => /Phiên đăng nhập đã hết hạn/.test(t.text)), 'Báo hết phiên bằng câu riêng, khác với REAUTH_REQUIRED');
   p.close();
 

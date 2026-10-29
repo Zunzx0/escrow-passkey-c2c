@@ -26,6 +26,7 @@ const {orderPolicy,orderDeadline,afterHours}=require('../lib/orderPolicy');
 const {transitionOrder,canReleaseBuyer,assertReleaseReady,serializeDispute,settleOrder,openOrderDispute,appendDisputeMessage,receiveOrder}=require('../lib/orderLifecycle');
 const {notify}=require('../lib/notifications');
 const media=require('../lib/mediaService');
+const { MANUAL_TYPES, referenceFields } = require('../lib/disputeReference');
 
 // Mỗi lần xin challenge đều ghi một bản ghi vào cơ sở dữ liệu, nên đây là điểm gửi ồ ạt
 // rẻ tiền nếu không chặn. Mở tranh chấp cũng được giới hạn vì nó đóng băng tiền của
@@ -61,7 +62,8 @@ const TXN_SELECT = `
          sp.picked_up_at AS shipment_picked_up_at, sp.arrival_due_at AS shipment_arrival_due_at,
          sp.arrived_at AS shipment_arrived_at, sp.stopped_at AS shipment_stopped_at,
          sp.stop_reason AS shipment_stop_reason,
-         dp.type AS dispute_type,dp.opened_by AS dispute_opened_by,dp.status AS dispute_status
+         dp.type AS dispute_type,dp.opened_by AS dispute_opened_by,dp.status AS dispute_status,
+         dp.case_number AS dispute_case_number,dp.case_prefix AS dispute_case_prefix
   FROM transactions t
   JOIN users b ON b.id = t.buyer_id
   JOIN users s ON s.id = t.seller_id
@@ -83,6 +85,7 @@ function serializeTxn(t) {
     status: t.status,
     escrowStatus: t.escrow_status,
     version: t.version,
+    disputeCaseCode: referenceFields({case_number:t.dispute_case_number,case_prefix:t.dispute_case_prefix,type:t.dispute_type}).caseCode,
     createdAt: t.created_at,
     updatedAt: t.updated_at,
     inspectionDueAt:t.inspection_due_at||null,
@@ -822,7 +825,7 @@ router.post('/:id/dispute',requireAuth,sensitiveLimiter,async(req,res,next)=>{
   try{
     const reason=typeof req.body?.reason==='string'?req.body.reason.trim():'';
     const type=req.body?.type||'DEFECT';
-    if(!reason||reason.length>1000||reason.includes('\u0000')||!['NOT_SHIPPED','NOT_RECEIVED','DEFECT'].includes(type))throw new AppError(400,'VALIDATION_ERROR','Nhập loại vấn đề và mô tả từ 1 đến 1.000 ký tự.');
+    if(!reason||reason.length>1000||reason.includes('\u0000')||!MANUAL_TYPES.includes(type))throw new AppError(400,'VALIDATION_ERROR','Chọn loại vấn đề và nhập mô tả từ 1 đến 1.000 ký tự.');
     const imageIds=media.readImageIds(req.body?.imageIds,{max:6});
     if(imageIds?.length&&[...reason].length<10)throw new AppError(400,'VALIDATION_ERROR','Mô tả sự cố kèm ảnh cần từ 10 đến 1.000 ký tự.');
     let txn;
@@ -837,7 +840,7 @@ router.post('/:id/dispute',requireAuth,sensitiveLimiter,async(req,res,next)=>{
       await media.attachEvidenceImages(txn,opened.dispute,req.user.id,imageIds);
       return opened;
     })();
-    if(result.created)await onDisputeOpened(txn,req.user.id);
+    if(result.created)await onDisputeOpened(txn,req.user.id,result.dispute);
     if(result.converted){
       const admins=await db.prepare("SELECT u.id FROM users u JOIN admin_provenance p ON p.user_id=u.id WHERE u.role='ADMIN' AND u.is_active=1").all();
       const recipients=new Set([txn.buyer_id,txn.seller_id,...admins.map(a=>a.id)]);
