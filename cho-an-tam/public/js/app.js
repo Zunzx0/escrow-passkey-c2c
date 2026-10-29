@@ -417,7 +417,7 @@ const App = (() => {
     const generation=modalGeneration;
     await route();
     if(scope.epoch!==state.sessionEpoch||scope.hash!==location.hash||generation!==modalGeneration)return;
-    openModal(notice);
+    openResultModal(notice);
   }
   function openMediaOverlay(body,kind='viewer') {
     closeMediaOverlay();const root=$('#modalRoot');
@@ -663,25 +663,132 @@ const App = (() => {
     return typeof window.matchMedia==='function'&&window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   }
 
+  const deferredToasts = [];
+  const liveToasts = new Map();
+  const seenPaymentResults = new Set();
+  let pendingPaymentResult = null;
+  const feedbackTitle = kind => kind === 'ok' ? 'Thành công' : kind === 'err' ? 'Cần chú ý' : kind === 'warn' ? 'Cần kiểm tra lại' : 'Thông báo';
+  const feedbackAlive = item => item.epoch === state.sessionEpoch && item.hash === location.hash;
+
+  function deferToast(item) {
+    deferredToasts.push(item);
+    while (deferredToasts.length > 3) deferredToasts.shift();
+  }
+
+  function suspendToasts() {
+    for (const [el, item] of liveToasts) {
+      if (!el.hasAttribute('data-leaving')) deferToast(item.context);
+      item.dispose();
+    }
+  }
+
+  function clearFeedback() {
+    deferredToasts.length = 0;
+    pendingPaymentResult = null;
+    seenPaymentResults.clear();
+    for (const item of liveToasts.values()) item.dispose();
+  }
+
+  function drainFeedback() {
+    if (!document?.documentElement) return;
+    if ($('#modalRoot')?.childElementCount) return;
+    if (pendingPaymentResult) {
+      const item = pendingPaymentResult;
+      pendingPaymentResult = null;
+      if (feedbackAlive(item) && currentHead() === 'wallet') {
+        openResultModal({title:'Nạp tiền thành công',body:`<p><b>${money(item.amount)}</b> đã được cộng vào ví Enclave.</p><p class="small">Mã yêu cầu: <b>${esc(shortId(item.id))}</b>.</p>${item.refreshFailed?'<p class="note note-warning">Kết quả nạp đã được xác nhận, nhưng chưa tải lại được số dư trên trang. Hãy kiểm tra lại trạng thái; bạn không cần nạp lại.</p>':''}<p class="hint">Đây là số dư mô phỏng dùng để trải nghiệm hệ thống.</p>`,footer:(item.refreshFailed?'<button class="btn" data-act="feedback-refresh">Kiểm tra lại trạng thái</button>':'')+'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+        return;
+      }
+    }
+    const items = deferredToasts.splice(0);
+    for (const item of items) if (feedbackAlive(item) && Date.now() - item.createdAt < 30000) toast(item.message, item.kind);
+  }
+
+  // Called only after the existing canonical GET/status checks; never changes money.
+  function confirmedTopupFeedback(row, ctx, refreshFailed=false) {
+    if (!ctxAlive(ctx) || currentHead() !== 'wallet' || row.status !== 'SUCCEEDED' || !Number.isSafeInteger(row.amount) || row.amount <= 0) return;
+    const key = ctx.epoch + ':' + row.id;
+    if (seenPaymentResults.has(key)) return;
+    seenPaymentResults.add(key);
+    pendingPaymentResult = {id:row.id,amount:row.amount,epoch:ctx.epoch,hash:location.hash,refreshFailed};
+    drainFeedback();
+  }
+
+  async function presentConfirmedTopup(row,ctx) {
+    let refreshFailed=false;
+    try{await refreshWallet({reportFailure:true});}catch(error){if(error.silent)return;refreshFailed=true;}
+    if(ctxAlive(ctx))confirmedTopupFeedback(row,ctx,refreshFailed);
+  }
+
+  function inlineFeedback(message, kind = 'err') {
+    const body = $('#modalRoot .modal-body');
+    if (!body) return toast(message,kind);
+    body.querySelector('.operation-error')?.remove();
+    const el = document.createElement('div');
+    const tone = kind === 'err' ? 'danger' : kind === 'warn' ? 'warning' : kind === 'ok' ? 'success' : '';
+    el.className = 'note operation-error' + (tone ? ' note-' + tone : '');
+    el.setAttribute('role',kind === 'err' ? 'alert' : 'status');
+    el.dataset.feedbackLevel = kind;
+    el.innerHTML = `${ico(kind==='warn'?'triangle-alert':kind==='err'?'circle-alert':kind==='ok'?'circle-check':'info',18)}<span><b class="feedback-title">${esc(kind==='warn'?'Chưa xác định được kết quả':feedbackTitle(kind))}</b><span>${esc(message)}</span></span>`;
+    body.prepend(el);
+    el.scrollIntoView?.({block:'nearest',behavior:'auto'});
+  }
+
+  function fieldFeedback(id, message) {
+    const input = document.getElementById(id);
+    if (!input) return inlineFeedback(message);
+    let error = document.getElementById(id+'Error');
+    if (!error) { error=document.createElement('span');error.id=id+'Error';error.className='field-error';(input.closest('.field')||input.parentElement).append(error); }
+    error.textContent=message;error.hidden=false;error.setAttribute('role','alert');
+    input.dataset.feedbackError=error.id;input.setAttribute('aria-invalid','true');
+    const ids=new Set((input.getAttribute('aria-describedby')||'').split(/\s+/).filter(Boolean));ids.add(error.id);input.setAttribute('aria-describedby',[...ids].join(' '));
+    input.focus({preventScroll:true});
+  }
+
+  function clearFieldFeedback(input) {
+    const id=input?.dataset?.feedbackError;if(!id)return;
+    const error=document.getElementById(id);if(error){error.textContent='';error.hidden=true;}
+    const ids=(input.getAttribute('aria-describedby')||'').split(/\s+/).filter(value=>value&&value!==id);
+    if(ids.length)input.setAttribute('aria-describedby',ids.join(' '));else input.removeAttribute('aria-describedby');
+    input.removeAttribute('aria-invalid');delete input.dataset.feedbackError;
+  }
+
+  function confirmedTransactionResult(row, id, outcomes) {
+    if (id && row?.id === id && outcomes.some(([status,escrow]) => row.status === status && row.escrowStatus === escrow)) return row;
+    throw Object.assign(new Error('Chưa xác nhận được kết quả của đơn này. Hãy kiểm tra lại trạng thái trước khi thao tác tiếp.'),{code:'UI_RESULT_UNCONFIRMED',unknownOutcome:true});
+  }
+
   function toast(message, kind = 'info') {
-    const glyph = kind === 'ok' ? 'circle-check' : kind === 'err' ? 'circle-alert' : 'info';
+    const context = {message,kind,epoch:state.sessionEpoch,hash:location.hash,createdAt:Date.now()};
+    if ($('#modalRoot')?.childElementCount) {deferToast(context);return;}
+    const glyph = kind === 'ok' ? 'circle-check' : kind === 'err' ? 'circle-alert' : kind === 'warn' ? 'triangle-alert' : 'info';
     const box = $('#toasts');
+    while(liveToasts.size>=3)liveToasts.values().next().value.dispose();
     const el = document.createElement('div');
     el.className = 'toast ' + kind;
     el.setAttribute('role',kind==='err'?'alert':'status');
-    el.innerHTML = `${ico(glyph, 18)}<span class="grow">${esc(message)}</span>`+
+    el.setAttribute('aria-atomic','true');
+    el.innerHTML = `${ico(glyph, 18)}<span class="grow"><b class="feedback-title">${esc(feedbackTitle(kind))}</b><span>${esc(message)}</span></span>`+
       `<button type="button" class="toast-x" aria-label="Đóng thông báo">${ico('x',16)}</button>`;
-    let autoTimer;
+    let autoTimer, exitTimer, remaining=kind==='err'?8000:5000, started=Date.now(), hovered=false, paused=false;
+    const dispose=()=>{clearTimeout(autoTimer);clearTimeout(exitTimer);liveToasts.delete(el);el.remove();};
     const leave=()=>{
       if(!el.isConnected||el.hasAttribute('data-leaving'))return;
       clearTimeout(autoTimer);
-      if(prefersReducedMotion()){el.remove();return;}
+      if(prefersReducedMotion()){dispose();return;}
       el.setAttribute('data-leaving','');
-      setTimeout(()=>el.remove(),200);
+      exitTimer=setTimeout(dispose,200);
     };
+    const pause=()=>{if(paused)return;paused=true;clearTimeout(autoTimer);remaining=Math.max(0,remaining-(Date.now()-started));};
+    const resume=()=>{if(hovered||el.contains(document.activeElement)||el.hasAttribute('data-leaving')||!paused)return;paused=false;started=Date.now();autoTimer=setTimeout(leave,remaining);};
+    el.addEventListener('mouseenter',()=>{if(!hovered){hovered=true;pause();}});
+    el.addEventListener('mouseleave',()=>{hovered=false;resume();});
+    el.addEventListener('focusin',()=>{if(!hovered)pause();});
+    el.addEventListener('focusout',event=>{if(!el.contains(event.relatedTarget))resume();});
     el.querySelector('.toast-x').addEventListener('click',leave);
     box.appendChild(el);
-    autoTimer=setTimeout(leave,kind==='err'?8000:5000);
+    liveToasts.set(el,{context,dispose});
+    autoTimer=setTimeout(leave,remaining);
   }
 
   /** Bọc một handler async: khoá nút, hiện spinner, bắt lỗi thành toast. */
@@ -696,7 +803,7 @@ const App = (() => {
       : key === 'order' && btn?.closest('.pd-buy') ? Array.from(btn.closest('.pd-buy').querySelectorAll('button,input,select,textarea')).map(el=>({el,disabled:el.disabled}))
       : btn?.dataset?.id && /^(prepare-secure:|secure:|ack:|pack:|wc:|release:|inspect:|dispute:|cancel-order:|shipping-address:|relist:|adm:)/.test(key)
         ? Array.from(document.querySelectorAll('button[data-id]')).filter(el=>el.dataset.id===btn.dataset.id).map(el=>({el,disabled:el.disabled})) : [];
-    if(inModal) {modalDismissible=false;controls.forEach(({el})=>{el.disabled=true;});}
+    if(inModal) {modalDismissible=false;inModal.setAttribute('aria-busy','true');controls.forEach(({el})=>{el.disabled=true;});}
     else controls.forEach(({el})=>{el.disabled=true;});
     if (btn) { btn.disabled = true; btn.innerHTML = ico('loader-circle', 17, 'spin') + ' Đang xử lý…'; }
     try {
@@ -708,9 +815,12 @@ const App = (() => {
       if (!(e && e.silent)) {
         const body=$('#modalRoot .modal-body');
         if(body && inModal && generation===modalGeneration && e.code !== 'DISPUTE_NOT_OPEN') {
-          body.querySelector('.operation-error')?.remove();
-          const message=document.createElement('div');message.className='note note-danger operation-error';message.setAttribute('role','alert');message.textContent=e.message;body.prepend(message);
-          message.scrollIntoView?.({block:'nearest',behavior:'auto'});
+          inlineFeedback(e.message,e.unknownOutcome||inModal.dataset.outcomeUnconfirmed==='true'?'warn':'err');
+          if((e.unknownOutcome||inModal.dataset.outcomeUnconfirmed==='true') && /^(release:|cancel-order:|adm:|paypal-abandon$|feedback-refresh$)/.test(key)) {
+            inModal.dataset.outcomeUnconfirmed='true';
+            const refresh=document.createElement('button');refresh.type='button';refresh.className='btn btn-sm mt-2';refresh.dataset.act='feedback-refresh';refresh.textContent='Kiểm tra lại trạng thái';
+            body.querySelector('.operation-error span').append(refresh);
+          }
         } else toast(e.message, 'err');
       }
       // Dữ liệu đang hiển thị đã cũ (tranh chấp đã được xử lý ở nơi khác): vẽ lại để nút không còn mời gọi
@@ -722,9 +832,14 @@ const App = (() => {
       throw e;
     } finally {
       state.busy.delete(key);
+      if(inModal?.isConnected)inModal.removeAttribute('aria-busy');
       if(inModal && generation===modalGeneration) {modalDismissible=oldDismissible;controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});}
       if(!inModal) controls.forEach(({el,disabled})=>{if(el.isConnected)el.disabled=disabled;});
       if (btn && btn.isConnected) { btn.disabled = false; btn.innerHTML = original; }
+      if(inModal?.isConnected&&inModal.dataset.outcomeUnconfirmed==='true') {
+        if(btn?.isConnected&&/^(release:|cancel-order:|adm:|paypal-abandon$)/.test(key)){btn.disabled=true;btn.textContent='Chờ kiểm tra kết quả';}
+        inModal.querySelectorAll('.modal-foot [data-act="modal-close"]').forEach(button=>{button.textContent='Đóng';});
+      }
       refreshPasskeyPreparationControls();
     }
   }
@@ -740,7 +855,7 @@ const App = (() => {
   //
   // Vì vậy việc diễn giải phải do ứng dụng làm, dựa trên NGỮ CẢNH — cùng một mã lỗi
   // NotAllowedError mang ý nghĩa khác nhau ở lúc đăng nhập, lúc gắn passkey và lúc xác thực
-  // lại để chuyển tiền. Nguyên văn lỗi kỹ thuật được ghi ra console cho người phát triển,
+  // lại để chuyển tiền. Console chỉ ghi loại thao tác và tên/mã lỗi,
   // không đưa lên giao diện.
 
   const WEBAUTHN_HINTS = {
@@ -898,9 +1013,8 @@ const App = (() => {
     try {
       return await fn();
     } catch (e) {
-      // Nguyên văn giữ lại cho người phát triển; giao diện chỉ nhận câu đã diễn giải.
-      console.error(`[webauthn:${kind}]`, e && e.name, e && e.code, e && e.message,
-        e && e.cause && e.cause.name, e && e.cause && e.cause.message);
+      // Chỉ ghi loại thao tác và mã lỗi; không ghi phản hồi xác thực hay lỗi lồng thô.
+      console.error(`[webauthn:${kind}]`, {name:e?.name,code:e?.code});
       const byKind = WEBAUTHN_HINTS[kind] || {};
       const errorName = (e && e.name) || (e && e.cause && e.cause.name);
       const message = byKind[errorName] || WEBAUTHN_CODE_HINTS[e && e.code] || WEBAUTHN_COMMON[errorName];
@@ -961,15 +1075,37 @@ const App = (() => {
     window.scrollTo(saved.x, saved.y);
   }
 
-  function openModal({ title, body, footer = '', wide = false, dismissible = true }) {
+  function openResultModal(options) {
+    // The final result replaces brief progress feedback from the completed action.
+    deferredToasts.length=0;
+    for(const item of liveToasts.values())item.dispose();
+    openModal({...options,purpose:'result'});
+  }
+
+  async function finishMoneyFeedback(options, refreshBalance=true) {
+    const epoch=state.sessionEpoch,hash=location.hash;
+    closeModal();
+    let refreshFailed=false;
+    try {if(refreshBalance)await refreshWallet({reportFailure:true});await route();}
+    catch(error){if(error.silent)return;refreshFailed=true;}
+    if(epoch!==state.sessionEpoch||hash!==location.hash)return;
+    openResultModal({...options,
+      body:options.body+(refreshFailed?'<p class="note note-warning">Kết quả thao tác đã được xác nhận, nhưng chưa tải lại được thông tin trên trang. Hãy kiểm tra lại trạng thái; bạn không cần thực hiện lại thao tác vừa xong.</p>':''),
+      footer:(refreshFailed?'<button class="btn" data-act="feedback-refresh">Kiểm tra lại trạng thái</button>':'')+(options.footer||''),
+    });
+  }
+
+  function openModal({ title, body, footer = '', wide = false, dismissible = true, purpose = 'form', tone = 'ok' }) {
     closeModal({ keepScrollLock: true });
+    suspendToasts();
     modalDismissible = dismissible;
+    const resultIcon = tone === 'warn' ? 'triangle-alert' : tone === 'err' ? 'circle-alert' : tone === 'info' ? 'info' : 'circle-check';
     const root = $('#modalRoot');
     root.innerHTML = `
       <div class="modal-backdrop"${dismissible ? ' data-act="modal-backdrop"' : ''}>
-        <div class="modal${wide ? ' wide' : ''}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
+        <div class="modal${wide ? ' wide' : ''}" data-dialog-purpose="${esc(purpose)}" data-result-level="${esc(tone)}" role="dialog" aria-modal="true" aria-labelledby="modalTitle" tabindex="-1">
           <div class="modal-head">
-            <h2 id="modalTitle">${esc(title)}</h2>
+            <h2 id="modalTitle">${purpose==='result'?`<span class="result-symbol" aria-hidden="true">${ico(resultIcon,22)}</span>`:''}${esc(title)}</h2>
             ${dismissible ? `<button class="icon-btn" data-act="modal-close" aria-label="Đóng">${ico('x', 18)}</button>` : ''}
           </div>
           <div class="modal-body">${body}</div>
@@ -1000,6 +1136,7 @@ const App = (() => {
     if (!keepScrollLock) unlockModalScroll();
     modalDismissible = true;
     state.paypalAbandonConfirmation = null;
+    Promise.resolve().then(drainFeedback);
   }
 
   // Đường đóng do NGƯỜI DÙNG kích hoạt (nút đóng, bấm nền, phím Escape) phải cùng tuân theo cờ
@@ -1027,6 +1164,7 @@ const App = (() => {
       clearPasskeyPreparations();
       orderIntents.clear();
       state.sessionEpoch++;
+      clearFeedback();
       resetTopupFlow(); // trạng thái nạp tiền trong bộ nhớ thuộc về phiên trước
       stopShippingWatch();
     }
@@ -1034,6 +1172,7 @@ const App = (() => {
   }
 
   function clearSession() {
+    clearFeedback();
     disposeMediaDraft();for(const controller of mediaControllers)controller.abort();cleanupMediaImages(true);
     clearPasskeyPreparations();
     orderIntents.clear();
@@ -1054,15 +1193,16 @@ const App = (() => {
     resetTopupFlow();
   }
 
-  async function refreshWallet() {
+  async function refreshWallet({reportFailure=false}={}) {
     const epoch = state.sessionEpoch;
     if (!state.token || !state.user || state.user.role === 'ADMIN') { state.wallet = null; return; }
     if(['BASIC','VERIFIED'].includes(state.user.accountStatus)){state.wallet=null;return;}
     try {
       const wallet = await api('/wallets/me');
       if (state.sessionEpoch === epoch) state.wallet = wallet;
-    } catch (_) {
+    } catch (error) {
       if (state.sessionEpoch === epoch) state.wallet = null;
+      if(reportFailure)throw error;
     }
   }
 
@@ -1256,7 +1396,7 @@ const App = (() => {
         </div>`,
     });
     if (!bootstrap) Promise.resolve(refreshPasskeyReadiness('setupPasskeyReadiness')).catch((error) => {
-      console.error('[passkey-readiness:setup]', error);
+      console.error('[passkey-readiness:setup]', {name:error?.name,code:error?.code});
       renderPasskeyReadiness('setupPasskeyReadiness', { ok: false, code: 'UNSUPPORTED' });
     });
     if (!bootstrap) preparePasskeyOptions('enroll');
@@ -1348,13 +1488,14 @@ const App = (() => {
   }
 
   async function doRegister(btn) {
-    for(const input of document.querySelectorAll('#authPanel input')) {if(!input.reportValidity()) return;}
+    for(const input of document.querySelectorAll('#authPanel input')) {if(!input.checkValidity()) return fieldFeedback(input.id,input.validationMessage||'Vui lòng kiểm tra thông tin này.');}
     const email=$('#regEmail').value.trim();
     const username = $('#regUsername').value.trim();
     const displayName = $('#regDisplayName').value.trim();
     const password = $('#regPassword').value;
-    if (!username || !displayName) return toast('Vui lòng nhập tên đăng nhập hoặc email và tên hiển thị', 'err');
-    if (!password) return toast('Vui lòng đặt mật khẩu', 'err');
+    if (!username) return fieldFeedback('regUsername','Vui lòng nhập tên đăng nhập.');
+    if (!displayName) return fieldFeedback('regDisplayName','Vui lòng nhập tên hiển thị.');
+    if (!password) return fieldFeedback('regPassword','Vui lòng đặt mật khẩu.');
 
     await guard('register', btn, async () => {
       const result = await api('/passkeys/register/account', {
@@ -1400,7 +1541,8 @@ const App = (() => {
   async function doBootstrapPassword(btn) {
     const currentPassword = $('#bootCurrent').value;
     const newPassword = $('#bootNew').value;
-    if (!currentPassword || !newPassword) return toast('Nhập cả mật khẩu tạm và mật khẩu mới', 'err');
+    if (!currentPassword) return fieldFeedback('bootCurrent','Nhập mật khẩu tạm hiện tại.');
+    if (!newPassword) return fieldFeedback('bootNew','Nhập mật khẩu mới.');
 
     await guard('bootpw', btn, async () => {
       const result = await api('/passkeys/bootstrap/password', {
@@ -1431,7 +1573,8 @@ const App = (() => {
   async function doLoginPassword(btn) {
     const username = ($('#loginUsername').value || '').trim();
     const password = $('#loginPassword').value;
-    if (!username || !password) return toast('Nhập tên đăng nhập hoặc email và mật khẩu', 'err');
+    if (!username) return fieldFeedback('loginUsername','Nhập tên đăng nhập hoặc email.');
+    if (!password) return fieldFeedback('loginPassword','Nhập mật khẩu của bạn.');
 
     await guard('loginpw', btn, async () => {
       const result = await api('/passkeys/login/password', { method: 'POST', body: { username, password } });
@@ -1743,7 +1886,7 @@ const App = (() => {
   async function submitSellerRequest(btn) {
     const shopName = $('#srShopName').value.trim();
     const pitch = $('#srPitch').value.trim();
-    if (shopName.length < 2) return toast('Tên cửa hàng phải từ 2 ký tự trở lên', 'err');
+    if (shopName.length < 2) return fieldFeedback('srShopName','Tên cửa hàng phải từ 2 ký tự trở lên.');
 
     await guard('seller-request', btn, () => api('/users/me/seller-request', {
       method: 'POST', body: { shopName, pitch },
@@ -2390,7 +2533,7 @@ const App = (() => {
     orderIntents.delete(listingId);
 
     openModal({
-      title: 'Đã tạo đơn hàng',
+      purpose: 'result', tone: 'info', title: 'Đã tạo đơn hàng',
       body: `
         <p>Đơn <b>${esc(txn.itemName)}</b> đã được tạo nhưng <b>chưa trừ tiền</b>.</p>
         ${moneyStrip(txn)}
@@ -2737,7 +2880,7 @@ const App = (() => {
     else await route();
     if (pending.epoch !== state.sessionEpoch) return;
     const refunded=txn.escrowStatus==='REFUNDED',released=txn.escrowStatus==='RELEASED',frozen=txn.escrowStatus==='FROZEN';
-    openModal({title:refunded?'Đã hoàn tiền về ví người mua':released?'Đã chuyển tiền cho người bán':frozen?'Đã thanh toán — tiền đang chờ giải quyết tranh chấp':'Đã thanh toán — tiền đang được giữ an toàn',body:`<p>${refunded?'Tiền của đơn này đã được trả lại vào ví người mua.':released?'Tiền của đơn này đã được chuyển cho người bán. Giao dịch đã kết thúc.':frozen?'Enclave đang giữ tiền trong khi quản trị viên xem xét tranh chấp. Người bán chưa nhận được tiền.':'Enclave đang giữ tiền của đơn này. Người bán chưa nhận được tiền.'}</p><p>Bạn không cần thanh toán lại cho đơn này.</p>`,footer:`<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button><a class="btn" href="#/tx/${esc(pending.id)}">Xem chi tiết đơn</a>`});
+    openResultModal({tone:frozen?'warn':'ok',title:refunded?'Đã hoàn tiền về ví người mua':released?'Đã chuyển tiền cho người bán':frozen?'Đã thanh toán — tiền đang chờ giải quyết tranh chấp':'Đã thanh toán — tiền đang được giữ an toàn',body:`<p>${refunded?'Tiền của đơn này đã được trả lại vào ví người mua.':released?'Tiền của đơn này đã được chuyển cho người bán. Giao dịch đã kết thúc.':frozen?'Enclave đang giữ tiền trong khi quản trị viên xem xét tranh chấp. Người bán chưa nhận được tiền.':'Enclave đang giữ tiền của đơn này. Người bán chưa nhận được tiền.'}</p><p>Bạn không cần thanh toán lại cho đơn này.</p>`,footer:`<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button><a class="btn" href="#/tx/${esc(pending.id)}">Xem chi tiết đơn</a>`});
   }
 
   async function confirmSecureOrder(btn){
@@ -2823,17 +2966,22 @@ const App = (() => {
   }
 
   async function waitConfirmOrder(id, btn) {
-    await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }),
-      'Đã ghi nhận bạn nhận được kiện hàng. Tiền chưa chuyển cho người bán.');
+    const result = await guard('wc:' + id, btn, () => api(`/transactions/${id}/wait-confirm`, { method: 'POST' }));
+    if (!result) return;
     closeModal();
     await route();
-    openModal({title:'Đã xác nhận nhận kiện',body:'<p>Hãy kiểm tra tình trạng, phụ kiện và mô tả của sản phẩm, rồi bấm <b>Đã kiểm hàng</b>. Nếu có vấn đề, bạn vẫn có thể mở tranh chấp.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Tiếp tục kiểm hàng</button>'});
+    openResultModal({tone:'info',title:'Đã xác nhận nhận kiện',body:'<p>Hãy kiểm tra tình trạng, phụ kiện và mô tả của sản phẩm, rồi bấm <b>Đã kiểm hàng</b>. Nếu có vấn đề, bạn vẫn có thể mở tranh chấp.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Tiếp tục kiểm hàng</button>'});
   }
 
   async function loadOrderForModal(id) {
     const epoch = state.sessionEpoch, generation = modalGeneration;
-    const t = await api('/transactions/' + encodeURIComponent(id));
-    return epoch === state.sessionEpoch && generation === modalGeneration ? t : null;
+    try {
+      const t = await api('/transactions/' + encodeURIComponent(id));
+      return epoch === state.sessionEpoch && generation === modalGeneration ? t : null;
+    } catch(error) {
+      if(!error.silent&&epoch===state.sessionEpoch&&generation===modalGeneration)inlineFeedback(error.message);
+      return null;
+    }
   }
 
   async function openOrderCancel(id, seller) {
@@ -2851,12 +2999,10 @@ const App = (() => {
 
   async function cancelOrder(id, seller, btn) {
     const reason = seller ? ($('#orderRejectReason')?.value || '').trim() : undefined;
-    if (seller && !reason) return toast('Vui lòng nêu lý do không thể giao hàng.', 'err');
-    const result = await guard('cancel-order:' + id, btn, () => api('/transactions/' + encodeURIComponent(id) + (seller ? '/reject' : '/cancel'), {method:'POST',body:seller ? {reason} : {}}));
-    closeModal();
-    await refreshWallet();
-    await route();
-    openModal({title:result?.escrowStatus === 'NONE' ? 'Đã hủy đơn nháp' : 'Đã hủy đơn hàng',body:result?.escrowStatus === 'NONE' ? '<p>Nháp đã đóng. Ví không thay đổi và không có khoản hoàn tiền vì đơn chưa thanh toán.</p>' : '<p>Tiền đã hoàn vào ví người mua. Đơn không tiếp tục giao hàng và không có khoản tiền nào chuyển cho người bán.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    if (seller && !reason) return fieldFeedback('orderRejectReason','Vui lòng nêu lý do không thể giao hàng.');
+    const result = await guard('cancel-order:' + id, btn, async () => confirmedTransactionResult(await api('/transactions/' + encodeURIComponent(id) + (seller ? '/reject' : '/cancel'), {method:'POST',body:seller ? {reason} : {}}),id,[['CANCELLED','NONE'],['CANCELLED','REFUNDED']]));
+    if (!result) return;
+    await finishMoneyFeedback({title:result.escrowStatus === 'NONE' ? 'Đã hủy đơn nháp' : 'Đã hủy đơn hàng',body:result.escrowStatus === 'NONE' ? '<p>Nháp đã đóng. Ví không thay đổi và không có khoản hoàn tiền vì đơn chưa thanh toán.</p>' : '<p>Tiền đã hoàn vào ví người mua. Đơn không tiếp tục giao hàng và không có khoản tiền nào chuyển cho người bán.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   async function openInspected(id) {
@@ -2871,7 +3017,7 @@ const App = (() => {
     if (!t) return;
     closeModal();
     await route();
-    openModal({title:'Đã ghi nhận kiểm hàng',body:'<p>Enclave vẫn giữ tiền. Nếu hàng đúng như thỏa thuận, bạn có thể xác nhận chuyển tiền cho người bán bằng Passkey. Nếu có vấn đề, hãy báo để quản trị viên xem xét.</p>',footer:`<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-trust" data-act="open-release" data-id="${esc(id)}">Xem lại trước khi chuyển tiền</button>`});
+    openResultModal({tone:'info',title:'Đã ghi nhận kiểm hàng',body:'<p>Enclave vẫn giữ tiền. Nếu hàng đúng như thỏa thuận, bạn có thể xác nhận chuyển tiền cho người bán bằng Passkey. Nếu có vấn đề, hãy báo để quản trị viên xem xét.</p>',footer:`<button class="btn" data-act="modal-close">Để sau</button><button class="btn btn-trust" data-act="open-release" data-id="${esc(id)}">Xem lại trước khi chuyển tiền</button>`});
   }
 
   function shippingSummary(shipping) {
@@ -2900,7 +3046,7 @@ const App = (() => {
     } catch(error) { if (error.fieldErrors) showShippingErrors(error.fieldErrors); throw error; }
     closeModal();
     await route();
-    openModal({title:'Đã lưu địa chỉ nhận hàng',body:'<p>Đã cập nhật địa chỉ nhận hàng của đơn này. Số tiền đang giữ không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    openResultModal({tone:'info',title:'Đã lưu địa chỉ nhận hàng',body:'<p>Đã cập nhật địa chỉ nhận hàng của đơn này. Số tiền đang giữ không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   function openDisputeModal(id, systemCase = false) {
@@ -2931,11 +3077,11 @@ const App = (() => {
   async function doDispute(id, btn) {
     const reason = $('#dsReason') ? $('#dsReason').value.trim() : '';
     const type = $('#dsType')?.value || '';
-    if (!Object.values(DISPUTE_CATEGORIES).some(c=>c.manual&&c.type===type)) return toast('Vui lòng chọn loại vấn đề bạn gặp phải.', 'err');
-    if (reason.length<10||reason.length>1000) return toast('Mô tả sự cố từ 10 đến 1000 ký tự.', 'err');
+    if (!Object.values(DISPUTE_CATEGORIES).some(c=>c.manual&&c.type===type)) return fieldFeedback('dsType','Vui lòng chọn loại vấn đề bạn gặp phải.');
+    if (reason.length<10||reason.length>1000) return fieldFeedback('dsReason','Mô tả sự cố từ 10 đến 1000 ký tự.');
     let response;
     const scope=await submitMediaForm('dispute:' + id, btn, async imageIds=>{response=await api(`/transactions/${encodeURIComponent(id)}/dispute`, { method: 'POST', body: { reason, type, imageIds } });return response;},
-      {successMsg:'Đã gửi yêu cầu giải quyết tranh chấp. Enclave đang giữ tiền của đơn.'});
+      {});
     const code=disputeCode(response?.dispute||{});
     await finishMediaForm(scope,{title:code?'Đã lưu hồ sơ '+code:'Đã lưu nội dung tranh chấp',body:`${response?.dispute?disputeTypeSummary(response.dispute):''}<p>Enclave đang giữ tiền trong khi xem xét vấn đề. Nếu đơn đã có yêu cầu đang xử lý, nội dung mới sẽ được thêm vào đó; bạn không bị trừ tiền thêm.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
@@ -2947,7 +3093,7 @@ const App = (() => {
 
   async function sendDisputeMessage(id, btn) {
     const message = ($('#disputeMessage')?.value || '').trim();
-    if (message.length<5 || message.length>1000) return toast('Nhập nội dung từ 5 đến 1000 ký tự.', 'err');
+    if (message.length<5 || message.length>1000) return fieldFeedback('disputeMessage','Nhập nội dung từ 5 đến 1000 ký tự.');
     const scope=await submitMediaForm('dispute:' + id, btn, imageIds=>api('/transactions/' + encodeURIComponent(id) + '/dispute/messages',{method:'POST',body:{message,imageIds}}));
     await finishMediaForm(scope,{title:'Đã lưu nội dung bổ sung',body:'<p>Nội dung được thêm vào hồ sơ hiện có. Thao tác này không chuyển tiền và không tự thay đổi loại hồ sơ.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
@@ -2985,22 +3131,19 @@ const App = (() => {
   }
 
   async function doRelease(id, btn) {
-    await guard('release:' + id, btn, async () => {
+    const result = await guard('release:' + id, btn, async () => {
       const { reauthSessionId, options } = await api(`/transactions/${id}/reauth/options`, { method: 'POST', body:{action:'RELEASE_ESCROW'} });
       const assertion = await webauthn('reauth', () =>
         SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
       const { reauthGrant } = await api(`/transactions/${id}/reauth/verify`, {
         method: 'POST', body: { reauthSessionId, response: assertion },
       });
-      return api(`/transactions/${id}/release`, {
+      return confirmedTransactionResult(await api(`/transactions/${id}/release`, {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
-      });
-    }, 'Đã chuyển toàn bộ tiền của đơn cho người bán.');
-
-    closeModal();
-    await refreshWallet();
-    await route();
-    openModal({title:'Đã chuyển tiền cho người bán',body:'<p>Tiền của đơn đã chuyển cho người bán. Đơn đã hoàn tất; bạn không thể tự hủy để lấy lại số tiền này.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+      }),id,[['COMPLETED','RELEASED']]);
+    });
+    if (!result) return;
+    await finishMoneyFeedback({title:'Đã chuyển tiền cho người bán',body:'<p>Tiền của đơn đã chuyển cho người bán. Đơn đã hoàn tất; bạn không thể tự hủy để lấy lại số tiền này.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   /**
@@ -3167,7 +3310,7 @@ const App = (() => {
     else openModal({title:'Xác nhận email',dismissible:false,body:`${who}<p>Bấm xác nhận để xác minh email cho phiên đăng nhập này. Việc này không tạo ví hay Passkey.</p>`,footer:dismiss+'<button class="btn btn-primary" data-act="email-link-confirm">Xác nhận email</button>'});
   }
   async function verifyEmailUi(btn){
-    const code=$('#emailVerificationCode').value.trim();if(!/^\d{6}$/.test(code))return toast('Hãy nhập đủ 6 chữ số.','err');
+    const code=$('#emailVerificationCode').value.trim();if(!/^\d{6}$/.test(code))return fieldFeedback('emailVerificationCode','Hãy nhập đủ 6 chữ số.');
     await guard('verify-email',btn,async()=>{const result=await api('/passkeys/email/verify',{method:'POST',body:{code}});setSession(result.token,result.user);renderChrome();if(authUi.activation)openSetupModal(result.user);else{closeModal();await route();}});
   }
   function openLegacyEmailSetup(){
@@ -3194,7 +3337,7 @@ const App = (() => {
     openEmailRecoveryRequest('recovery');
   }
   function openRecoveryCode(){
-    if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return toast('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
+    if(!state.user || !['ACTIVE','RECOVERING'].includes(state.user.accountStatus)){state.recoverAfterLogin=true;openAuthModal('login');return inlineFeedback('Hãy đăng nhập bằng mật khẩu trước, rồi nhập mã khôi phục.','info');}
     openModal({title:'Khôi phục bằng mã dự phòng',body:`${authField('recoveryCurrentPassword','Mật khẩu hiện tại','password')}${authField('recoveryCode','Mã khôi phục (XXXXX-XXXXX)')}<p class="hint">Mã được dùng một lần. Sau khi tạo Passkey mới, Passkey và các phiên cũ sẽ bị thu hồi.</p>`,footer:'<button class="btn" data-act="modal-close">Hủy</button><button class="btn btn-primary" data-act="recovery-code-verify">Xác minh và tiếp tục</button>'});
   }
   function openEmailRecoveryRequest(kind='recovery'){
@@ -3220,7 +3363,7 @@ const App = (() => {
     const passwordInput=$('#recoveryNewPassword');
     // Reject a missing required password before creating a credential on the
     // device. This synchronous check preserves the next valid tap's ceremony.
-    if(passwordInput&&!passwordInput.reportValidity())return;
+    if(passwordInput&&!passwordInput.checkValidity())return fieldFeedback(passwordInput.id,passwordInput.validationMessage||'Kiểm tra lại mật khẩu.');
     const scope=ceremonyScope(),prepared=takePreparedPasskey('recovery');if(!prepared)return;
     await guard('recovery-create',btn,async()=>{
       try {
@@ -3407,7 +3550,7 @@ const App = (() => {
   async function doChangePassword(btn) {
     const currentPassword=$('#currentPassword').value;
     const newPassword = $('#newPassword').value;
-    if (!newPassword) return toast('Nhập mật khẩu mới', 'err');
+    if (!newPassword) return fieldFeedback('newPassword','Nhập mật khẩu mới.');
 
     await guard('chpw', btn, async () => {
       const reauthGrant = await getAccountGrant('CHANGE_PASSWORD');
@@ -3521,7 +3664,7 @@ const App = (() => {
     await guard('relist:' + id, btn, () => api('/listings/' + encodeURIComponent(id) + '/relist',{method:'POST',body:{confirmed:true}}));
     closeModal();
     await route();
-    openModal({title:'Đã mở bán lại',body:'<p>Tin đăng có thể nhận người mua mới. Đơn và lịch sử thanh toán của lần mua bán trước được giữ nguyên.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+    openResultModal({tone:'info',title:'Đã mở bán lại',body:'<p>Tin đăng có thể nhận người mua mới. Đơn và lịch sử thanh toán của lần mua bán trước được giữ nguyên.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
   }
 
   // ---------- Form đăng / sửa tin ----------
@@ -3616,8 +3759,8 @@ const App = (() => {
   async function saveListing(btn) {
     const id = btn.dataset.id;
     const payload = readListingForm();
-    if (!payload.title) return toast('Nhập tiêu đề tin', 'err');
-    if (!payload.price || payload.price < 1000) return toast('Giá bán tối thiểu 1.000₫', 'err');
+    if (!payload.title) return fieldFeedback('lsTitle','Nhập tiêu đề tin.');
+    if (!payload.price || payload.price < 1000) return fieldFeedback('lsPrice','Giá bán tối thiểu 1.000₫.');
 
     // Tin đã có người thanh toán: máy chủ chặn đổi giá, nên không gửi trường này lên.
     if (id && btn.dataset.busy === '1') delete payload.price;
@@ -3626,11 +3769,12 @@ const App = (() => {
       imageIds => {if(imageIds!==undefined)payload.imageIds=imageIds;return id
         ? api('/listings/' + encodeURIComponent(id), { method: 'PATCH', body: payload })
         : api('/listings', { method: 'POST', body: payload });},
-      {editing:!!id,successMsg:id ? 'Đã lưu thay đổi.' : 'Đã đăng tin.'});
+      {editing:!!id});
 
     if(!scope||!mediaSubmissionAlive(scope))return;
     closeModal();
-    if (!id && currentHead() !== 'shop') { location.hash = '#/shop'; return; }
+    if (!id && currentHead() !== 'shop') { location.hash = '#/shop'; toast('Đã đăng tin.','ok'); return; }
+    toast(id?'Đã lưu thay đổi.':'Đã đăng tin.','ok');
     route();
   }
 
@@ -4078,7 +4222,7 @@ const App = (() => {
     let intent = loadIntent();
     if (!intent) {
       const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      if (!Number.isInteger(amount) || amount < 1000) return fieldFeedback('topupAmount','Nhập số tiền là số nguyên, tối thiểu 1.000₫.');
       intent = startIntent(amount); // lưu TRƯỚC khi gửi: tải lại giữa chừng vẫn phục hồi được
     }
     const ctx = topupCtx(intent.requestId); // lấy dấu phiên + ý định lúc bắt đầu; không có await nào trước guard
@@ -4184,8 +4328,7 @@ const App = (() => {
   async function announceTerminal(row, ctx) {
     if (!ctxAlive(ctx)) return;
     if (row.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[row.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[row.resolvedBy] : ''}: ${money(row.amount)} đã vào ví.`, 'ok');
-      await refreshWallet();
+      await presentConfirmedTopup(row,ctx);
     } else if (row.status === 'FAILED') {
       toast('Yêu cầu nạp này đã thất bại. Ví của bạn không thay đổi.', 'err');
     }
@@ -4541,8 +4684,7 @@ const App = (() => {
       }
       if (ctx.requestId && !ctx.released) releaseIntent(ctx);
       setTopupNotice(null);
-      toast(`Nạp tiền thành công: ${money(confirmed.amount)} đã vào ví (PayPal Sandbox ${confirmed.quote.usdValue} USD).`, 'ok');
-      await refreshWallet();
+      await presentConfirmedTopup(confirmed,ctx);
       if (!ctxAlive(ctx)) return;
       if (currentHead() === 'wallet') route(); else renderChrome();
       return;
@@ -4569,7 +4711,7 @@ const App = (() => {
     let intent = loadIntent();
     if (!intent) {
       const amount = Number($('#topupAmount') ? $('#topupAmount').value : NaN);
-      if (!Number.isInteger(amount) || amount < 1000) return toast('Nhập số tiền là số nguyên, tối thiểu 1.000₫', 'err');
+      if (!Number.isInteger(amount) || amount < 1000) return fieldFeedback('topupAmount','Nhập số tiền là số nguyên, tối thiểu 1.000₫.');
       intent = startIntent(amount, PAYPAL_PROVIDER); // lưu TRƯỚC khi gửi
     }
     const ctx = topupCtx(intent.requestId);
@@ -4714,36 +4856,35 @@ const App = (() => {
     const pending = state.paypalAbandonConfirmation;
     if (!pending || !ctxAlive(pending.ctx) || state.busy.has('paypal-abandon')) return;
     const { ctx, row } = pending;
-    closeModal();
-    let body = null;
-    try {
-      body = await guard('paypal-abandon', btn, () => api('/payments/paypal/' + encodeURIComponent(row.id) + '/abandon',
-        { method: 'POST', body: {}, allowAuthRetry: false }));
-    } catch (e) { if ((e && e.stale) || !ctxAlive(ctx)) return; }
-    if (!ctxAlive(ctx)) return;
-    // POST (including 409/timeout) is never proof of the final state. Do not retry it automatically.
-    const fresh = await confirmPaypalByGet(row, ctx);
-    if (!ctxAlive(ctx)) return;
-    if (!fresh) {
-      setTopupNotice({ kind: 'unconfirmed', paymentId: row.id });
-      toast('Chưa xác nhận được kết quả bỏ yêu cầu. Hãy kiểm tra lại trạng thái.');
-      return;
-    }
-    if (fresh.stage === 'SUCCEEDED') {
-      await settlePaypalRow(fresh, { ctx, fromGet: true });
-      return;
-    }
-    // Recovery evidence wins over FAILED. Keep the intent and never report an abandoned outcome for it.
-    setTopupNotice({ kind: 'paypal', row: fresh });
-    if (fresh.status === 'FAILED' && fresh.stage === 'FAILED') {
-      if (ctx.requestId && !ctx.released) releaseIntent(ctx);
-      renderTopupIntent();
-      const confirmed = readPaypalRow(body, { id: row.id, requestId: row.requestId, amount: row.amount });
-      const abandoned = confirmed && confirmed.status === 'FAILED' && confirmed.stage === 'FAILED'
-        && ['ABANDONED', 'ALREADY_ABANDONED'].includes(body.outcome);
-      toast(abandoned ? 'Đã bỏ yêu cầu nạp. Ví không đổi; lần nạp mới sẽ dùng mã mới.' : 'Yêu cầu nạp đã đóng theo trạng thái máy chủ.');
-    }
-    await loadTopupHistory().catch(() => {});
+    await guard('paypal-abandon',btn,async()=>{
+      let body=null;
+      try {
+        body=await api('/payments/paypal/'+encodeURIComponent(row.id)+'/abandon',{method:'POST',body:{},allowAuthRetry:false});
+      } catch(error) {if(error.silent||!ctxAlive(ctx))throw error;}
+      if(!ctxAlive(ctx))return;
+      // Even a successful POST is not final proof. Keep the dialog locked through the canonical GET.
+      const fresh=await confirmPaypalByGet(row,ctx);
+      if(!ctxAlive(ctx))return;
+      if(!fresh){
+        setTopupNotice({kind:'unconfirmed',paymentId:row.id});
+        throw Object.assign(new Error('Chưa xác nhận được kết quả hủy yêu cầu nạp. Hãy kiểm tra lại trạng thái trước khi tạo lần nạp mới.'),{unknownOutcome:true});
+      }
+      if(fresh.stage==='SUCCEEDED'){
+        closeModal();await settlePaypalRow(fresh,{ctx,fromGet:true});return;
+      }
+      setTopupNotice({kind:'paypal',row:fresh});
+      if(fresh.status==='FAILED'&&fresh.stage==='FAILED'){
+        if(ctx.requestId&&!ctx.released)releaseIntent(ctx);
+        renderTopupIntent();
+        const confirmed=readPaypalRow(body,{id:row.id,requestId:row.requestId,amount:row.amount});
+        const abandoned=confirmed&&confirmed.status==='FAILED'&&confirmed.stage==='FAILED'&&['ABANDONED','ALREADY_ABANDONED'].includes(body.outcome);
+        openResultModal({tone:'info',title:abandoned?'Đã hủy yêu cầu nạp':'Yêu cầu nạp đã đóng',body:abandoned?'<p>Đã bỏ yêu cầu nạp. Ví không đổi. Lần nạp mới sẽ dùng một mã yêu cầu mới.</p>':'<p>Enclave xác nhận yêu cầu nạp này đã đóng. Ví không thay đổi.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});
+      } else {
+        closeModal();
+        toast('Yêu cầu chưa được hủy. Hãy xem trạng thái xử lý bên dưới.','warn');
+      }
+      await loadTopupHistory().catch(()=>{});
+    });
   }
 
   /** Tự hoàn tất một lần sau return đã xác minh. Không bao giờ gửi lại POST tự động; luôn GET lại làm chứng cứ. */
@@ -4953,10 +5094,9 @@ const App = (() => {
     if (result.cancelled || !ctxAlive(ctx)) return; // đã rời trang ví / đăng xuất / đổi tài khoản: không báo gì thay họ
     const p = result.row;
     if (p && p.status === 'SUCCEEDED') {
-      toast(`Nạp tiền thành công${RESOLVED_BY_LABEL[p.resolvedBy] ? ' ' + RESOLVED_BY_LABEL[p.resolvedBy] : ''}: ${money(p.amount)} đã vào ví.`, 'ok');
-      await refreshWallet();
-      if (!ctxAlive(ctx)) return;
       setTopupNotice(null);
+      await presentConfirmedTopup(p,ctx);
+      if (!ctxAlive(ctx)) return;
     } else if (p && p.status === 'FAILED') {
       toast('Cổng thanh toán báo thất bại. Ví của bạn không thay đổi.', 'err');
       setTopupNotice(null);
@@ -5131,7 +5271,7 @@ const App = (() => {
             </div>
             ${t.dispute ? disputeCard(t.dispute, t.disputeMessages, t) : ''}
             <div class="card">
-              <div class="card-head"><h3>Nhật ký chi tiết</h3></div>
+              <div class="card-head"><h3>Lịch sử đơn hàng</h3></div>
               <div class="card-body">
                 ${logs.map((l) => `
                   <div class="log-row">
@@ -5496,7 +5636,7 @@ const App = (() => {
 
   async function rejectSellerRequest(id, btn) {
     const note = $('#srReject') ? $('#srReject').value.trim() : '';
-    if (!note) return toast('Vui lòng nêu lý do từ chối', 'err');
+    if (!note) return fieldFeedback('srReject','Vui lòng nêu lý do từ chối.');
     await guard('sr-reject:' + id, btn, () => api(`/admin/seller-requests/${id}/reject`, {
       method: 'POST', body: { note },
     }), 'Đã từ chối yêu cầu.');
@@ -5635,7 +5775,8 @@ const App = (() => {
 
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
-    await guard('adm:' + disputeId, btn, async () => {
+    const dispute = disputeCache.get(disputeId);
+    const result = await guard('adm:' + disputeId, btn, async () => {
       const { reauthSessionId, options } = await api(`/admin/disputes/${disputeId}/reauth/options`, {
         method: 'POST', body: { decision },
       });
@@ -5644,12 +5785,15 @@ const App = (() => {
       const { reauthGrant } = await api(`/admin/disputes/${disputeId}/reauth/verify`, {
         method: 'POST', body: { reauthSessionId, response: assertion },
       });
-      return api(`/admin/disputes/${disputeId}/${kind}`, {
+      const outcome = await api(`/admin/disputes/${disputeId}/${kind}`, {
         method: 'POST', body: { requestId: newRequestId(), reauthGrant },
       });
-    }, kind === 'refund' ? 'Đã hoàn toàn bộ tiền cho người mua.' : 'Đã chuyển toàn bộ tiền cho người bán.');
-    closeModal();
-    route();
+      confirmedTransactionResult(outcome?.transaction,dispute?.transactionId || dispute?.transaction?.id,kind === 'refund' ? [['REFUNDED','REFUNDED']] : [['RELEASED','RELEASED']]);
+      if (outcome?.dispute?.id !== disputeId) throw Object.assign(new Error('Chưa xác nhận được kết quả xử lý hồ sơ. Hãy kiểm tra lại trạng thái.'),{unknownOutcome:true});
+      return outcome;
+    });
+    if (!result) return;
+    await finishMoneyFeedback({title:kind === 'refund' ? 'Đã hoàn tiền cho người mua' : 'Đã chuyển tiền cho người bán',body:`<p>Hồ sơ đã được xử lý. Toàn bộ tiền của đơn ${kind === 'refund' ? 'đã về ví người mua' : 'đã chuyển vào ví người bán'}.</p><p>Kết quả được lưu trong lịch sử đơn hàng.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'},false);
   }
 
   // ---------- Quản trị: người dùng ----------
@@ -5783,21 +5927,22 @@ const App = (() => {
 
     view().innerHTML = `
       <div class="page">
-        ${banner('Nhật ký & Hash Chain',
-          'Mỗi đơn hàng có một chuỗi băm riêng: log sau chứa hash của log trước. Sửa lén một dòng trong database sẽ làm gãy chuỗi và bị phát hiện ngay')}
+        ${banner('Lịch sử và kiểm tra đơn hàng',
+          'Các bước xử lý được lưu theo thời gian. Bạn có thể kiểm tra xem những bản ghi hiện có có khớp với chuỗi băm của đơn hay không.')}
 
         <div class="card"><div class="card-body">
           <div class="row">
             <div class="input-wrap grow">
               ${ico('search', 16)}
-              <input id="auditTxId" type="text" placeholder="Dán mã giao dịch..." value="${esc(txId || '')}">
+              <input id="auditTxId" aria-label="Mã đơn hàng cần tra cứu" type="text" placeholder="Dán mã đơn hàng..." value="${esc(txId || '')}">
             </div>
             <button class="btn" data-act="audit-load">Xem nhật ký</button>
-            <button class="btn btn-primary" data-act="audit-verify">${ico('shield-check', 17)} Kiểm chứng chuỗi</button>
+            <button class="btn btn-primary" data-act="audit-verify">${ico('shield-check', 17)} Kiểm tra lịch sử</button>
           </div>
-          <p class="muted tiny mt-10px">Mã giao dịch nằm ở trang chi tiết giao dịch (nút "Xem chi tiết lịch sử").</p>
+          <p class="muted tiny mt-10px">Bạn có thể lấy mã đơn ở trang chi tiết đơn hàng.</p>
         </div></div>
 
+        <div id="auditVerification" hidden></div>
         <div id="auditResult"></div>
       </div>`;
 
@@ -5807,12 +5952,16 @@ const App = (() => {
   async function loadAudit(txId) {
     const box = $('#auditResult');
     if (!box) return;
-    if (!txId) return toast('Nhập mã đơn hàng', 'err');
+    if (!txId) return fieldFeedback('auditTxId','Nhập mã đơn hàng cần tra cứu.');
+    const epoch=state.sessionEpoch;
+    const current=()=>box.isConnected&&epoch===state.sessionEpoch&&$('#auditTxId')?.value.trim()===txId;
+    const verification=$('#auditVerification');if(verification){verification.hidden=true;verification.textContent='';}
     box.innerHTML = '<div class="skeleton h-160"></div>';
     try {
       const { logs } = await api(`/transactions/${encodeURIComponent(txId)}/logs`);
+      if(!current())return;
       if (logs.length === 0) {
-        box.innerHTML = empty('file-text', 'Đơn này chưa có log', 'Có thể mã đơn chưa đúng.');
+        box.innerHTML = empty('file-text', 'Đơn này chưa có lịch sử', 'Có thể mã đơn chưa đúng.');
         return;
       }
       box.innerHTML = `
@@ -5837,22 +5986,28 @@ const App = (() => {
           </div>
         </div>`;
     } catch (e) {
-      box.innerHTML = empty('ban', 'Không xem được nhật ký', e.message);
+      if(current()&&!e.silent)box.innerHTML = empty('ban', 'Không xem được lịch sử', e.message);
     }
   }
 
   async function verifyAudit(btn) {
     const txId = $('#auditTxId').value.trim();
-    if (!txId) return toast('Nhập mã đơn hàng', 'err');
-    const result = await guard('verify', btn, () => api(`/transactions/${encodeURIComponent(txId)}/logs/verify`));
-    if (!result) return;
-
-    if (result.valid) {
-      toast(`Hash Chain hợp lệ — đã kiểm tra ${result.checkedCount} bản ghi, không có dấu hiệu bị sửa.`, 'ok');
-    } else {
-      toast(`Hash Chain không hợp lệ — phát hiện sai lệch tại bản ghi #${result.invalidLogId}.`, 'err');
-    }
+    if (!txId) return fieldFeedback('auditTxId','Nhập mã đơn hàng cần tra cứu.');
+    if(state.busy.has('verify'))return;
+    const box=$('#auditVerification'),epoch=state.sessionEpoch;
+    const current=()=>box?.isConnected&&epoch===state.sessionEpoch&&$('#auditTxId')?.value.trim()===txId;
+    const show=(kind,message)=>{if(!current())return;box.hidden=false;box.className='note mb-4'+(kind==='err'?' note-danger':kind==='ok'?' note-success':kind==='warn'?' note-warning':'');box.setAttribute('role',kind==='err'?'alert':'status');box.textContent=message;};
+    show('info','Đang kiểm tra lịch sử đơn hàng…');
+    const result = await guard('verify', btn, async()=>{
+      try{return await api(`/transactions/${encodeURIComponent(txId)}/logs/verify`);}
+      catch(error){if(!error.silent)show('warn','Chưa kiểm tra được lịch sử. '+error.message);return null;}
+    });
+    if (!result||!current()) return;
+    // Loading the rows must not erase the separate, persistent verification result.
     await loadAudit(txId);
+    if(result.valid===true&&Number.isSafeInteger(result.checkedCount)&&result.checkedCount>=0)show('ok',`Lần kiểm tra này: ${result.checkedCount} bản ghi hiện có khớp với chuỗi băm của đơn. Kết quả này không xác nhận chất lượng hàng hay việc giao nhận thực tế.`);
+    else if(result.valid===false)show('err',`Lịch sử có điểm không khớp${result.invalidLogId!=null?' tại bản ghi #'+result.invalidLogId:''}. Cần quản trị viên kiểm tra; đây không phải kết luận về bên mua hay bên bán.`);
+    else show('warn','Chưa nhận được kết quả kiểm tra đầy đủ. Hãy kiểm tra lại sau.');
   }
 
   // =====================================================================
@@ -5893,6 +6048,7 @@ const App = (() => {
     'media-overlay-close': () => closeMediaOverlay(),
     'media-discard-confirm': () => { if (!mediaDraftBusy()) closeModal(); },
     'reload': () => route(),
+    'feedback-refresh': async (el) => {await guard('feedback-refresh',el,async()=>{await refreshWallet({reportFailure:true});closeModal();await route();});},
     'open-sell': () => openSell(),
     'passkey-check': (el) => refreshPasskeyReadiness(el.dataset.target),
     'go-home': () => resetAndGoHome(),
@@ -5974,11 +6130,11 @@ const App = (() => {
       if(start!==null&&end!==null)input.setSelectionRange(start,end);
     },
     'auth-terms':()=>openModal({title:'Điều khoản và quyền riêng tư của bản demo',body:'<p>Enclave là hệ thống mô phỏng phục vụ đồ án. Số dư trong ví không phải tiền gửi ngân hàng và không có chức năng rút tiền thật.</p><p>Email dùng để xác minh, thông báo bảo mật và khôi phục. Khóa công khai Passkey được lưu trên máy chủ; khóa riêng và dữ liệu sinh trắc học được xử lý bởi thiết bị hoặc nhà cung cấp Passkey. Không chia sẻ mật khẩu và mã khôi phục.</p>',footer:'<button class="btn" data-act="open-auth-register">Quay lại đăng ký</button>'}),
-    'copy-site-link':async()=>{try{await navigator.clipboard.writeText(location.origin+location.pathname);toast('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{toast('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
+    'copy-site-link':async()=>{const generation=modalGeneration,epoch=state.sessionEpoch;const notify=(text,kind)=>{if(generation===modalGeneration&&epoch===state.sessionEpoch)($('#modalRoot')?.childElementCount?inlineFeedback:toast)(text,kind);};try{await navigator.clipboard.writeText(location.origin+location.pathname);notify('Đã sao chép. Mở liên kết trong Chrome, Edge hoặc Safari.','ok');}catch{notify('Hãy mở https://enclave.id.vn trong Chrome, Edge hoặc Safari.','info');}},
     'email-verify':verifyEmailUi,
     'email-resend':(el)=>requestEmailCode(el,false),
     'legacy-email':async(el)=>{const email=$('#legacyEmail').value;await guard('legacy-email',el,async()=>{const result=await api('/passkeys/email/enroll/request',{method:'POST',body:{email}});state.user.email=email;state.user.emailVerified=false;state.user.accountStatus='BASIC';openEmailVerification({...state.user,...result});});},
-    'device-name-save':async(el)=>{const name=$('#deviceNameInput').value.trim(),callback=authUi.nameCallback;if(!name)return toast('Hãy đặt tên Passkey.','err');await guard('device-name',el,()=>callback(name));},
+    'device-name-save':async(el)=>{const name=$('#deviceNameInput').value.trim(),callback=authUi.nameCallback;if(!name)return fieldFeedback('deviceNameInput','Hãy đặt tên Passkey.');await guard('device-name',el,()=>callback(name));},
     'restart-setup':()=>{authUi.nameCallback=null;openSetupModal(state.user);},
     'resume-setup':()=>state.user?.authMethod==='recovery'?openRecoveryPasskey(authUi.recoveryEmail):beginActivation('Kích hoạt ví để bắt đầu mua bán.',()=>route()),
     'activate-wallet':()=>beginActivation('Bạn đang kích hoạt ví để nạp tiền.',()=>route()),
@@ -6019,7 +6175,7 @@ const App = (() => {
     'recovery-email-open':()=>openEmailRecoveryRequest('recovery'),
     'recovery-email-request':async(el)=>{
       const email=$('#recoveryEmail').value.trim(),kind=authUi.action,generation=modalGeneration;
-      if(!$('#recoveryEmail').reportValidity())return;
+      if(!$('#recoveryEmail').checkValidity())return fieldFeedback('recoveryEmail','Nhập địa chỉ email hợp lệ.');
       await guard('recovery-email',el,async()=>{
         const result=await api(kind==='password'?'/passkeys/password-reset/request':'/passkeys/recovery/email/request',{method:'POST',body:{email}});
         if(generation!==modalGeneration)return;
@@ -6037,7 +6193,7 @@ const App = (() => {
     },
     'recovery-email-code-verify':async(el)=>{
       const context=authUi.recoveryOtp,generation=modalGeneration,input=$('#recoveryEmailCode');
-      if(!context||!input?.reportValidity())return;
+      if(!context||!input)return;if(!input.checkValidity())return fieldFeedback('recoveryEmailCode','Nhập mã xác minh hợp lệ trong email.');
       await guard('recovery-email-code',el,async()=>{
         const result=await api('/passkeys/recovery/email/verify',{method:'POST',body:{requestToken:context.requestToken,code:input.value}});
         if(generation!==modalGeneration||authUi.recoveryOtp!==context)return;
@@ -6049,9 +6205,9 @@ const App = (() => {
     'recovery-code-verify':async(el)=>{const password=$('#recoveryCurrentPassword').value,code=$('#recoveryCode').value;await guard('recovery-code',el,async()=>{const result=await api('/passkeys/recovery/code',{method:'POST',body:{password,code}});await afterSession(result);});},
     'recovery-passkey-create':(el)=>createRecoveryPasskey(el),
     'recovery-link-confirm':async(el)=>{const kind=authUi.action,token=authUi.linkToken;await guard('recovery-link',el,async()=>{const path=kind==='recovery-start'?'/recovery/email/start':kind==='recovery-cancel'?'/recovery/cancel':'/recovery/email/authorize';const result=await api('/passkeys'+path,{method:'POST',body:{token}});authUi.linkToken=null;if(kind==='recovery-finish'){await afterSession(result);return;}openModal({title:kind==='recovery-cancel'?'Đã hủy yêu cầu':'Đang chờ khôi phục',body:`<p>${esc(result.message)}</p>${result.availableAt?`<p>Có thể tiếp tục sau ${fmtDateTime(result.availableAt)}. Chúng tôi sẽ gửi email khi đến lúc.</p>`:''}`,footer:'<button class="btn" data-act="modal-close">Đã hiểu</button>'});});},
-    'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');toast('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
+    'reset-password-complete':async(el)=>{const newPassword=$('#resetNewPassword').value,token=authUi.linkToken;await guard('reset-password',el,async()=>{await api('/passkeys/password-reset/complete',{method:'POST',body:{token,newPassword}});authUi.linkToken=null;clearSession();openAuthModal('login');inlineFeedback('Đã đặt lại mật khẩu. Hãy đăng nhập lại.','ok');});},
     'recovery-regenerate':async(el)=>{await guard('regenerate-codes',el,async()=>{const reauthGrant=await getAccountGrant('REGENERATE_RECOVERY');const result=await api('/passkeys/recovery-codes/regenerate',{method:'POST',body:{reauthGrant}});showRecoveryCodes(result.recoveryCodes);});},
-    'recovery-codes-copy':async()=>{try{await navigator.clipboard.writeText(authUi.codes.join('\n'));codesSaved();toast('Đã sao chép mã khôi phục.','ok');}catch{toast('Không thể sao chép. Hãy dùng nút Tải xuống.','err');}},
+    'recovery-codes-copy':async()=>{const codes=authUi.codes,generation=modalGeneration;try{if(!codes)return;await navigator.clipboard.writeText(codes.join('\n'));if(generation!==modalGeneration||authUi.codes!==codes)return;codesSaved();inlineFeedback('Đã sao chép mã khôi phục. Hãy lưu ở nơi riêng tư.','ok');}catch{if(generation===modalGeneration)inlineFeedback('Không thể sao chép. Hãy dùng nút Tải xuống.','err');}},
     'recovery-codes-download':()=>{const blob=new Blob(['Mã khôi phục Enclave — giữ riêng tư, mỗi mã dùng một lần.\n'+authUi.codes.join('\n')],{type:'text/plain;charset=utf-8'}),url=URL.createObjectURL(blob),a=document.createElement('a');a.href=url;a.download='enclave-ma-khoi-phuc.txt';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);codesSaved();},
     'recovery-codes-done':async(el)=>{if(!authUi.codesSaved||!$('#recoveryCodesAcknowledged').checked)return;await guard('ack-codes',el,async()=>{await api('/passkeys/recovery-codes/acknowledge',{method:'POST',body:{}});authUi.codes=null;state.user.recoveryAcknowledged=true;await finishActivation();if(currentHead()==='security')await loadSecurityDetails();});},
     'sessions-revoke-others':async(el)=>{await guard('sessions-revoke',el,()=>api('/passkeys/sessions/revoke-others',{method:'POST',body:{}}),'Đã đăng xuất các phiên khác.');await loadSecurityDetails();},
@@ -6083,7 +6239,8 @@ const App = (() => {
 
   async function init() {
     document.addEventListener('click', onDocumentClick);
-    document.addEventListener('change', (e) => { if (e.target && e.target.id === 'mediaFiles') selectMediaFiles(e.target); });
+    document.addEventListener('change', (e) => { clearFieldFeedback(e.target); if (e.target && e.target.id === 'mediaFiles') selectMediaFiles(e.target); });
+    document.addEventListener('input',e=>{clearFieldFeedback(e.target);if(e.target?.id==='auditTxId'){const box=$('#auditVerification');if(box){box.hidden=true;box.textContent='';}}});
     // Mọi chỉnh sửa trong hộp thoại đang có lựa chọn ảnh đều được coi là chưa lưu: đóng sẽ hỏi lại.
     document.addEventListener('input', (e) => { if (mediaDraft && e.target && e.target.closest && e.target.closest('#modalRoot') && e.target.id !== 'mediaFiles') mediaDraft.dirty = true; });
     startMediaObserver();

@@ -46,7 +46,7 @@ async function main(){
     }finally{index.window.close();}
     ok(rule('.modal-backdrop').style.display==='flex'&&rule('.modal').style.getPropertyValue('margin-block')==='auto','short dialogs retain centered auto margins and tall-dialog scrolling');
     ok(rule('.modal-backdrop').style.getPropertyValue('overflow-y')==='auto'&&rule('.modal').style.getPropertyValue('flex-shrink')==='0','long dialogs can reach their heading and final action');
-    ok(rule('#toasts').style.top==='50%'&&rule('#toasts').style.transform==='translate(-50%, -50%)','notifications remain centered instead of moving above the page');
+    ok(rule('#toasts').style.top.includes('--topbar-h')&&rule('#toasts').style.right==='var(--s-4)'&&rule('#toasts').style.transform==='none','brief notifications sit below the header at the right; dialogs remain centered');
     ok(!css.includes('modal-leaving')&&!css.includes('tấm trượt từ đáy'),'no copied-form exit ghost or bottom-sheet override is integrated');
     const coarse=rules.find(entry=>entry.conditionText==='(max-width: 860px), (any-pointer: coarse)');
     ok(coarse&&[...coarse.cssRules].some(entry=>entry.selectorText==='input, select, textarea'&&entry.style.getPropertyValue('font-size')==='max(16px, 1em)'),'the existing mobile input size protection survives the CSS merge');
@@ -58,13 +58,13 @@ async function main(){
     ok(reduced.some(entry=>[...entry.cssRules].some(item=>item.selectorText?.includes('.cat:hover .ico-box')&&item.style.getPropertyValue('transform')==='none'&&item.style.getPropertyPriority('transform')==='important')),'reduced-motion suppresses category-icon hover movement');
   }finally{styleDOM.window.close();}
 
-  let p=await wallet({timeoutMs:2000});
+  let p=await wallet({timeoutMs:2000,create:()=>json(400,{error:'INVALID_AMOUNT'})});
   try{
-    p.amountInput().value='1';p.click(p.btn());
+    p.amountInput().value='100000';p.click(p.btn());await sleep(70);
     const first=p.d.querySelector('#toasts .toast');
     ok(first?.getAttribute('role')==='alert'&&first.className==='toast err','error toast keeps its existing kind and announces an alert');
     ok(first.querySelector('.toast-x')?.getAttribute('aria-label')==='Đóng thông báo','toast has a keyboard-focusable close button with an accessible name');
-    p.click(p.btn());const second=p.d.querySelectorAll('#toasts .toast')[1];
+    p.click(p.btn());await sleep(70);const second=p.d.querySelectorAll('#toasts .toast')[1];
     p.click(first.querySelector('.toast-x'));p.click(first.querySelector('.toast-x'));
     ok(first.hasAttribute('data-leaving')&&first.isConnected,'closing a normal-motion toast starts one short exit');
     await sleep(240);

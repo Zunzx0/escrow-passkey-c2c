@@ -214,7 +214,7 @@ async function main(){
   ok(p.count(ABANDON)===1,'Exactly one explicit abandon POST');
   ok(JSON.stringify(p.bodies[ABANDON][0])==='{}','Body is empty object');
   ok(p.count(DETAIL)>=2,'Fresh GET before and after abandon');
-  ok(p.toasts().some(x=>x.text.includes('Đã bỏ yêu cầu')),'Only validated terminal GET allows abandoned message');
+  ok((!!p.d.querySelector('[data-dialog-purpose="result"]')&&p.d.getElementById('modalRoot').textContent.includes('Đã bỏ yêu cầu')),'Only validated terminal GET allows a centered cancellation result');
  }finally{p.close();}
  section('Double click and no automatic auth retry');
  const hold=deferred();row=ppRow();
@@ -236,9 +236,9 @@ async function main(){
   });
   try{await open(p);await confirm(p);await until(()=>didPost,'POST started');await until(()=>p.count(DETAIL)>=2,'follow-up GET');await sleep(80);
    ok(!!p.intent(),mode+': unconfirmed/recovery keeps intent');
-   ok(!p.toasts().some(x=>x.text.includes('Đã bỏ yêu cầu')),mode+': no false abandoned toast');
+   ok(!(!!p.d.querySelector('[data-dialog-purpose="result"]')&&p.d.getElementById('modalRoot').textContent.includes('Đã bỏ yêu cầu')),mode+': no false abandoned toast');
    ok(p.count(ABANDON)===1,mode+': no automatic POST retry');
-   if(mode==='recovery')ok(p.notice().includes('cần xử lý thủ công'), 'Recovery takes precedence over FAILED');
+   if(mode==='recovery')ok(p.notice().includes('cần hỗ trợ kiểm tra'), 'Recovery takes precedence over FAILED');
   }finally{p.close();}
  }
  section('Stale response after logout/login of same account');
@@ -250,7 +250,7 @@ async function main(){
   await logoutUi(p);await loginUi(p,BUYER);const beforeGet=p.count(DETAIL);p.clearToasts();
   ok(!delivered,'Precondition: response remains held until same-account new login completes');
   stale.resolve(json(200,{...ppRow({status:'FAILED',stage:'FAILED'}),outcome:'ABANDONED'}));await until(()=>delivered,'old response actually delivered');await sleep(150);
-  ok(!p.toasts().some(x=>x.text.includes('Đã bỏ yêu cầu')),'Same-account new session ignores old response');
+  ok(!(!!p.d.querySelector('[data-dialog-purpose="result"]')&&p.d.getElementById('modalRoot').textContent.includes('Đã bỏ yêu cầu')),'Same-account new session ignores old response');
   ok(p.count(DETAIL)===beforeGet && !!p.intent(),'Old response neither GETs nor clears current intent');
  }finally{stale.resolve(json(500,{}));p.close();}
  section('Cancel callback never abandons or captures automatically');

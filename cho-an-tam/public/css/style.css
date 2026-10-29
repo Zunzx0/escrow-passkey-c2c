@@ -903,10 +903,10 @@ table.data th.num, table.data td.num { text-align: right; }
 
 /* ---------------------------------------------------------------- thông báo nổi */
 
-/* Giữ thông báo ở giữa màn hình theo luồng xác nhận của Enclave. */
+/* Brief feedback stays below the header; confirmation/result dialogs stay centered. */
 #toasts {
-  position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%); z-index: 80;
-  display: flex; flex-direction: column; align-items: stretch; gap: var(--s-2); width: min(440px, calc(100vw - 32px));
+  position: fixed; top: calc(var(--topbar-h) + var(--s-4)); right: var(--s-4); left: auto; transform: none; z-index: 60;
+  display: flex; flex-direction: column; align-items: stretch; gap: var(--s-2); width: min(400px, calc(100vw - 32px));
   pointer-events: none;
 }
 .toast {
@@ -918,7 +918,15 @@ table.data th.num, table.data td.num { text-align: right; }
 .toast > .ico { box-sizing: content-box; padding: 6px; border-radius: 50%; background: var(--info-soft); color: var(--info); }
 .toast.ok > .ico { background: var(--success-soft); color: var(--success); }
 .toast.err > .ico { background: var(--danger-soft); color: var(--danger); }
-.toast .grow { padding-top: 6px; }
+.toast.warn > .ico { background: var(--warning-soft); color: var(--warning); }
+.toast .grow { padding-top: 0; }
+.feedback-title { display: block; margin-bottom: 3px; font-weight: 700; }
+.operation-error [data-act="feedback-refresh"] { display: flex; width: fit-content; }
+.field-error[hidden] { display: none; }
+.result-symbol { display: inline-flex; vertical-align: middle; align-items: center; justify-content: center; width: 36px; height: 36px; margin-right: 10px; border-radius: 50%; color: var(--success); background: var(--success-soft); }
+.modal[data-result-level="warn"] .result-symbol { color: var(--warning); background: var(--warning-soft); }
+.modal[data-result-level="err"] .result-symbol { color: var(--danger); background: var(--danger-soft); }
+.modal[data-result-level="info"] .result-symbol { color: var(--info); background: var(--info-soft); }
 .toast-x {
   flex: 0 0 auto; display: grid; place-items: center; width: 32px; height: 32px; margin: -2px 0;
   border: 0; border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer;

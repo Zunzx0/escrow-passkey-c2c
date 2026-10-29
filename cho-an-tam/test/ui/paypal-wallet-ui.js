@@ -270,7 +270,7 @@ async function main() {
   ok(st && st.provider === 'PAYPAL_SANDBOX' && st.requestId === k1 && st.userId === BUYER.id && !/tok-|token|secret/i.test(JSON.stringify(st)),
     'Ý định lưu theo user, ghi provider PAYPAL_SANDBOX, không chứa token/bí mật');
   await sleep(TIMEOUT_MS + 350);
-  ok(/chưa rõ/i.test(p.notice()) && p.toasts().every((t) => t.kind !== 'ok') && p.amountInput().disabled, 'Timeout: báo "chưa rõ", khoá số tiền, không báo thành công');
+  ok(/chưa rõ/i.test(p.notice()) && (p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && p.amountInput().disabled, 'Timeout: báo "chưa rõ", khoá số tiền, không báo thành công');
   p.routes['POST /api/payments/paypal/topup'] = (opts) => { const b = JSON.parse(opts.body); p.topupBodies.push(b); return json(200, ppRow({ requestId: b.requestId })); };
   await press(p, 500);
   ok(p.topupBodies.length === 2 && p.topupBodies[1].requestId === k1 && p.topupBodies[1].amount === AMOUNT, 'Thử lại sau timeout: CÙNG requestId, CÙNG số tiền');
@@ -377,14 +377,14 @@ async function main() {
   ]) {
     p = await wallet({ create: (b) => json(200, ppRow({ requestId: b.requestId, ...o })) });
     await press(p, 500);
-    ok(!p.noticeBtn('paypal-approve') && p.toasts().every((t) => t.kind !== 'ok') && p.intent() !== null,
+    ok(!p.noticeBtn('paypal-approve') && (p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && p.intent() !== null,
       `Phản hồi tạo yêu cầu không khớp ý định (${label}): không coi là hợp lệ, không thành công giả, giữ ý định`);
     p.close();
   }
   for (const [label, resp] of [['HTML', () => html(200, '<html>x</html>')], ['mảng', () => json(200, [])], ['null', () => json(200, null)]]) {
     p = await wallet({ create: resp });
     await press(p, 500);
-    ok(!p.noticeBtn('paypal-approve') && p.toasts().every((t) => t.kind !== 'ok') && !!p.intent(), `200 thân hỏng (${label}): không thành công, giữ ý định`);
+    ok(!p.noticeBtn('paypal-approve') && (p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !!p.intent(), `200 thân hỏng (${label}): không thành công, giữ ý định`);
     p.close();
   }
 
@@ -462,7 +462,7 @@ async function main() {
   ok(p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') >= 1, 'Return: GET /payments/:id để xác minh');
   ok(/Đang xác nhận thanh toán/.test(p.notice()) && !p.noticeBtn('paypal-capture'), 'Return khớp ý định: tự hoàn tất, không có nút xác nhận lần hai');
   ok(srv.captures === 1 && p.count('POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture') === 1, 'Return tự capture đúng một lần');
-  ok(p.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(p.viewText()), 'Return KHÔNG tự báo thành công, ví chưa đổi');
+  ok((p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !/Nạp tiền thành công/.test(p.viewText()), 'Return KHÔNG tự báo thành công, ví chưa đổi');
   ok(p.count('POST /api/payments/paypal/topup') === 0, 'Return KHÔNG tạo yêu cầu mới');
   const capBtn = p.noticeBtn('paypal-capture');
   srv.row = { ...srv.row, stage: 'CAPTURING' };
@@ -472,14 +472,14 @@ async function main() {
   ok(Object.keys(p.bodies['POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture'][0] || {}).length === 0 || p.bodies['POST /api/payments/paypal/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a/capture'][0] === null,
     'Capture không gửi số tiền/merchant/order do client khai');
   ok(/Đang xác nhận thanh toán/.test(p.notice()) && !p.noticeBtn('paypal-capture'), 'Sau capture, GET nói CAPTURING: hiện "đang xác nhận", khoá thao tác lặp');
-  ok(p.toasts().every((t) => t.kind !== 'ok'), 'CAPTURING: chưa báo thành công');
+  ok((p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')), 'CAPTURING: chưa báo thành công');
   p.clearToasts();
   srv.row = ppRow({ requestId: KEY, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString(), resolvedBy: 'WEBHOOK' });
   // The 1s poll may already have read CAPTURING during page bootstrap + the 500ms check.
   // Wait for observable completion through the next 1.5s poll, not a 1.3s wall-clock guess.
   const completedBy=Date.now()+5000;
   while((p.intent()!==null||p.notice()!=='')&&Date.now()<completedBy)await sleep(20);
-  ok(p.toasts().filter((t) => t.kind === 'ok' && /Nạp tiền thành công/.test(t.text)).length === 1, 'GET sau capture khớp ý định nói SUCCEEDED: đúng MỘT thông báo thành công');
+  ok(p.d.querySelectorAll('[data-dialog-purpose="result"][data-result-level="ok"]').length === 1 && /Nạp tiền thành công/.test(p.d.getElementById('modalRoot').textContent) && p.toasts().every(t=>t.kind!=='ok'), 'GET sau capture khớp ý định nói SUCCEEDED: đúng MỘT thông báo thành công');
   ok(p.intent() === null && p.notice() === '', 'Thành công được xác nhận: ý định và thông báo được dọn');
   ok(p.count('GET /api/wallets/me') >= 2, 'Ví được đọc lại từ máy chủ (không tự cộng ở giao diện)');
   p.close();
@@ -514,7 +514,7 @@ async function main() {
   ]) {
     srv = fakeServer();
     p = await wallet({ extra: srv.routes(), search });
-    ok(p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') === 0 && p.w.location.search === '' && p.toasts().every((t) => t.kind !== 'ok'), `Query không hợp lệ (${label}): bị bỏ qua, query vẫn được dọn`);
+    ok(p.count('GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a') === 0 && p.w.location.search === '' && (p.toasts().every((t) => t.kind !== 'ok') && !p.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')), `Query không hợp lệ (${label}): bị bỏ qua, query vẫn được dọn`);
     p.close();
   }
 
@@ -528,7 +528,7 @@ async function main() {
 
   srv = fakeServer({ status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() });
   p = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: srv.routes(), search: '?paypal=return&paymentRequestId=5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a' });
-  ok(p.toasts().filter((t) => t.kind === 'ok' && /Nạp tiền thành công/.test(t.text)).length === 1 && srv.captures === 0,
+  ok(p.d.querySelectorAll('[data-dialog-purpose="result"][data-result-level="ok"]').length === 1 && /Nạp tiền thành công/.test(p.d.getElementById('modalRoot').textContent) && p.toasts().every(t=>t.kind!=='ok') && srv.captures === 0,
     'Return khi webhook đã tất toán (GET khớp nói SUCCEEDED): báo thành công đúng một lần, không capture');
   p.close();
 
@@ -547,7 +547,7 @@ async function main() {
   };
   await capScenario('timeout', () => HANG, { stage: 'RECONCILING' }, (pg, sv) => {
     ok(sv.captures === 1, 'Capture timeout: KHÔNG gửi lại POST tự động');
-    ok(/chưa rõ|đối soát/i.test(pg.notice()) && !/Thất bại/.test(pg.notice()) && pg.toasts().every((t) => t.kind !== 'ok'), 'Capture timeout: hiện "chưa rõ/đối soát", không thất bại, không thành công');
+    ok(/chưa rõ|đối soát/i.test(pg.notice()) && !/Thất bại/.test(pg.notice()) && (pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')), 'Capture timeout: hiện "chưa rõ/đối soát", không thất bại, không thành công');
     ok(!pg.noticeBtn('paypal-capture') && !!pg.d.querySelector('#topupIntent [data-act="topup-check"]'), 'Capture timeout: không còn nút capture, có nút kiểm tra lại');
   });
   for (const [label, resp] of [
@@ -557,7 +557,7 @@ async function main() {
     ['PAYPAL_CAPTURE_CLAIM_LOST', () => json(409, { error: 'PAYPAL_CAPTURE_CLAIM_LOST', message: 'x' })],
   ]) {
     await capScenario(label, resp, { stage: 'CAPTURING' }, (pg, sv) => {
-      ok(sv.captures === 1 && /Đang xác nhận thanh toán/.test(pg.notice()) && pg.toasts().every((t) => t.kind !== 'ok' || false) && !pg.noticeBtn('paypal-capture'),
+      ok(sv.captures === 1 && /Đang xác nhận thanh toán/.test(pg.notice()) && (pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !pg.noticeBtn('paypal-capture'),
         `Capture ${label}: không gửi lại POST, hỏi trạng thái (GET), hiện "đang xác nhận", không thành công giả`);
     });
   }
@@ -568,7 +568,7 @@ async function main() {
   }
   for (const outcome of ['APPLIED', 'DUPLICATE', 'BUSY', 'NOT_READY', 'CLOSED', 'NOT_CAPTURED', 'RECOVERY_REQUIRED', 'RECONCILING', 'AWAITING_APPROVAL']) {
     await capScenario(outcome, null, null, (pg, sv) => {
-      ok(pg.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(pg.viewText()) && sv.captures === 1,
+      ok((pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !/Nạp tiền thành công/.test(pg.viewText()) && sv.captures === 1,
         `HTTP 200 + outcome ${outcome} (GET vẫn AWAITING_APPROVAL): KHÔNG phải nạp thành công`);
     });
   }
@@ -590,7 +590,7 @@ async function main() {
     ok(sv.captures === 1, `Capture đã phát trước khi kiểm ${label}`);
     // Tự capture từ return.
     await sleep(900);
-    ok(pg.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(pg.viewText()) && !!pg.intent(),
+    ok((pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !/Nạp tiền thành công/.test(pg.viewText()) && !!pg.intent(),
       `Capture 200 nhưng ${label}: KHÔNG báo thành công, giữ ý định`);
     ok(/Chưa xác nhận/.test(pg.notice()) && !!pg.d.querySelector('#topupIntent [data-act="topup-check"]'), `Capture 200 nhưng ${label}: "chưa xác nhận" + nút kiểm tra lại`);
     pg.close();
@@ -607,7 +607,7 @@ async function main() {
     let pg;
     pg = await wallet({ create: createdOk, extra: { 'GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a': () => getResp(pg) }, timeoutMs: 300 });
     await press(pg, 900);
-    ok(pg.toasts().every((t) => t.kind !== 'ok') && !/Nạp tiền thành công/.test(pg.viewText()) && !!pg.intent() && /Chưa xác nhận/.test(pg.notice()),
+    ok((pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')) && !/Nạp tiền thành công/.test(pg.viewText()) && !!pg.intent() && /Chưa xác nhận/.test(pg.notice()),
       `Phản hồi tạo yêu cầu nói SUCCEEDED nhưng ${label}: KHÔNG báo thành công, giữ ý định, "chưa xác nhận"`);
     pg.close();
   }
@@ -618,7 +618,7 @@ async function main() {
       extra: { 'GET /api/payments/5b1f0c52-7a3e-4c1d-9a55-0f1e2d3c4b5a': () => json(200, ppRow({ requestId: pg.topupBodies[0].requestId, status: 'SUCCEEDED', stage: 'SUCCEEDED', resolvedAt: new Date().toISOString() })) },
     });
     await press(pg, 900);
-    ok(pg.toasts().filter((t) => t.kind === 'ok' && /Nạp tiền thành công/.test(t.text)).length === 1 && pg.intent() === null,
+    ok(pg.d.querySelectorAll('[data-dialog-purpose="result"][data-result-level="ok"]').length === 1 && /Nạp tiền thành công/.test(pg.d.getElementById('modalRoot').textContent) && pg.toasts().every(t=>t.kind!=='ok') && pg.intent() === null,
       'Tạo yêu cầu nói SUCCEEDED + GET khớp nói SUCCEEDED: đúng MỘT thông báo thành công, ý định được dọn');
     pg.close();
   }
@@ -642,7 +642,7 @@ async function main() {
     await sleep(500);
     ok(re.test(pg.notice()), `stage ${stage}: hiển thị đúng nội dung`);
     ok(has.every((a) => !!pg.noticeBtn(a)) && hasNot.every((a) => !pg.noticeBtn(a)), `stage ${stage}: có nút [${has}] và KHÔNG có [${hasNot}]`);
-    ok(pg.toasts().every((t) => t.kind !== 'ok'), `stage ${stage}: không báo thành công`);
+    ok((pg.toasts().every((t) => t.kind !== 'ok') && !pg.d.querySelector('[data-dialog-purpose="result"][data-result-level="ok"]')), `stage ${stage}: không báo thành công`);
     pg.close();
   }
   {
@@ -650,7 +650,7 @@ async function main() {
     const pg = await wallet({ storage: { [INTENT_PREFIX + BUYER.id]: intentJson() }, extra: sv.routes() });
     pg.click(pg.d.querySelector('#topupIntent [data-act="topup-check"]'));
     await sleep(600);
-    ok(pg.toasts().filter((t) => t.kind === 'ok').length === 1 && pg.intent() === null, 'stage SUCCEEDED (GET khớp): thành công đúng một lần, ý định được dọn');
+    ok(pg.d.querySelectorAll('[data-dialog-purpose="result"][data-result-level="ok"]').length === 1 && pg.toasts().every(t=>t.kind!=='ok') && pg.intent() === null, 'stage SUCCEEDED (GET khớp): thành công đúng một lần, ý định được dọn');
     pg.close();
   }
   {

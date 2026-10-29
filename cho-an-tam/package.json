@@ -35,6 +35,7 @@
     "test:media:storage": "node --test test/media-storage-adapter.test.js",
     "check:media": "node scripts/check-media-storage.js",
     "test:ui:polish": "node test/ui/ui-polish-ui.js",
+    "test:ui:feedback": "node test/ui/feedback-presentation-ui.js",
     "test:notifications": "node test/notification-e2e.js",
     "test:checkout": "node test/checkout-e2e.js",
     "test:dispute-race": "node test/dispute-race-e2e.js",
