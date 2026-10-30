@@ -351,7 +351,9 @@ router.get('/:id', requireAuth, async (req, res, next) => {
     // Hồ sơ tranh chấp (nếu có) đi kèm chi tiết giao dịch, để cả hai bên — không chỉ quản trị
     // viên — thấy được tiền đang bị đóng băng vì đâu và đã được phân xử ra sao.
     const d = await db.prepare('SELECT * FROM disputes WHERE transaction_id = ?').get(txn.id);
-    res.json({...await viewTxn(txn,req.user),dispute:serializeDispute(d),imageEvidence:await media.imageEvidence(d,req.user),disputeMessages:d?await db.prepare('SELECT id,actor_id AS "actorId",message,created_at AS "createdAt" FROM dispute_messages WHERE dispute_id=? ORDER BY created_at,id').all(d.id):[]});
+    const canReadReviews=d&&([txn.buyer_id,txn.seller_id].includes(req.user.id)||(req.user.role==='ADMIN'&&d.admin_id===req.user.id));
+    const disputeReviews=canReadReviews?(await db.prepare('SELECT * FROM dispute_reviews WHERE dispute_id=? ORDER BY dispute_revision').all(d.id)).map(require('../lib/disputeReview').serializeReview):[];
+    res.json({...await viewTxn(txn,req.user),dispute:d?{...serializeDispute(d),lastReview:disputeReviews.at(-1)||null}:null,disputeReviews,imageEvidence:await media.imageEvidence(d,req.user),disputeMessages:d?await db.prepare('SELECT id,actor_id AS "actorId",message,created_at AS "createdAt" FROM dispute_messages WHERE dispute_id=? ORDER BY created_at,id').all(d.id):[]});
   } catch (e) {
     next(e);
   }

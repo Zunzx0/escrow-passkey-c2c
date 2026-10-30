@@ -49,9 +49,10 @@ async function main(){
     {id:'uuid-converted',caseCode:'F3',casePrefix:'F',categoryCode:'B',type:'NOT_AS_DESCRIBED'},
     {id:'uuid-legacy',caseCode:'L4',casePrefix:'L',categoryCode:'L',type:'DEFECT'},
     {id:'uuid-system',caseCode:'G5',casePrefix:'G',categoryCode:'G',type:'SHIPMENT_STALLED',openedBy:'SYSTEM'},
-  ].map(d=>({status:'OPEN',reason:'Nội dung cần xem xét <img src=x onerror=alert(1)>',openedBy:'BUYER',createdAt:now,transactionId:'reference-order',transaction:base(),...d}));
+  ].map(d=>({status:'OPEN',adminId:ADMIN.id,reason:'Nội dung cần xem xét <img src=x onerror=alert(1)>',openedBy:'BUYER',createdAt:now,transactionId:'reference-order',transaction:base(),...d}));
   p=await wallet({user:ADMIN,hash:'#/admin/disputes',extra:{
     'GET /api/admin/disputes':()=>json(200,{disputes:cases}),
+    'GET /api/admin/disputes/uuid-b':()=>json(200,{dispute:cases.find(d=>d.id==='uuid-b'),transaction:base(),messages:[]}),
     'GET /api/notifications/todo':()=>json(200,{items:[]}),
   }});
   try {

@@ -100,15 +100,20 @@ async function main(){
   const admin={...BUYER,id:'feedback-admin',role:'ADMIN'};
   for(const kind of ['refund','release']){
     current=row({status:'DISPUTED',escrowStatus:'FROZEN'});
-    const dispute={id:'feedback-case',transactionId:current.id,transaction:current,status:'OPEN',type:'DAMAGED_GOODS',caseCode:'A1',reason:'Hàng có lỗi cần xử lý',createdAt:now,openedBy:'BUYER'};
+    const dispute={id:'feedback-case',adminId:admin.id,revision:1,transactionId:current.id,transaction:current,status:'OPEN',type:'DAMAGED_GOODS',caseCode:'A1',reason:'Hàng có lỗi cần xử lý',createdAt:now,openedBy:'BUYER'};
     p=await wallet({user:admin,hash:'#/admin/disputes',extra:{
       'GET /api/admin/disputes':()=>json(200,{disputes:[dispute]}),
+      'GET /api/admin/disputes/feedback-case':()=>json(200,{dispute,transaction:current,messages:[]}),
+      'POST /api/admin/disputes/feedback-case/review':opts=>{const body=JSON.parse(opts.body);return json(201,{review:{id:'saved-review',decision:body.decision,basis:body.basis,createdAt:now},dispute,transaction:current});},
       'POST /api/admin/disputes/feedback-case/reauth/options':()=>json(200,{reauthSessionId:'admin-session',options:{}}),
       'POST /api/admin/disputes/feedback-case/reauth/verify':()=>json(200,{reauthGrant:'admin-grant'}),
       ['POST /api/admin/disputes/feedback-case/'+kind]:()=>{current={...current,status:kind==='refund'?'REFUNDED':'RELEASED',escrowStatus:kind==='refund'?'REFUNDED':'RELEASED'};dispute.status=kind==='refund'?'RESOLVED_REFUND':'RESOLVED_RELEASE';return json(200,{dispute,transaction:current});},
     }});
     try{
-      device(p);await click(p,'admin-'+kind);await click(p,'admin-confirm',140);
+      device(p);await click(p,'admin-'+kind);
+      p.d.getElementById('disputeReviewBasis').value='Đã xem hồ sơ và thông tin bổ sung của cả hai bên; ghi căn cứ phục vụ kiểm tra giao diện.';
+      p.d.getElementById('disputeReviewRead').checked=true;p.d.getElementById('disputeReviewReceipt').checked=true;
+      p.click(p.d.querySelector('[data-act="admin-review-save"][data-decision="'+(kind==='refund'?'REFUND':'RELEASE')+'"]'));await sleep(70);await click(p,'admin-confirm',140);
       ok(result(p)?.dataset.resultLevel==='ok'&&!p.toasts().length,'admin '+kind+' uses the API-confirmed result dialog without a second toast');
       const body=p.bodies['POST /api/admin/disputes/feedback-case/reauth/options'][0];
       ok(body.decision===(kind==='refund'?'REFUND':'RELEASE'),'presentation keeps the correct Passkey adjudication decision: '+kind);

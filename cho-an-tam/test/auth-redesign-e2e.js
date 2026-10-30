@@ -202,7 +202,9 @@ async function main(){
     await deliver(seller,a,t.id);
     const d=must(await api('/transactions/'+t.id+'/dispute',{token:a.token,body:{reason:'Hàng thử không đúng mô tả, yêu cầu quản trị phân xử.'}}),201).dispute;
     must(await api('/admin/disputes/'+d.id+'/claim',{token:admin.token,body:{}}));
-    const opt=must(await api('/admin/disputes/'+d.id+'/reauth/options',{token:admin.token,body:{decision}}));
+    const detail=must(await api('/admin/disputes/'+d.id,{token:admin.token}));
+    const review=must(await api('/admin/disputes/'+d.id+'/review',{token:admin.token,body:{decision,basis:'Đã xem thông tin và đối chiếu nội dung hai bên trong tình huống thử nghiệm xác thực; lưu căn cứ trước khi ra quyết định.',reviewed:true,receiptAcknowledged:true,expectedDisputeRevision:detail.dispute.revision,expectedOrderVersion:detail.transaction.version}}),201).review;
+    const opt=must(await api('/admin/disputes/'+d.id+'/reauth/options',{token:admin.token,body:{decision,reviewId:review.id}}));
     const signed=must(await api('/admin/disputes/'+d.id+'/reauth/verify',{token:admin.token,body:{reauthSessionId:opt.reauthSessionId,response:adminAuth.authenticate({rpId:'localhost',origin:base,challenge:opt.options.challenge})}}));
     const other=decision==='REFUND'?'release':'refund';
     check((await api('/admin/disputes/'+d.id+'/'+other,{token:admin.token,body:{requestId:crypto.randomUUID(),reauthGrant:signed.reauthGrant}})).status===401,'adjudication grant cannot change decision '+decision);

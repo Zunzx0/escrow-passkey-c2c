@@ -308,9 +308,15 @@ async function run() {
     return must(await api('/listings', s, listingBody({ ...(ids ? { imageIds: ids } : {}), ...extra })), 201);
   }
   async function grant(a, id, action = ACTIONS.LOCK, decision) {
-    const t = await sql('SELECT * FROM transactions WHERE id=?', id);
-    const d = action === ACTIONS.ADJUDICATE ? await sql('SELECT * FROM disputes WHERE transaction_id=?', id) : null;
-    const context = d ? adminRouter.buildAdjudicationContext(d, t, decision, a.id, a.sessionId) : await txRouter.buildAuthorizationContext(t, action, a.sessionId);
+    let t = await sql('SELECT * FROM transactions WHERE id=?', id);
+    let d = action === ACTIONS.ADJUDICATE ? await sql('SELECT * FROM disputes WHERE transaction_id=?', id) : null,review;
+    if(d){
+      if(!d.admin_id)must(await api('/admin/disputes/'+d.id+'/claim',a,{}));
+      d=await sql('SELECT * FROM disputes WHERE id=?',d.id);t=await sql('SELECT * FROM transactions WHERE id=?',id);
+      must(await api('/admin/disputes/'+d.id+'/review',a,{decision,basis:'Đã xem ảnh và nội dung bổ sung của hai bên trong tình huống kiểm thử; ghi căn cứ mô phỏng trước khi ký quyết định.',reviewed:true,receiptAcknowledged:true,expectedDisputeRevision:d.revision,expectedOrderVersion:t.version}),201);
+      review=await require('../src/lib/disputeReview').latestReview(db,d.id);d=await sql('SELECT * FROM disputes WHERE id=?',d.id);t=await sql('SELECT * FROM transactions WHERE id=?',id);
+    }
+    const context = d ? adminRouter.buildAdjudicationContext(d, t, decision, a.id, a.sessionId,review) : await txRouter.buildAuthorizationContext(t, action, a.sessionId);
     return issueGrant({ userId: a.id, sessionId: a.sessionId, transactionId: id, disputeId: d?.id, action, decision, credentialId: a.credentialId,
       contextHash: crypto.createHash('sha256').update(JSON.stringify(context)).digest('hex') });
   }
@@ -1039,7 +1045,7 @@ async function run() {
       const secondDigest=(await rowOf(e2.id)).output_sha256;
       ok(secondAudit.some(row=>row.event_data.includes(e2.id)&&row.event_data.includes(secondDigest)),'audit references second image and digest');
       const stale = await api('/admin/disputes/' + p.d.id + '/refund', admin, { requestId: crypto.randomUUID(), reauthGrant: adminGrant.rawToken });
-      eq(stale.status, 409); eq(stale.data.error, 'CONTEXT_MISMATCH'); eq(await money(), moneyBefore);
+      eq(stale.status, 409); eq(stale.data.error, 'DISPUTE_REVIEW_STALE'); eq(await money(), moneyBefore);
       eq((await sql('SELECT status FROM disputes WHERE id=?', p.d.id)).status, 'OPEN');
       eq((await imageGet(e2.id, admin)).status, 200, 'claimed admin reads both parties evidence');
       eq((await imageGet(e2.id, p.b)).status, 200);

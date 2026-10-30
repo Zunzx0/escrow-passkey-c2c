@@ -32,6 +32,7 @@ const {transitionOrder,settleOrder}=require('../lib/orderLifecycle');
 const {serializeShipping,loadShipping}=require('../lib/orderShipping');
 const media=require('../lib/mediaService');
 const { referenceFields } = require('../lib/disputeReference');
+const {latestReview,serializeReview,reviewDigest,validateReview,requireReview} = require('../lib/disputeReview');
 
 // Điểm cuối quản trị nhạy cảm: phân xử làm tiền rời khỏi ký quỹ, và mỗi lần xin
 // challenge đều ghi một bản ghi vào cơ sở dữ liệu.
@@ -168,7 +169,8 @@ router.get('/disputes/:id', async (req, res, next) => {
     // Photos and evidence are listed only for the independent admin who claimed this case;
     // an unclaimed viewer gets empty arrays and the image routes answer 404 to them.
     transaction.images=await media.orderImagesFor({id:dispute.transaction_id,buyer_id:transaction.buyerId,seller_id:transaction.sellerId,listing_id:transaction.listingId,status:transaction.status,escrow_status:transaction.escrowStatus},req.user);
-    res.json({dispute:serializeDispute(dispute),transaction,messages,imageEvidence:await media.imageEvidence(dispute,req.user)});
+    const reviews=dispute.admin_id===req.user.id?await db.prepare('SELECT * FROM dispute_reviews WHERE dispute_id=? ORDER BY dispute_revision').all(dispute.id):[];
+    res.json({dispute:{...serializeDispute(dispute),lastReview:serializeReview(reviews.at(-1))},reviews:reviews.map(serializeReview),transaction,messages,imageEvidence:await media.imageEvidence(dispute,req.user)});
   } catch (e) {
     next(e);
   }
@@ -230,9 +232,11 @@ router.post('/disputes/:id/claim',async(req,res,next)=>{
 
 // Thứ tự khoá trong object này là một phần của giao thức: JSON.stringify giữ nguyên thứ tự
 // chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
-function buildAdjudicationContext(dispute, txn, decision, adminId,sessionId=null) {
+function buildAdjudicationContext(dispute, txn, decision, adminId,sessionId=null,review=null) {
   return {
-    v: 2,
+    v: 3,
+    reviewId:review?.id||null,
+    reviewDigest:review?reviewDigest(review):null,
     orderVersion:txn.version,disputeRevision:dispute.revision||0,disputeType:dispute.type||null,
     action: ACTIONS.ADJUDICATE,
     adminId,
@@ -289,6 +293,28 @@ async function loadOpenDisputeForAdjudication(disputeId, actorId) {
   return { dispute, txn };
 }
 
+// Saving a review never moves money. Every change creates a new immutable record
+// and changes the authorization context, including a request for more information.
+router.post('/disputes/:id/review',sensitiveLimiter,async(req,res,next)=>{
+  try {
+    let saved,transaction,dispute;
+    await db.transaction(async()=>{
+      ({dispute,txn:transaction}=await loadOpenDisputeForAdjudication(req.params.id,req.user.id));
+      if(dispute.admin_id!==req.user.id)throw new AppError(409,'DISPUTE_CLAIM_REQUIRED','Hãy nhận xử lý hồ sơ trước khi ghi căn cứ.');
+      const body=req.body||{}, value=validateReview(body,transaction);
+      if(body.expectedDisputeRevision!==dispute.revision||body.expectedOrderVersion!==transaction.version)throw new AppError(409,'DISPUTE_REVIEW_STALE','Hồ sơ vừa thay đổi. Hãy tải lại và đọc thông tin mới trước khi lưu.');
+      transaction=await transitionOrder(transaction,{});
+      const changed=await db.prepare("UPDATE disputes SET revision=revision+1 WHERE id=? AND status='OPEN' AND revision=? AND admin_id=?").run(dispute.id,dispute.revision,req.user.id);
+      if(changed.changes!==1)throw new AppError(409,'DISPUTE_REVIEW_STALE','Hồ sơ vừa thay đổi. Hãy tải lại.');
+      saved={id:uuid(),dispute_id:dispute.id,admin_id:req.user.id,decision:value.decision,basis:value.basis,reviewed:1,receipt_acknowledged:value.receiptAcknowledged?1:0,dispute_revision:dispute.revision+1,order_version:transaction.version,created_at:nowIso()};
+      await db.prepare('INSERT INTO dispute_reviews(id,dispute_id,admin_id,decision,basis,reviewed,receipt_acknowledged,dispute_revision,order_version,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run(saved.id,saved.dispute_id,saved.admin_id,saved.decision,saved.basis,saved.reviewed,saved.receipt_acknowledged,saved.dispute_revision,saved.order_version,saved.created_at);
+      await appendAuditLog(db,{transactionId:transaction.id,actorId:req.user.id,action:value.decision==='REQUEST_MORE'?'DISPUTE_MORE_INFORMATION_REQUESTED':'DISPUTE_REVIEW_SAVED',oldStatus:transaction.status,newStatus:transaction.status,eventData:{disputeId:dispute.id,reviewId:saved.id,decision:saved.decision,reviewDigest:reviewDigest(saved)}});
+    })();
+    if(saved.decision==='REQUEST_MORE')await require('../lib/notifications').notify([transaction.buyer_id,transaction.seller_id].map(userId=>({userId,type:'DISPUTE_MORE_INFORMATION_REQUESTED',key:saved.id,transactionId:transaction.id,title:'Hồ sơ cần bổ sung thông tin',body:'Quản trị viên đã ghi nội dung cần bổ sung trong chi tiết đơn. Tiền vẫn được Enclave giữ.'})));
+    res.status(201).json({review:serializeReview(saved),dispute:{...serializeDispute({...dispute,revision:saved.dispute_revision}),lastReview:serializeReview(saved)},transaction:serializeTxn(transaction)});
+  }catch(e){next(e);}
+});
+
 router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, next) => {
   try {
     await require('../lib/accountSecurity').assertMoneyAllowed(req.user.id,ACTIONS.ADJUDICATE);
@@ -296,10 +322,12 @@ router.post('/disputes/:id/reauth/options', sensitiveLimiter, async (req, res, n
     const decision = parseDecision((req.body || {}).decision);
     const { dispute, txn } = await loadOpenDisputeForAdjudication(req.params.id, req.user.id);
 
+    const review=await requireReview(db,dispute,txn,req.user.id,decision,(req.body||{}).reviewId);
+
     const credentials = await db.prepare('SELECT * FROM passkey_credentials WHERE user_id = ?').all(req.user.id);
     if (credentials.length === 0) throw new AppError(400, 'NO_CREDENTIAL', 'Tài khoản quản trị chưa có Passkey');
 
-    const context = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId);
+    const context = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId,review);
 
     // Không truyền challenge: thư viện tự sinh giá trị ngẫu nhiên bằng nguồn ngẫu nhiên mật
     // mã. Thao tác làm tiền rời khỏi ký quỹ đòi mức xác minh người dùng bắt buộc.
@@ -356,7 +384,8 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
     // Đối chiếu ngữ cảnh lần MỘT: dựng lại từ dữ liệu hiện tại rồi so với bản đã lưu lúc
     // phát challenge. Hồ sơ hay giao dịch bị sửa trong lúc chờ ký thì hai bản lệch nhau và
     // yêu cầu bị chặn trước khi phiếu được cấp.
-    const currentContext = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId);
+    const review=await requireReview(db,dispute,txn,req.user.id,decision,savedContext.reviewId);
+    const currentContext = buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId,review);
     if (challengeRow.context_data !== JSON.stringify(currentContext)) {
       throw new AppError(409, 'CONTEXT_MISMATCH', 'Nội dung hồ sơ đã thay đổi kể từ lúc bắt đầu xác thực.');
     }
@@ -389,6 +418,11 @@ router.post('/disputes/:id/reauth/verify', sensitiveLimiter, async (req, res, ne
     const counterCheck = assessCounter(credential, verification.authenticationInfo.newCounter);
     let issued;
     await db.transaction(async () => {
+      // WebAuthn verification yields. Re-read under the business transaction lock
+      // so evidence arriving during signature verification cannot get a stale grant.
+      const fresh=await loadOpenDisputeForAdjudication(req.params.id,req.user.id);
+      const freshReview=await requireReview(db,fresh.dispute,fresh.txn,req.user.id,decision,savedContext.reviewId);
+      if(JSON.stringify(buildAdjudicationContext(fresh.dispute,fresh.txn,decision,req.user.id,req.user.sessionId,freshReview))!==challengeRow.context_data)throw new AppError(409,'CONTEXT_MISMATCH','Hồ sơ vừa thay đổi. Hãy xem lại trước khi xác thực.');
       // Tiêu thụ challenge NGUYÊN TỬ: hai request phát lại cùng challenge chạy song song thì chỉ
       // một request đổi được used_at. Phép kiểm used_at ở trên nằm TRƯỚC bước await xác minh
       // WebAuthn nên không đủ để chặn phát lại đồng thời.
@@ -451,9 +485,10 @@ async function authorizeAdjudication(req, decision) {
   });
 
   // Đối chiếu ngữ cảnh lần HAI, độc lập với lần ở bước verify.
-  assertContextUnchanged(grant, contextDigest(buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId)));
+  const review=await requireReview(db,dispute,txn,req.user.id,decision,(req.body||{}).reviewId||(await latestReview(db,dispute.id))?.id);
+  assertContextUnchanged(grant, contextDigest(buildAdjudicationContext(dispute, txn, decision, req.user.id,req.user.sessionId,review)));
 
-  return { dispute, txn, grant };
+  return { dispute, txn, grant,review };
 }
 
 async function adjudicate(req,decision) {
@@ -483,7 +518,7 @@ async function adjudicate(req,decision) {
     if(dispute.status===`RESOLVED_${decision}`&&entry?.request_id===requestId)return;
     const authorized=await authorizeAdjudication(req,decision);
     await settleOrder(txn,{
-      decision,actorId:req.user.id,requestId,grant:authorized.grant,dispute:authorized.dispute,finalStatus:decision==='REFUND'?'REFUNDED':'RELEASED',reason:decision==='REFUND'?'admin_refund':null,action:decision==='REFUND'?'ADMIN_REFUND':'ADMIN_RELEASE'
+      decision,actorId:req.user.id,requestId,grant:authorized.grant,dispute:authorized.dispute,review:authorized.review,finalStatus:decision==='REFUND'?'REFUNDED':'RELEASED',reason:decision==='REFUND'?'admin_refund':null,action:decision==='REFUND'?'ADMIN_REFUND':'ADMIN_RELEASE'
     });
   })();
   await onDisputeResolved(txn,decision);
