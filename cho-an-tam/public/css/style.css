@@ -898,6 +898,7 @@ table.data th.num, table.data td.num { text-align: right; }
 .modal-head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-4); padding: var(--s-4) var(--s-4) var(--s-4) var(--s-5); border-bottom: 1px solid var(--border); }
 .modal-head h2 { margin: 0; font-size: 18px; line-height: 28px; }
 .modal-body { padding: var(--s-5); }
+.modal-body > .note { margin-bottom: var(--s-3); }
 .modal-body > :last-child { margin-bottom: 0; }
 .modal-foot { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: var(--s-2); padding: var(--s-4) var(--s-5); background: var(--surface-2); border-top: 1px solid var(--border); border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
 
