@@ -28,12 +28,13 @@ async function main(){
     p.click(save);await sleep(30);
     for(const field of ['basis','reviewed','receiptAcknowledged'])ok(!!p.d.querySelector('[data-review-error="'+field+'"]').textContent,'validation appears at '+field);
     ok(p.count('POST /api/admin/disputes/review-case/review')===0,'incomplete review never reaches the server');
-    complete(p);let done;p.routes['POST /api/admin/disputes/review-case/review']=opts=>new Promise(resolve=>{done=()=>resolve(json(201,{review:{id:'immutable-review',decision:'RELEASE',basis:JSON.parse(opts.body).basis,createdAt:now},dispute:{revision:5},transaction:{version:9}}));});
+    complete(p);let done;p.routes['POST /api/admin/disputes/review-case/review']=opts=>new Promise(resolve=>{done=()=>resolve(json(201,{review:{id:'immutable-review',decision:'RELEASE',basis:JSON.parse(opts.body).basis,createdAt:now},dispute:{revision:5},transaction:{version:9,buyerName:null,sellerName:null}}));});
     p.click(save);await sleep(25);
     ok([...p.d.querySelectorAll('.modal button,.modal input,.modal textarea')].every(e=>e.disabled),'all controls including cancel are locked while saving');
     ok(p.count('POST /api/admin/disputes/review-case/reauth/options')===0,'saving does not start device authentication');
     done();await sleep(80);
     ok(!!selector(p,'admin-confirm')&&p.d.querySelector('.modal-body').textContent.includes('Đã đối chiếu'),'saved immutable basis is shown in separate final review');
+    ok(p.d.querySelector('.modal-body').textContent.includes('Người bán mẫu'),'sparse review response cannot erase the recipient name from the reviewed case');
     ok(p.count('POST /api/admin/disputes/review-case/reauth/options')===0,'separate final click is required');
     let deviceCalls=0;p.w.SimpleWebAuthnBrowser.startAuthentication=async()=>{deviceCalls++;throw new Error('should not call');};
     await click(p,'admin-confirm');
