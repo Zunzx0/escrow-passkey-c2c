@@ -5660,6 +5660,10 @@ const App = (() => {
 
   async function loadDisputes() {
     const { disputes } = await api('/admin/disputes');
+    renderDisputes(disputes);
+  }
+
+  function renderDisputes(disputes) {
     const list = $('#adminPanel');
     if (!list) return;
     disputeCache.clear();
@@ -5727,14 +5731,16 @@ const App = (() => {
   }
 
   async function claimDispute(id, btn) {
+    const scope={epoch:state.sessionEpoch,generation:modalGeneration,hash:location.hash};
     let detail;
     await guard('claim-dispute:' + id, btn, async () => {
       await api('/admin/disputes/' + encodeURIComponent(id) + '/claim',{method:'POST',body:{}});
       detail = await api('/admin/disputes/' + encodeURIComponent(id));
     });
-    if (!detail) return;
+    if (!detail||!mediaSubmissionAlive(scope)) return;
     const d = detail.dispute || detail, t = detail.transaction || d.transaction || {};
     disputeCache.set(id,{...disputeCache.get(id),...d,transaction:t});
+    renderDisputes([...disputeCache.values()]);
     openModal({title:disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · Chi tiết':'Chi tiết hồ sơ đang xử lý',body:`${disputeWarnings(d, t)}${disputeTypeSummary(d)}<p>Đơn: <b>${esc(t.itemName || 'Đơn hàng')}</b>.</p>${disputeEvidence(d)}${renderDisputeMessages(detail.messages || d.messages,t)}${renderImageEvidence(detail.imageEvidence || d.imageEvidence || t.imageEvidence,t)}<h3>Địa chỉ giao hàng của đơn</h3>${shippingSummary(t.shipping)}<p class="small muted">Chỉ dùng thông tin này để xử lý hồ sơ. Không sao chép vào nội dung nhật ký công khai.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đóng chi tiết</button>'});
   }
 

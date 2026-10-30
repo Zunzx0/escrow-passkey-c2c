@@ -29,6 +29,15 @@ async function main(){
     ok(p.d.querySelector('.operation-error')?.textContent.includes('quản trị viên khác phụ trách'),'late assignment is explained inside the pending review');
     ok(!p.d.querySelector('[data-dialog-purpose="result"]')&&!p.toasts().length,'late assignment never creates a payment success or overlapping toast');
     ok(p.count('POST /api/admin/disputes/assignment-case-1/refund')===0&&!p.d.querySelector('[data-act="admin-confirm"]'),'late assignment blocks the review and settlement call before device verification');
+    const unclaimed=cases[0];
+    p.click(p.d.querySelector('[data-act="modal-close"]'));await sleep(40);
+    p.routes['POST /api/admin/disputes/'+unclaimed.id+'/claim']=()=>{unclaimed.adminId=admin.id;return json(200,{dispute:unclaimed,transaction:unclaimed.transaction});};
+    p.routes['GET /api/admin/disputes/'+unclaimed.id]=()=>json(200,{dispute:unclaimed,transaction:unclaimed.transaction,messages:[]});
+    p.click(p.d.querySelector('[data-act="admin-claim-dispute"][data-id="'+unclaimed.id+'"]'));await sleep(40);
+    p.click(p.d.querySelector('[data-act="admin-claim-confirm"]'));await sleep(90);
+    ok(p.d.getElementById('modalTitle').textContent.includes('Chi tiết'),'claim returns the newly assigned private detail');
+    p.click(p.d.querySelector('[data-act="modal-close"]'));await sleep(40);
+    for(const action of ['admin-refund','admin-release','admin-more'])ok(!!p.d.querySelector('[data-act="'+action+'"][data-id="'+unclaimed.id+'"]'),'successful claim immediately offers '+action+' without a reload');
   }finally{p.close();}
   console.log(`DISPUTE ASSIGNMENT UI: ${checks} checks passed (JSDOM + fake API only)`);
 }
