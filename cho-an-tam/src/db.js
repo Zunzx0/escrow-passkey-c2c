@@ -3,6 +3,7 @@ const fs = require('fs');
 const crypto = require('crypto');
 const { SqliteAsyncDatabase, PgAsyncDatabase, PG_LOCK_KEY } = require('./lib/asyncDb');
 const { normalizeSettledListingsSql } = require('./lib/listingNormalize');
+const { pgConnectionConfig } = require('./lib/pgTls');
 
 function logListingNormalization(sold, reopened) {
   if (sold || reopened) {
@@ -405,13 +406,10 @@ function openPg() {
   const pg = require('pg');
   installPgTypeParsers(pg);
 
-  // Supabase (và hầu hết PostgreSQL được quản lý) bắt buộc TLS. Chứng chỉ của Supabase pooler
-  // không nằm trong kho CA mặc định của Node, nên chỉ mã hoá chứ không kiểm chuỗi chứng chỉ —
-  // đúng cấu hình mà tài liệu kế hoạch nêu. PGSSL=disable dùng cho PostgreSQL cục bộ.
-  const sslOff = process.env.PGSSL === 'disable' || /sslmode=disable/.test(DATABASE_URL);
+  // Kiểm cả CA và tên máy chủ; CA Supabase công khai đi kèm nguồn. Chỉ DB loopback
+  // ngoài production mới được tắt TLS để kiểm thử cục bộ.
   const pool = new pg.Pool({
-    connectionString: DATABASE_URL,
-    ssl: sslOff ? false : { rejectUnauthorized: false },
+    ...pgConnectionConfig(DATABASE_URL),
     max: parseInt(process.env.PG_POOL_MAX || '10', 10),
     idleTimeoutMillis: 10_000,
     connectionTimeoutMillis: 10_000,
