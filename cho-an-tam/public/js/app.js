@@ -5802,7 +5802,9 @@ const App = (() => {
       catch(e){if(mediaSubmissionAlive(scope)&&e.fieldErrors)show(e.fieldErrors);throw e;}
     });
     if(!result||!mediaSubmissionAlive(scope))return;
-    disputeCache.set(disputeId,{...d,...result.dispute,transaction:{...t,...result.transaction}});
+    // A review write returns the order row without joined account display names.
+    // Keep the names from the fresh, reviewed case instead of replacing them with null.
+    disputeCache.set(disputeId,{...d,...result.dispute,transaction:{...t,...result.transaction,buyerName:result.transaction?.buyerName||t.buyerName,sellerName:result.transaction?.sellerName||t.sellerName}});
     if(decision==='REQUEST_MORE'){
       openModal({title:'Đã yêu cầu bổ sung thông tin',body:'<p>Nội dung đã được lưu trong hồ sơ để hai bên xem. Tiền vẫn được Enclave giữ, chưa trả cho bên nào.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});return;
     }
