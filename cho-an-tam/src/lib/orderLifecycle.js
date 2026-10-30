@@ -56,7 +56,7 @@ function serializeDispute(d) {
 }
 // Caller owns db.transaction and authorizes the decision. This helper never accepts
 // a caller-supplied amount or recipient. A single CAS precedes both money legs.
-async function settleOrder(txn,{ decision,actorId=null,requestId,reason,listingOutcome,finalStatus,grant=null,dispute=null,at=nowIso(),action } = {}) {
+async function settleOrder(txn,{ decision,actorId=null,requestId,reason,listingOutcome,finalStatus,grant=null,dispute=null,review=null,at=nowIso(),action } = {}) {
   if(!['LOCKED','FROZEN'].includes(txn.escrow_status))throw new AppError(409,'INVALID_STATE','Khoản ký quỹ đã được xử lý.');
   const refund=decision==='REFUND';
   if(!refund&&decision!=='RELEASE')throw new Error('Invalid settlement');
@@ -115,7 +115,7 @@ async function settleOrder(txn,{ decision,actorId=null,requestId,reason,listingO
   if(grant)await require('./reauth').markGrantUsed(grant.id);
   await appendAuditLog(db,{
     transactionId:txn.id,actorId,action:action||`ORDER_${decision}`,oldStatus:txn.status,newStatus:target,eventData:{
-      amount:txn.amount,requestId,reason:reason||null,disputeId:dispute?.id||null,decision
+      amount:txn.amount,requestId,reason:reason||null,disputeId:dispute?.id||null,decision,...(review?{reviewId:review.id,reviewDigest:require('./disputeReview').reviewDigest(review)}:{})
     }
   });
   // Insert an encrypted outbox item atomically; the mail worker sends after commit.

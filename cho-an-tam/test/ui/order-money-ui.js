@@ -184,7 +184,7 @@ async function main() {
     'GET /api/notifications/todo':()=>json(200,{items:[]}),
   }});
   try {
-    ok(/Chưa đủ thông tin để biết người mua đã tự xác nhận/.test(p.viewText())&&!/chưa từng tự xác nhận/.test(p.viewText()),'unknown receipt data stays unknown instead of inventing a buyer action or lack of action');
+    ok(/Lịch sử đơn chưa ghi nhận việc người mua tự xác nhận/.test(p.viewText())&&!/chưa từng tự xác nhận/.test(p.viewText()),'unknown receipt data stays unknown instead of inventing a buyer action or lack of action');
     ok(!p.viewText().includes(shipping.phone),'admin dispute list does not invent or display shipping details');
     await click(p,'admin-claim-dispute');
     ok(p.count('POST /api/admin/disputes/dispute-ui/claim')===0,'claiming address access requires explicit confirmation');

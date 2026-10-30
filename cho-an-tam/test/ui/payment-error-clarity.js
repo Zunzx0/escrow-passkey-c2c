@@ -163,14 +163,16 @@ async function main() {
   let listCalls = 0;
   let handledElsewhere = false; // chỉ đổi sau khi máy chủ từ chối vì tranh chấp không còn mở
   const dispute = (status) => ({
-    id: 'd1', transactionId: 't1', status, openedBy: 'BUYER', reason: 'Sai mô tả', createdAt: new Date().toISOString(),
-    createdByName: 'Mua Thử', transaction: { id: 't1', itemName: 'Máy ảnh', amount: 1500000, buyerName: 'Mua Thử', sellerName: 'Bán Thử' },
+    id: 'd1', transactionId: 't1', adminId:ADMIN.id,revision:1,status, openedBy: 'BUYER', reason: 'Sai mô tả', createdAt: new Date().toISOString(),
+    createdByName: 'Mua Thử', transaction: { id: 't1',version:1,receivedConfirmedBy:'BUYER', itemName: 'Máy ảnh', amount: 1500000, buyerName: 'Mua Thử', sellerName: 'Bán Thử' },
   });
   p = await openPage({
     hash: '#/admin/disputes', user: ADMIN,
     routes: {
       ...baseRoutes(ADMIN),
       'GET /api/admin/disputes': () => { listCalls++; return json(200, { disputes: [dispute(handledElsewhere ? 'RESOLVED_REFUND' : 'OPEN')] }); },
+      'GET /api/admin/disputes/d1':()=>json(200,{dispute:dispute('OPEN'),transaction:dispute('OPEN').transaction,messages:[]}),
+      'POST /api/admin/disputes/d1/review':opts=>json(201,{review:{id:'review-error-case',decision:'REFUND',basis:JSON.parse(opts.body).basis,createdAt:new Date().toISOString()},dispute:dispute('OPEN'),transaction:dispute('OPEN').transaction}),
       'POST /api/admin/disputes/d1/reauth/options': () => { handledElsewhere = true; return json(409, { error: 'DISPUTE_NOT_OPEN', message: 'Dispute phải OPEN' }); },
     },
   });
@@ -178,6 +180,9 @@ async function main() {
   ok(!!refundBtn, 'Admin thấy nút hoàn tiền của tranh chấp đang mở');
   p.click(refundBtn);
   await sleep(200);
+  p.d.getElementById('disputeReviewBasis').value='Đã xem thông tin trong tình huống kiểm thử; ghi căn cứ trước khi mở bước xác nhận bằng Passkey.';
+  p.d.getElementById('disputeReviewRead').checked=true;
+  p.click(p.d.querySelector('[data-act="admin-review-save"][data-decision="REFUND"]'));await sleep(100);
   // Nếu giao diện có bước xem lại trước Passkey (PR #18) thì phải xác nhận mới có yêu cầu nào được gửi.
   const confirmBtn = p.d.querySelector('[data-act="admin-confirm"]');
   if (confirmBtn) p.click(confirmBtn);

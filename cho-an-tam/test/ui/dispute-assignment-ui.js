@@ -14,20 +14,21 @@ async function main(){
   }));
   const p=await wallet({user:admin,hash:'#/admin/disputes',extra:{'GET /api/admin/disputes':()=>json(200,{disputes:cases})}});
   try{
-    for(const i of [0,1]){
+    for(const i of [1]){
       ok(!!p.d.querySelector('[data-act="admin-refund"][data-id="assignment-case-'+i+'"]'),'eligible case offers refund: '+i);
       ok(!!p.d.querySelector('[data-act="admin-release"][data-id="assignment-case-'+i+'"]'),'eligible case offers release: '+i);
       ok(!!p.d.querySelector('[data-act="admin-claim-dispute"][data-id="assignment-case-'+i+'"]'),'eligible case offers claim/detail: '+i);
     }
+    for(const action of ['admin-refund','admin-release','admin-more'])ok(!p.d.querySelector('[data-act="'+action+'"][data-id="assignment-case-0"]'),'unclaimed case requires claim before '+action);
+    ok(!!p.d.querySelector('[data-act="admin-claim-dispute"][data-id="assignment-case-0"]'),'unclaimed case offers claim');
     for(const action of ['admin-refund','admin-release','admin-claim-dispute'])ok(!p.d.querySelector('[data-act="'+action+'"][data-id="assignment-case-2"]'),'another administrator\'s case does not offer '+action);
     ok(p.viewText().includes('Hồ sơ đang do quản trị viên khác phụ trách'),'ownership restriction has a plain-language explanation');
-    const open=p.d.querySelector('[data-act="admin-refund"][data-id="assignment-case-0"]');p.click(open);await sleep(70);
+    p.routes['GET /api/admin/disputes/assignment-case-1']=()=>json(409,{error:'DISPUTE_ASSIGNED'});
+    const open=p.d.querySelector('[data-act="admin-refund"][data-id="assignment-case-1"]');p.click(open);await sleep(70);
     p.w.SimpleWebAuthnBrowser.startAuthentication=async()=>{throw new Error('must not reach device');};
-    p.routes['POST /api/admin/disputes/assignment-case-0/reauth/options']=()=>json(409,{error:'DISPUTE_ASSIGNED'});
-    p.click(p.d.querySelector('[data-act="admin-confirm"]'));await sleep(90);
     ok(p.d.querySelector('.operation-error')?.textContent.includes('quản trị viên khác phụ trách'),'late assignment is explained inside the pending review');
     ok(!p.d.querySelector('[data-dialog-purpose="result"]')&&!p.toasts().length,'late assignment never creates a payment success or overlapping toast');
-    ok(p.count('POST /api/admin/disputes/assignment-case-0/refund')===0,'late assignment blocks the settlement call before device verification');
+    ok(p.count('POST /api/admin/disputes/assignment-case-1/refund')===0&&!p.d.querySelector('[data-act="admin-confirm"]'),'late assignment blocks the review and settlement call before device verification');
   }finally{p.close();}
   console.log(`DISPUTE ASSIGNMENT UI: ${checks} checks passed (JSDOM + fake API only)`);
 }

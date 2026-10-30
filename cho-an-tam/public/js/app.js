@@ -497,6 +497,9 @@ const App = (() => {
 
   const API_ERROR_MESSAGES = {
     DISPUTE_ASSIGNED:()=> 'Hồ sơ đã có quản trị viên khác phụ trách. Hãy tải lại danh sách để xem trạng thái mới.',
+    DISPUTE_CLAIM_REQUIRED:()=> 'Hãy nhận xử lý hồ sơ trước khi ghi căn cứ và quyết định trả tiền.',
+    DISPUTE_REVIEW_REQUIRED:()=> 'Hãy xem hồ sơ và lưu căn cứ quyết định trước. Tiền vẫn được Enclave giữ.',
+    DISPUTE_REVIEW_STALE:()=> 'Hồ sơ hoặc quyết định đã thay đổi. Hãy mở lại hồ sơ, xem thông tin mới và lưu căn cứ; tiền vẫn được giữ.',
     EMAIL_NOT_CONFIGURED:()=> 'Dịch vụ email xác minh chưa được cấu hình. Vui lòng liên hệ quản trị viên để hoàn tất thiết lập.',
     INVALID_AMOUNT: () => 'Số tiền phải là số nguyên đồng, ví dụ 150000 — không có phần lẻ, chữ hay ký tự khác.',
     // Khoảng hợp lệ thay đổi theo thao tác (nạp tiền, giao dịch) và cấu hình, nên lấy từ chính câu
@@ -5424,7 +5427,7 @@ const App = (() => {
   function disputeWarnings(d, transaction = {}) {
     const receiptWarning = !d.buyerNeverConfirmedReceipt ? '' : transaction.receivedConfirmedBy === 'SYSTEM'
       ? 'Hệ thống tự mở thời hạn kiểm hàng. Điều này không có nghĩa người mua đã nhận được hàng; cần kiểm tra thông tin giao nhận.'
-      : 'Chưa đủ thông tin để biết người mua đã tự xác nhận nhận hàng hay chưa. Cần kiểm tra lịch sử đơn và thông tin hai bên cung cấp.';
+      : 'Lịch sử đơn chưa ghi nhận việc người mua tự xác nhận nhận hàng. Quản trị viên cần đối chiếu thông tin giao nhận và lời trình bày của hai bên trước khi quyết định.';
     return `${d.openedBy === 'SYSTEM' ? '<div class="note note-warning">Hồ sơ do hệ thống tự mở để bảo vệ tiền đang giữ, không phải lời khiếu nại và không quy lỗi cho bên nào.</div>' : ''}
       ${receiptWarning ? `<div class="note note-danger">${esc(receiptWarning)}</div>` : ''}`;
   }
@@ -5432,6 +5435,11 @@ const App = (() => {
   function disputeEvidence(d) {
     const entries = Array.isArray(d.evidence) ? d.evidence : [];
     return entries.length ? `<div class="stack gap-3">${entries.map(item => `<div class="note"><span><b>${item.actorRole === 'BUYER' || item.openedBy === 'BUYER' ? 'Người mua' : item.actorRole === 'SELLER' || item.openedBy === 'SELLER' ? 'Người bán' : 'Nội dung bổ sung'}</b>${item.createdAt ? ' · ' + fmtDateTime(item.createdAt) : ''}<br>${esc(item.text || item.content || item.reason || '')}</span></div>`).join('')}</div>` : '';
+  }
+
+  function renderDisputeReview(r) {
+    if(!r)return '';
+    return `<div class="note ${r.decision==='REQUEST_MORE'?'note-warning':''}"><span><b>${r.decision==='REQUEST_MORE'?'Quản trị viên yêu cầu bổ sung thông tin':'Căn cứ quyết định đã lưu'}</b> · ${fmtDateTime(r.createdAt)}<br><span class="pre-wrap">${esc(r.basis)}</span>${r.decision==='REQUEST_MORE'?'<br>Tiền tiếp tục được Enclave giữ, chưa trả cho bên nào.':''}</span></div>`;
   }
 
   /** Ảnh bằng chứng của hồ sơ: chỉ siêu dữ liệu an toàn từ máy chủ, ảnh luôn đi qua fetch có xác thực. */
@@ -5461,6 +5469,7 @@ const App = (() => {
           ${disputeTypeSummary(d)}
           <p class="m-0-0-6">“${esc(d.reason)}”</p>
           ${disputeEvidence(d)}
+          ${(transaction.disputeReviews?.length?transaction.disputeReviews:[d.lastReview]).map(renderDisputeReview).join('')}
           ${renderDisputeMessages(messages || d.messages, transaction)}
           ${renderImageEvidence(d.imageEvidence || transaction?.imageEvidence, transaction)}
           ${d.evidenceDueAt && !resolved ? `<p class="small muted">Hai bên bổ sung nội dung trước ${fmtDateTime(d.evidenceDueAt)}.</p>` : ''}
@@ -5701,8 +5710,9 @@ const App = (() => {
           <div class="row">
             ${open && (!d.adminId || d.adminId === state.user.id) ? `
               <button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>
-              <button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Hoàn ${money(t.amount || 0)} cho người mua</button>
-              <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Chuyển ${money(t.amount || 0)} cho người bán</button>
+              ${d.adminId===state.user.id?`<button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Xem xét hoàn ${money(t.amount || 0)} cho người mua</button>
+              <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Xem xét chuyển ${money(t.amount || 0)} cho người bán</button>
+              <button class="btn btn-sm" data-act="admin-more" data-id="${esc(d.id)}">Yêu cầu bổ sung thông tin</button>`:''}
             ` : open ? '<span class="muted small">Hồ sơ đang do quản trị viên khác phụ trách. Bạn không thể quyết định trả tiền cho hồ sơ này.</span>' : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
             <a class="btn btn-ghost btn-sm" href="#/audit/${esc(d.transactionId)}">${ico('link-2', 15)} Nhật ký</a>
           </div>
@@ -5745,18 +5755,66 @@ const App = (() => {
    * quản trị viên không bấm nhầm hai nút liền kề. Xác nhận ở đây chỉ mở đường tới bước
    * Passkey; phiếu uỷ quyền và quyền của máy chủ không đổi.
    */
-  function openDisputeConfirm(kind, disputeId) {
-    const d = disputeCache.get(disputeId);
-    if (!d) return toast('Không tìm thấy tranh chấp — hãy tải lại trang.', 'err');
-    const t = d.transaction || {};
+  async function openDisputeConfirm(kind, disputeId) {
+    openModal({title:'Đọc hồ sơ trước khi quyết định',body:'<p>Đang tải thông tin mới nhất…</p>',footer:'<button class="btn" data-act="modal-close">Đóng</button>'});
+    const scope={epoch:state.sessionEpoch,generation:modalGeneration,hash:location.hash};
+    let detail;
+    try{detail=await api('/admin/disputes/'+encodeURIComponent(disputeId));}
+    catch(e){if(mediaSubmissionAlive(scope)&&!e.silent)inlineFeedback(e.message,'err');return;}
+    if(!mediaSubmissionAlive(scope))return;
+    const d=detail.dispute,t=detail.transaction||{};
+    if(d?.status!=='OPEN'||d.adminId!==state.user.id){inlineFeedback('Hồ sơ không còn mở hoặc chưa do bạn nhận xử lý. Hãy tải lại danh sách.','err');return;}
+    disputeCache.set(disputeId,{...d,transaction:t});
+    const decision=kind==='more'?'REQUEST_MORE':kind==='refund'?'REFUND':'RELEASE';
+    openModal({wide:true,title:(disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · ':'')+'Ghi căn cứ xử lý',body:`<div class="stack">
+      ${disputeWarnings(d,t)}
+      <p>Đơn: <b>${esc(t.itemName||'Đơn hàng')}</b> · <b>${money(t.amount||0)}</b> đang được giữ.</p>
+      <p class="pre-wrap"><b>Vấn đề cần xử lý:</b> ${esc(d.reason||'')}</p>
+      ${renderDisputeMessages(detail.messages,t)}${renderImageEvidence(detail.imageEvidence,t)}
+      ${renderDisputeReview(d.lastReview)}
+      <details><summary>Thông tin giao nhận của đơn</summary>${shippingSummary(t.shipping)}</details>
+      <div class="field"><label for="disputeReviewBasis">${decision==='REQUEST_MORE'?'Thông tin đã xem và nội dung cần hai bên bổ sung':'Thông tin đã xem và lý do chọn '+(decision==='REFUND'?'hoàn tiền cho người mua':'chuyển tiền cho người bán')}</label><textarea id="disputeReviewBasis" rows="5" minlength="30" maxlength="2000" placeholder="Nêu thông tin, ảnh hoặc lời trình bày đã đối chiếu; giải thích vì sao chọn cách xử lý này. Không chép địa chỉ, số điện thoại hay thông tin nhạy cảm."></textarea><p class="hint">Từ 30 đến 2.000 ký tự. Nội dung được lưu trong hồ sơ riêng để hai bên xem.</p><p class="field-error" data-review-error="basis" role="alert" hidden></p></div>
+      <label class="check"><input type="checkbox" id="disputeReviewRead"> Tôi đã đọc vấn đề, thông tin giao nhận và nội dung hai bên cung cấp trong hồ sơ.</label><p class="field-error" data-review-error="reviewed" role="alert" hidden></p>
+      ${decision!=='REQUEST_MORE'&&t.receivedConfirmedBy!=='BUYER'?'<label class="check"><input type="checkbox" id="disputeReviewReceipt"> Tôi hiểu lịch sử chưa ghi nhận người mua tự xác nhận nhận hàng; đã đối chiếu thông tin giao nhận và ghi căn cứ xử lý ở trên.</label><p class="field-error" data-review-error="receiptAcknowledged" role="alert" hidden></p>':''}
+      <div class="note">${decision==='REQUEST_MORE'?'Chưa đủ căn cứ: yêu cầu hai bên bổ sung. Tiền tiếp tục được giữ.':'Lưu căn cứ chưa trả tiền. Bạn sẽ xem lại số tiền, người nhận rồi xác nhận bằng Passkey ở bước sau.'}</div>
+      </div>`,footer:`<button class="btn" data-act="modal-close">Hủy</button>${decision!=='REQUEST_MORE'?`<button class="btn" data-act="admin-review-save" data-decision="REQUEST_MORE" data-id="${esc(disputeId)}">Chưa đủ căn cứ — yêu cầu bổ sung</button>`:''}<button class="btn btn-primary" data-act="admin-review-save" data-decision="${decision}" data-id="${esc(disputeId)}">${decision==='REQUEST_MORE'?'Gửi yêu cầu bổ sung':'Lưu căn cứ và xem lại quyết định'}</button>`});
+  }
+
+  async function saveDisputeReview(disputeId,decision,btn){
+    const d=disputeCache.get(disputeId),t=d?.transaction;
+    if(!d||!t)return;
+    const body={decision,basis:$('#disputeReviewBasis').value.trim(),reviewed:$('#disputeReviewRead').checked,receiptAcknowledged:$('#disputeReviewReceipt')?.checked===true,expectedDisputeRevision:d.revision,expectedOrderVersion:t.version};
+    const errors={};
+    if(body.basis.length<30||body.basis.length>2000)errors.basis='Ghi thông tin đã xem và lý do xử lý, từ 30 đến 2.000 ký tự.';
+    if(!body.reviewed)errors.reviewed='Hãy đọc hồ sơ và xác nhận đã xem thông tin hai bên.';
+    if(decision!=='REQUEST_MORE'&&t.receivedConfirmedBy!=='BUYER'&&!body.receiptAcknowledged)errors.receiptAcknowledged='Hãy kiểm tra và xác nhận đã hiểu thông tin nhận hàng còn thiếu.';
+    const show=fields=>document.querySelectorAll('[data-review-error]').forEach(el=>{el.textContent=fields[el.dataset.reviewError]||'';el.hidden=!el.textContent;});
+    show(errors);if(Object.keys(errors).length)return;
+    const scope={epoch:state.sessionEpoch,generation:modalGeneration,hash:location.hash};
+    const result=await guard('review:'+disputeId,btn,async()=>{
+      try{return await api('/admin/disputes/'+encodeURIComponent(disputeId)+'/review',{method:'POST',body});}
+      catch(e){if(mediaSubmissionAlive(scope)&&e.fieldErrors)show(e.fieldErrors);throw e;}
+    });
+    if(!result||!mediaSubmissionAlive(scope))return;
+    disputeCache.set(disputeId,{...d,...result.dispute,transaction:{...t,...result.transaction}});
+    if(decision==='REQUEST_MORE'){
+      openModal({title:'Đã yêu cầu bổ sung thông tin',body:'<p>Nội dung đã được lưu trong hồ sơ để hai bên xem. Tiền vẫn được Enclave giữ, chưa trả cho bên nào.</p>',footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'});return;
+    }
+    showSavedDisputeDecision(decision==='REFUND'?'refund':'release',disputeId,result.review);
+  }
+
+  function showSavedDisputeDecision(kind,disputeId,review){
+    const d=disputeCache.get(disputeId),t=d.transaction;
     const refund = kind === 'refund';
     const recipient = refund ? 'Người mua' : 'Người bán';
     const recipientName = refund ? t.buyerName : t.sellerName;
     openModal({
+      wide:true,
       title: (disputeCode(d)?'Hồ sơ '+disputeCode(d)+' · ':'')+(refund ? 'Hoàn tiền cho người mua' : 'Chuyển tiền cho người bán'),
       body: `
         <div class="stack">
           ${disputeWarnings(d, t)}
+          ${renderDisputeReview(review)}
           <div class="note note-warning">
             ${ico('triangle-alert', 18)}
             <span>Quyết định này <b>không thể tự hủy lại</b>: Enclave sẽ trả tiền cho bên được chọn và lưu quyết định trong lịch sử đơn.</span>
@@ -5770,30 +5828,36 @@ const App = (() => {
       footer: `
         <button class="btn" data-act="modal-close">Huỷ</button>
         <button class="btn btn-primary" data-act="admin-confirm" data-kind="${refund ? 'refund' : 'release'}"
-          data-id="${esc(disputeId)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận chuyển tiền'} và dùng Passkey</button>`,
+          data-id="${esc(disputeId)}" data-review-id="${esc(review.id)}">${ico('shield-check', 17)} ${refund ? 'Xác nhận hoàn tiền' : 'Xác nhận chuyển tiền'} và dùng Passkey</button>`,
     });
   }
 
   async function adminResolve(kind, disputeId, btn) {
     const decision = kind === 'refund' ? 'REFUND' : 'RELEASE';
     const dispute = disputeCache.get(disputeId);
+    const scope={epoch:state.sessionEpoch,generation:modalGeneration,hash:location.hash};
+    const current=()=>{if(!mediaSubmissionAlive(scope))throw Object.assign(new Error('Thao tác thuộc màn hình hoặc phiên trước.'),{silent:true});};
     const result = await guard('adm:' + disputeId, btn, async () => {
       const { reauthSessionId, options } = await api(`/admin/disputes/${disputeId}/reauth/options`, {
-        method: 'POST', body: { decision },
+        method: 'POST', body: { decision,reviewId:btn.dataset.reviewId },
       });
+      current();
       const assertion = await webauthn('reauth', () =>
         SimpleWebAuthnBrowser.startAuthentication({ optionsJSON: options }));
+      current();
       const { reauthGrant } = await api(`/admin/disputes/${disputeId}/reauth/verify`, {
         method: 'POST', body: { reauthSessionId, response: assertion },
       });
+      current();
       const outcome = await api(`/admin/disputes/${disputeId}/${kind}`, {
-        method: 'POST', body: { requestId: newRequestId(), reauthGrant },
+        method: 'POST', body: { requestId: newRequestId(), reauthGrant,reviewId:btn.dataset.reviewId },
       });
+      current();
       confirmedTransactionResult(outcome?.transaction,dispute?.transactionId || dispute?.transaction?.id,kind === 'refund' ? [['REFUNDED','REFUNDED']] : [['RELEASED','RELEASED']]);
       if (outcome?.dispute?.id !== disputeId) throw Object.assign(new Error('Chưa xác nhận được kết quả xử lý hồ sơ. Hãy kiểm tra lại trạng thái.'),{unknownOutcome:true});
       return outcome;
     });
-    if (!result) return;
+    if (!result||!mediaSubmissionAlive(scope)) return;
     await finishMoneyFeedback({title:kind === 'refund' ? 'Đã hoàn tiền cho người mua' : 'Đã chuyển tiền cho người bán',body:`<p>Hồ sơ đã được xử lý. Toàn bộ tiền của đơn ${kind === 'refund' ? 'đã về ví người mua' : 'đã chuyển vào ví người bán'}.</p><p>Kết quả được lưu trong lịch sử đơn hàng.</p>`,footer:'<button class="btn btn-primary" data-act="modal-close">Đã hiểu</button>'},false);
   }
 
@@ -5919,6 +5983,9 @@ const App = (() => {
     BUYER_RECEIVED_PACKAGE: 'Người mua đã nhận hàng',
     ESCROW_RELEASED: 'Đã chuyển tiền cho người bán',
     DISPUTE_OPENED: 'Mở tranh chấp',
+    DISPUTE_CLAIMED: 'Quản trị viên nhận xử lý hồ sơ',
+    DISPUTE_REVIEW_SAVED: 'Đã lưu căn cứ quyết định — tiền vẫn đang giữ',
+    DISPUTE_MORE_INFORMATION_REQUESTED: 'Yêu cầu bổ sung thông tin — tiền vẫn đang giữ',
     ADMIN_REFUND: 'Quản trị viên hoàn tiền',
     ADMIN_RELEASE: 'Quản trị viên quyết định chuyển tiền cho người bán',
   };
@@ -6095,6 +6162,8 @@ const App = (() => {
     'seed-demo': (el) => seedDemo(el),
 
     'admin-refund': (el) => openDisputeConfirm('refund', el.dataset.id),
+    'admin-more': (el) => openDisputeConfirm('more', el.dataset.id),
+    'admin-review-save': (el) => saveDisputeReview(el.dataset.id,el.dataset.decision,el),
     'admin-release': (el) => openDisputeConfirm('release', el.dataset.id),
     'admin-confirm': (el) => adminResolve(el.dataset.kind, el.dataset.id, el),
     'admin-claim-dispute': (el) => confirmClaimDispute(el.dataset.id),

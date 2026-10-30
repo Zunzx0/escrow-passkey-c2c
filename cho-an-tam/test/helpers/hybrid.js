@@ -116,11 +116,14 @@ function makeAuthFlows({ api, rpId, origin }) {
    * @param decision REFUND hoặc RELEASE
    */
   async function adjudicationGrant(adminToken, auth, disputeId, decision, { uv = true } = {}) {
+    ok(await api(`/api/admin/disputes/${disputeId}/claim`,{method:'POST',token:adminToken,body:{}}),'Nhận hồ sơ trước phân xử');
+    const detail=ok(await api(`/api/admin/disputes/${disputeId}`,{token:adminToken}),'Đọc hồ sơ trước phân xử').data;
+    const review=ok(await api(`/api/admin/disputes/${disputeId}/review`,{method:'POST',token:adminToken,body:{decision,basis:'Đã xem nội dung tranh chấp và thông tin hai bên trong kịch bản tự động; lưu căn cứ mô phỏng trước khi ký quyết định.',reviewed:true,receiptAcknowledged:true,expectedDisputeRevision:detail.dispute.revision,expectedOrderVersion:detail.transaction.version}}),'Lưu căn cứ phân xử').data.review;
     const opt = ok(
       await api(`/api/admin/disputes/${disputeId}/reauth/options`, {
         method: 'POST',
         token: adminToken,
-        body: { decision },
+        body: { decision,reviewId:review.id },
       }),
       `Xin challenge phân xử (${decision})`
     );

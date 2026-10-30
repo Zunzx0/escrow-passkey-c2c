@@ -336,6 +336,7 @@ function openSqlite() {
   migratePasskeyCredentials();
   require('./lib/authMigration').migrateSqlite(db);
   require('./lib/orderMigration').migrateSqlite(db);
+  require('./lib/disputeReview').migrateSqlite(db);
   require('./lib/disputeReferenceMigration').migrateSqlite(db);
   db.exec(fs.readFileSync(path.join(__dirname, 'schema.media.sql'), 'utf8'));
   db.exec(fs.readFileSync(path.join(__dirname, 'schema.sqlite.005-paypal-bindings.sql'), 'utf8'));
@@ -384,6 +385,7 @@ const PG_MIGRATIONS = [
   { version: 12, name: 'order-lifecycle-address-inspection', file: 'schema.pg.012-order-lifecycle.sql' },
   { version: 13, name: 'private-media-assets', file: 'schema.pg.013-media.sql' },
   { version: 14, name: 'dispute-display-references', file: 'schema.pg.014-dispute-references.sql' },
+  { version: 15, name: 'dispute-reviews', file: 'schema.pg.015-dispute-reviews.sql' },
 ];
 
 function installPgTypeParsers(pg) {
