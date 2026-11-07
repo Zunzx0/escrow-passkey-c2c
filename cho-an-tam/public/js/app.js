@@ -42,6 +42,8 @@ const App = (() => {
     topupPoll: null,            // hẹn giờ đang chờ kết quả một yêu cầu nạp tiền
     topupPollGen: 0,            // tăng mỗi lần bắt đầu/dừng theo dõi; vòng theo dõi cũ thấy số khác thì tự thoát
     topupPollWake: null,        // hàm đánh thức lượt chờ đang treo, để huỷ theo dõi cũng kết thúc Promise đang đợi
+    sessionRestorePending: false,
+    sessionRestoreBusy: false,
     sessionEpoch: 0,            // tăng mỗi khi PHIÊN đổi (đăng xuất, đăng nhập mới, đổi tài khoản); không tăng khi chỉ làm mới token
     topupIntent: null,          // bản nhớ trong bộ nhớ của ý định nạp tiền chưa rõ kết quả (bản lưu nằm ở localStorage)
     topupNotice: null,          // thông báo trạng thái nạp tiền đang hiện trên trang ví
@@ -211,9 +213,11 @@ const App = (() => {
       if(epoch!==state.sessionEpoch)throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
       if(!response.ok) {
         const data=await response.json().catch(()=>({}));
-        if(response.status===401&&data.error==='UNAUTHENTICATED'&&!retried&&await refreshSession()) {
+        if(response.status===401&&data.error==='UNAUTHENTICATED'&&!retried) {
+          const refreshed=await refreshSession();
           if(epoch!==state.sessionEpoch)throw Object.assign(new Error('Ảnh của phiên cũ'),{silent:true});
-          return mediaRequest(path,{method,file,controller},true);
+          if(refreshed===null)throw sessionRefreshUnavailable();
+          if(refreshed)return mediaRequest(path,{method,file,controller},true);
         }
         const error=new Error(apiErrorMessage(response.status,data));error.code=data.error;error.status=response.status;throw error;
       }
@@ -465,24 +469,61 @@ const App = (() => {
         try {
           const perform=async()=>{
             for(let attempt=0;attempt<3;attempt++){
-              const result=await fetchJson(API_BASE + '/api/passkeys/session/refresh', {method:'POST',credentials:'include'});
+              const result=await fetchJson(API_BASE + '/api/passkeys/session/refresh', {method:'POST',credentials:'include',keepalive:true});
               if(result.res.status!==409||result.data.error!=='SESSION_REFRESH_ROTATED'||attempt===2)return result;
               await new Promise(resolve=>setTimeout(resolve,150*2**attempt));
               if(state.sessionEpoch!==epoch||localStorage.getItem(SIGNED_OUT)==='1')return {res:{ok:false},data:{}};
             }
           };
           const {res,data} = await withAuthCookieLock(perform);
-          if (state.sessionEpoch !== epoch || !res.ok) return false;
-          if (state.sessionEpoch !== epoch || !data.token || !data.user || (userId && data.user.id !== userId)) return false;
+          if (state.sessionEpoch !== epoch) return false;
+          // Chỉ phản hồi xác thực của API mới chứng minh phiên đã kết thúc.
+          // null = chưa xác minh được; lỗi mạng, proxy hay giới hạn tần suất
+          // không được biến thành đăng xuất, cũng không cho phép thử lại lệnh tiền.
+          if (!res.ok) return res.status===401&&['SESSION_EXPIRED','UNAUTHENTICATED'].includes(data.error)?false:null;
+          if (typeof data.token!=='string'||!data.token||!data.user||typeof data.user.id!=='string'||!data.user.id||(userId&&data.user.id!==userId)) return null;
           setSession(data.token, { ...(state.user || {}), ...data.user });
           if(data.scope==='recover')authUi.recoveryEmail=data.recoveryMethod==='EMAIL';
           return true;
-        } catch (_) { return false; }
+        } catch (_) { return null; }
       })();
       refreshing = job;
       job.promise.finally(() => { if (refreshing === job) refreshing = null; });
     }
     return refreshing.promise;
+  }
+
+  function sessionRefreshUnavailable() {
+    const error=new Error('Chưa kiểm tra được phiên đăng nhập vì máy chủ chưa sẵn sàng hoặc kết nối bị gián đoạn. Hãy chờ một lúc rồi thử lại.');
+    error.code='SESSION_REFRESH_UNAVAILABLE';
+    error.status=503;
+    return error;
+  }
+
+  function renderSessionRestorePending() {
+    view().innerHTML='<div class="page"><div class="card"><div class="card-body" role="status" aria-live="polite"><h2>Chưa khôi phục được đăng nhập</h2><p>Hệ thống chưa xác nhận được phiên của bạn. Hãy chờ một chút rồi thử lại.</p><button class="btn btn-primary" data-act="session-restore-retry" '+(state.sessionRestoreBusy?'disabled aria-busy="true"':'')+'>'+(state.sessionRestoreBusy?'Đang kiểm tra…':'Thử lại')+'</button></div></div></div>';
+  }
+
+  async function retrySessionRestoration() {
+    if(!state.sessionRestorePending||state.sessionRestoreBusy)return;
+    const epoch=state.sessionEpoch;
+    state.sessionRestoreBusy=true;
+    renderSessionRestorePending();
+    try {
+      const restored=await refreshSession();
+      if(restored!==true&&state.sessionEpoch!==epoch)return;
+      if(restored===null)return;
+      state.sessionRestorePending=false;
+      await refreshSellerRequest();
+      renderChrome();
+      await route();
+      if(state.user?.authMethod==='recovery')openRecoveryPasskey(authUi.recoveryEmail);
+      else if(state.token&&state.user&&state.user.accountStatus&&!['BASIC','VERIFIED','ACTIVE','RECOVERING'].includes(state.user.accountStatus))openSetupModal(state.user);
+      await handleAccountAction();
+    } finally {
+      state.sessionRestoreBusy=false;
+      if(state.sessionRestorePending)renderSessionRestorePending();
+    }
   }
 
   // ---------------------------------------------------------------------
@@ -644,6 +685,7 @@ const App = (() => {
       const refreshed = !retried && await refreshSession();
       if (state.sessionEpoch !== epoch) throw oldSession();
       if (refreshed) return api(path, { method, body, allowAuthRetry }, true);
+      if (refreshed===null) throw sessionRefreshUnavailable();
       clearSession();
       renderChrome();
       route();
@@ -1166,6 +1208,8 @@ const App = (() => {
     const fresh = !state.token || !state.user || !user || state.user.id !== user.id;
     state.token = token;
     state.user = user;
+    state.sessionRestorePending=false;
+    state.sessionRestoreBusy=false;
     if (fresh) {
       clearPasskeyPreparations();
       orderIntents.clear();
@@ -1186,6 +1230,8 @@ const App = (() => {
     stopShippingWatch();
     state.token = null;
     state.user = null;
+    state.sessionRestorePending=false;
+    state.sessionRestoreBusy=false;
     state.wallet = null;
     state.sellerRequest = null;
     state.unread = 0;
@@ -2103,6 +2149,7 @@ const App = (() => {
   }
 
   async function route() {
+    if(state.sessionRestorePending&&!state.token){renderSessionRestorePending();return;}
     const hash = (location.hash || '#/').replace(/^#/, '');
     const [pathPart] = hash.split(/[?&]/);
     const parts = pathPart.split('/').filter(Boolean);
@@ -4002,6 +4049,7 @@ const App = (() => {
     if (res.status === 401 && !retried) {
       const refreshed = await refreshSession();
       if (state.sessionEpoch !== epoch) throw staleError();
+      if (refreshed===null) throw sessionRefreshUnavailable();
       if (refreshed) return providerApi(path, { method, body }, true);
     }
     if (!res.ok) {
@@ -6171,6 +6219,7 @@ const App = (() => {
     'media-overlay-close': () => closeMediaOverlay(),
     'media-discard-confirm': () => { if (!mediaDraftBusy()) closeModal(); },
     'reload': () => route(),
+    'session-restore-retry': () => retrySessionRestoration(),
     'feedback-refresh': async (el) => {await guard('feedback-refresh',el,async()=>{await refreshWallet({reportFailure:true});closeModal();await route();});},
     'open-sell': () => openSell(),
     'passkey-check': (el) => refreshPasskeyReadiness(el.dataset.target),
@@ -6396,8 +6445,10 @@ const App = (() => {
     // Restore only from the rotating HttpOnly cookie; clear legacy access-token storage.
     localStorage.removeItem(STORAGE_TOKEN);localStorage.removeItem(STORAGE_USER);
     view().innerHTML='<div class="page"><div class="card p-5" role="status">Đang khôi phục phiên đăng nhập…</div></div>';
-    await refreshSession();
-    if (state.token && !state.token.startsWith('vrf_')) {
+    const restoreEpoch=state.sessionEpoch;
+    const restored=await refreshSession();
+    if(state.sessionEpoch===restoreEpoch&&restored===null&&!state.token)state.sessionRestorePending=true;
+    if (state.token && !state.token.startsWith('vrf_')&&!state.sessionRestorePending) {
       const epoch = state.sessionEpoch;
       try {
         const me = await api('/users/me');
