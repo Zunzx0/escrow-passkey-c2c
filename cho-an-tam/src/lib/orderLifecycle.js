@@ -7,6 +7,7 @@ const { orderPolicy, orderDeadline, afterHours } = require('./orderPolicy');
 const { maybeFail } = require('./faultInjection');
 const { referenceFields } = require('./disputeReference');
 const { notify, onDisputeOpened, onOrderWaitConfirm } = require('./notifications');
+const integrity = require('./orderIntegrity');
 // The transaction row is the first write for every order event, including audit-only
 // events. CAS is the final authority even if another app process read an older row.
 async function transitionOrder(txn,changes,{ at=nowIso() } = {}) {
@@ -30,6 +31,7 @@ async function canReleaseBuyer(txn) {
 }
 
 async function assertReleaseReady(txn,{ requireInspection=true } = {}) {
+  await integrity.assertNotHeld(db, txn.id);
   if(!(await canReleaseBuyer(txn)))throw new AppError(409,'INVALID_STATE','Đơn không còn ở bước người mua được giải ngân.');
   if(requireInspection&&!txn.inspected_at)throw new AppError(409,'INSPECTION_REQUIRED','Hãy xác nhận đã kiểm hàng trước khi đồng ý giải ngân.');
 }
@@ -57,6 +59,7 @@ function serializeDispute(d) {
 // Caller owns db.transaction and authorizes the decision. This helper never accepts
 // a caller-supplied amount or recipient. A single CAS precedes both money legs.
 async function settleOrder(txn,{ decision,actorId=null,requestId,reason,listingOutcome,finalStatus,grant=null,dispute=null,review=null,at=nowIso(),action } = {}) {
+  await integrity.assertOrderIntegrity(db, txn.id);
   if(!['LOCKED','FROZEN'].includes(txn.escrow_status))throw new AppError(409,'INVALID_STATE','Khoản ký quỹ đã được xử lý.');
   const refund=decision==='REFUND';
   if(!refund&&decision!=='RELEASE')throw new Error('Invalid settlement');
@@ -288,6 +291,7 @@ async function runOrderLifecycle({ now=Date.now() } = {}) {
       event=await db.transaction(async()=>{
         const txn=await db.prepare('SELECT * FROM transactions WHERE id=?').get(candidate.id);
         if(!txn)return null;
+        if(await integrity.getHold(db,txn.id))return null;
         const shipment=await db.prepare('SELECT * FROM shipments WHERE transaction_id=?').get(txn.id),dispute=await db.prepare('SELECT * FROM disputes WHERE transaction_id=?').get(txn.id);
         const deadline=orderDeadline(txn,shipment);
         if(!deadline||deadline>at)return {
@@ -345,6 +349,7 @@ async function runOrderLifecycle({ now=Date.now() } = {}) {
         };
       })();
     } catch(error){
+      if(await integrity.preserveIntegrityFailure(error))continue;
       if(error.status===409)continue;
       throw error;
     }

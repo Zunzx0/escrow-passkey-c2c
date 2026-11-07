@@ -107,6 +107,8 @@ const App = (() => {
     WEBHOOK_CONFLICT: 'Webhook trái với kết quả đã tất toán',
     RECONCILE_CONFLICT: 'Đối soát: provider báo kết quả khác',
     COUNTER_ANOMALY: 'signCount của Passkey bất thường',
+    ORDER_INTEGRITY_HOLD: 'Tạm dừng đơn vì dữ liệu chưa khớp',
+    ORDER_INTEGRITY_BLOCKED: 'Đã chặn xử lý tiền của đơn cần kiểm tra',
     TOPUP_SUCCEEDED: 'Nạp tiền thành công',
     TOPUP_FAILED: 'Nạp tiền thất bại',
     REGISTRATION_DENIED: 'Thông tin đăng ký không khả dụng',
@@ -2639,16 +2641,16 @@ const App = (() => {
           <div class="order-tile">${productImage({ category: t.listingCategory,images:t.images,title:t.itemName }, { size: 30 })}</div>
           <div>
             <a class="order-title" href="#/tx/${esc(t.id)}">${esc(t.itemName)}</a>
-            <div class="row gap-6px">${statusTag(t)}${escrowTag(t)}${disputeCode({caseCode:t.disputeCaseCode})?`<span class="tag">Hồ sơ ${esc(t.disputeCaseCode)}</span>`:''}</div>
-            ${progressBar(t)}
+            <div class="row gap-6px">${t.integrityHold?.active ? '<span class="tag tag-danger">Đang kiểm tra dữ liệu</span>' : statusTag(t) + escrowTag(t)}${disputeCode({caseCode:t.disputeCaseCode})?`<span class="tag">Hồ sơ ${esc(t.disputeCaseCode)}</span>`:''}</div>
+            ${t.integrityHold?.active ? '<span class="small muted">Các bước xử lý tiền đã tạm dừng.</span>' : progressBar(t)}
           </div>
           <div class="order-amount">
-            <b>${money(t.amount)}</b>
-            <span class="muted">${t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN' ? 'Enclave đang giữ' : ''}</span>
+            <b>${t.integrityHold?.active ? 'Đang đối chiếu' : money(t.amount)}</b>
+            <span class="muted">${t.integrityHold?.active ? 'Thông tin đơn cần kiểm tra lại' : t.escrowStatus === 'LOCKED' || t.escrowStatus === 'FROZEN' ? 'Enclave đang giữ' : ''}</span>
           </div>
         </div>
         <div class="order-foot">
-          <span class="small muted">${ico('info', 14)} ${esc(nextStepText(t, isBuyer))}</span>
+          <span class="small muted">${ico('info', 14)} ${t.integrityHold?.active ? 'Enclave đang kiểm tra lại thông tin của đơn. Việc chuyển tiền và hoàn tiền đã tạm dừng.' : esc(nextStepText(t, isBuyer))}</span>
           <div class="row">
             ${orderActions(t, isBuyer)}
             <a class="btn btn-sm" href="#/tx/${esc(t.id)}">Xem chi tiết</a>
@@ -2664,6 +2666,7 @@ const App = (() => {
    * quan sát được kiện hàng đã tới tay), người bán chỉ báo đã gửi hàng.
    */
   function orderActions(t, isBuyer) {
+    if (t.integrityHold?.active) return '';
     const id = esc(t.id);
     const out = [];
     if (isBuyer) {
@@ -5241,6 +5244,7 @@ const App = (() => {
     const me = state.user;
     const role = t.buyerId === me.id ? 'BUYER' : t.sellerId === me.id ? 'SELLER' : me.role === 'ADMIN' ? 'ADMIN' : null;
     const isBuyer = role === 'BUYER';
+    const held = !!t.integrityHold?.active;
 
     view().innerHTML = `
       <div class="page" id="txPage" data-id="${esc(t.id)}" data-shipping-key="${esc(shippingKey(t))}">
@@ -5260,9 +5264,9 @@ const App = (() => {
             </div>
           </div>
           <div class="tx-value">
-            <span>Giá trị giao dịch</span>
-            <b>${money(t.amount)}</b>
-            <div class="mt-6px">${statusTag(t)}</div>
+            <span data-tx-value-label>${held ? 'Giá trị cần đối chiếu' : 'Giá trị giao dịch'}</span>
+            <b data-tx-value>${held ? 'Đang đối chiếu' : money(t.amount)}</b>
+            <div class="mt-6px" data-tx-status>${statusTag(t)}${held ? '<span class="tag tag-danger tx-hold-tag">Đang kiểm tra dữ liệu</span>' : ''}</div>
           </div>
         </div>
 
@@ -5302,7 +5306,7 @@ const App = (() => {
                   <button class="btn btn-sm" data-act="tx-verify-chain" data-id="${esc(t.id)}">${ico('shield-check', 15)} Kiểm tra lịch sử đơn</button>
                   <a class="btn btn-sm btn-ghost" href="#/audit/${esc(t.id)}">Xem chi tiết lịch sử</a>
                 </div>
-                <div id="txChainResult"></div>
+                <div id="txChainResult">${held ? '<p class="small muted">Dấu tạm dừng đang được lưu trên đơn. Bấm Kiểm tra lịch sử đơn để kiểm chứng lại dữ liệu hiện tại.</p>' : ''}</div>
               </div>
             </div>
           </div>
@@ -5337,7 +5341,7 @@ const App = (() => {
     const currentIndex = steps.findIndex(step => !orderMilestone(t,step.key,logs));
     return steps.map((s, i) => {
       let cls = orderMilestone(t,s.key,logs) ? 'done' : 'pending';
-      if (!terminal && t.status !== 'DISPUTED' && i === currentIndex) cls = 'current';
+      if (!t.integrityHold?.active && !terminal && t.status !== 'DISPUTED' && i === currentIndex) cls = 'current';
       if (s.dispute && t.status === 'DISPUTED') cls = 'failed';
       const time = timeOf(s.actions) || (s.key === 'INSPECTED' ? t.inspectedAt : s.key === 'RECEIVED' ? t.receivedConfirmedAt : null);
       const note = s.key === 'ACK' && cls === 'done' && !t.sellerAckAt ? 'Người bán gửi hàng mà không bấm xác nhận đơn riêng' : '';
@@ -5354,6 +5358,10 @@ const App = (() => {
   }
 
   function escrowBox(t) {
+    if(t.integrityHold?.active){
+      const holding = ['LOCKED','FROZEN'].includes(t.integrityHold.referenceEscrowStatus||t.escrowStatus);
+      return `<div class="escrow-box frozen"><div class="label">${ico('shield-check',15)} Tiền của đơn hàng</div><div><b>${holding ? 'Tạm dừng xử lý tiền' : 'Lịch sử đang được đối chiếu'}</b></div><p class="small">${holding?'Tiền đang giữ chưa được trả cho bên nào. Thông tin đơn cần được kiểm tra lại.':'Khoản tiền đã có kết quả xử lý trước đó. Lần kiểm tra này không thu hồi tiền hoặc làm thay đổi số dư ví.'}</p></div>`;
+    }
     const b = ESCROW_BOX[t.escrowStatus] || ESCROW_BOX.NONE;
     const flow = ['Ví người mua', 'Enclave', 'Ví người bán'];
     return `
@@ -5369,6 +5377,7 @@ const App = (() => {
   }
 
   function actionBox(t, role, isBuyer) {
+    if(t.integrityHold?.active)return `<div class="action-box idle"><h3>Hành động hiện tại</h3>${integrityNotice(t)}<a class="btn btn-sm" href="#/audit/${esc(t.id)}">Xem lịch sử đơn</a></div>`;
     const acts = role === 'ADMIN'
       ? (t.status === 'DISPUTED' ? `<a class="btn btn-primary" href="#/admin/disputes">${ico('gavel', 16)} Phân xử tranh chấp</a>` : '')
       : role ? orderActions(t, isBuyer) : '';
@@ -5424,11 +5433,27 @@ const App = (() => {
     return `<p class="small">Vấn đề cần xem xét: <b>${esc(code)} — ${esc(category.label)}</b></p>${changed?'<p class="hint">Mã hồ sơ được giữ nguyên từ lúc mở. Loại vấn đề hiện tại đã được cập nhật.</p>':''}`;
   }
 
+  function integrityPosition(result) {
+    const hold=result?.integrityHold;
+    const position=(fresh,saved)=>[fresh,saved].find(value=>Number.isSafeInteger(value)&&value>0);
+    const observed=position(result?.invalidSequenceNo,hold?.invalidSequenceNo);
+    const expected=position(result?.expectedSequenceNo,hold?.expectedSequenceNo);
+    if(observed)return expected&&expected!==observed
+      ? ` Thứ tự nhật ký không khớp: cần mốc ${expected}, gặp mốc ${observed}. Đây là điểm sai lệch đầu tiên quan sát được.`
+      : ` Điểm sai lệch đầu tiên được ghi nhận: mốc nhật ký ${observed}.`;
+    const reference=position(result?.referenceSequenceNo,hold?.referenceSequenceNo);
+    return reference?` Dữ liệu hiện tại không khớp với thông tin đã ghi nhận tại mốc nhật ký ${reference}.`:'';
+  }
+
+  function integrityNotice(transaction) {
+    return transaction?.integrityHold?.active?`<div class="note note-danger" role="alert"><span>Dữ liệu đơn chưa khớp với lịch sử. Enclave đã tạm dừng chuyển tiền và hoàn tiền của riêng đơn này để kiểm tra.${esc(integrityPosition(transaction))} Đơn không tự mở lại.</span></div>`:'';
+  }
+
   function disputeWarnings(d, transaction = {}) {
     const receiptWarning = !d.buyerNeverConfirmedReceipt ? '' : transaction.receivedConfirmedBy === 'SYSTEM'
       ? 'Hệ thống tự mở thời hạn kiểm hàng. Điều này không có nghĩa người mua đã nhận được hàng; cần kiểm tra thông tin giao nhận.'
       : 'Lịch sử đơn chưa ghi nhận việc người mua tự xác nhận nhận hàng. Quản trị viên cần đối chiếu thông tin giao nhận và lời trình bày của hai bên trước khi quyết định.';
-    return `${d.openedBy === 'SYSTEM' ? '<div class="note note-warning">Hồ sơ do hệ thống tự mở để bảo vệ tiền đang giữ, không phải lời khiếu nại và không quy lỗi cho bên nào.</div>' : ''}
+    return `${integrityNotice(transaction)}${d.openedBy === 'SYSTEM' ? '<div class="note note-warning">Hồ sơ do hệ thống tự mở để bảo vệ tiền đang giữ, không phải lời khiếu nại và không quy lỗi cho bên nào.</div>' : ''}
       ${receiptWarning ? `<div class="note note-danger">${esc(receiptWarning)}</div>` : ''}`;
   }
 
@@ -5481,13 +5506,34 @@ const App = (() => {
   }
 
   async function verifyTxChain(el) {
+    const epoch=state.sessionEpoch,hash=location.hash,box=$('#txChainResult');
     const r = await guard('txchain:' + el.dataset.id, el,
-      () => api(`/transactions/${encodeURIComponent(el.dataset.id)}/logs/verify`));
-    const box = $('#txChainResult');
-    if (!box || !r) return;
-    box.innerHTML = r.valid
+      () => api(`/transactions/${encodeURIComponent(el.dataset.id)}/logs/verify`,{method:'POST',body:{}}));
+    if (!box?.isConnected || !r || epoch!==state.sessionEpoch || hash!==location.hash) return;
+    box.innerHTML = r.valid===true&&!r.integrityHold?.active&&r.moneyBlocked!==true&&Number.isSafeInteger(r.checkedCount)&&r.checkedCount>=0
       ? `<div class="note note-success">${ico('shield-check', 18)}<span>Lịch sử đơn khớp — đã kiểm tra ${esc(r.checkedCount)} bản ghi.</span></div>`
-      : `<div class="note note-danger">${ico('triangle-alert', 18)}<span>Phát hiện lịch sử đơn không khớp tại mốc #${esc(r.invalidLogId)}.</span></div>`;
+      : r.valid===false||r.integrityHold?.active||r.moneyBlocked===true?`<div class="note note-danger" role="alert">${ico('triangle-alert', 18)}<span>${r.integrityHold?.active?'Dữ liệu đơn chưa khớp. Enclave đã tạm dừng chuyển tiền và hoàn tiền của đơn này để kiểm tra.':'Phát hiện lịch sử đơn chưa khớp.'}${esc(integrityPosition(r))}</span></div>`:'<div class="note note-warning" role="status">Chưa nhận được kết quả kiểm tra đầy đủ. Hãy kiểm tra lại sau.</div>';
+    if(r.integrityHold?.active){
+      const currentAction=$('.action-box');
+      if(currentAction){currentAction.classList.add('idle');currentAction.innerHTML=`<h3>Hành động hiện tại</h3>${integrityNotice(r)}`;}
+      const heldMoney=$('.escrow-box');
+      if(heldMoney)heldMoney.outerHTML=escrowBox({integrityHold:r.integrityHold,escrowStatus:r.escrowStatus});
+      const amount=$('[data-tx-value]'),amountLabel=$('[data-tx-value-label]'),status=$('[data-tx-status]');
+      if(amount)amount.textContent='Đang đối chiếu';
+      if(amountLabel)amountLabel.textContent='Giá trị cần đối chiếu';
+      if(status&&!status.querySelector('.tx-hold-tag'))status.insertAdjacentHTML('beforeend','<span class="tag tag-danger tx-hold-tag">Đang kiểm tra dữ liệu</span>');
+      $('#txPage .steps')?.querySelectorAll('.step.current').forEach(step=>{step.classList.remove('current');step.classList.add('pending');});
+      const progress=$('.tx-progress-card');
+      if(progress){
+        progress.dataset.state='held';
+        const note=progress.querySelector('.tx-progress-note');
+        if(note)note.textContent='Đơn đang được kiểm tra dữ liệu; các bước xử lý tiền đã tạm dừng.';
+        progress.querySelectorAll('.tx-milestone.current').forEach(step=>{
+          step.classList.remove('current');step.classList.add('pending');step.dataset.state='pending';step.removeAttribute('aria-current');
+        });
+        progress.querySelectorAll('.steps .step.current').forEach(step=>{step.classList.remove('current');step.classList.add('pending');});
+      }
+    }
   }
 
 
@@ -5695,9 +5741,9 @@ const App = (() => {
           </div>
 
           <div class="money-strip">
-            <div><span>Số tiền</span><b>${money(t.amount || 0)}</b></div>
+            <div><span>Số tiền</span><b>${t.integrityHold?.active?'Đang đối chiếu':money(t.amount || 0)}</b></div>
     
-            <div><span>${open?'Tiền đang giữ để xử lý':'Tiền của đơn'}</span><b>${money(t.amount || 0)}</b></div>
+            <div><span>${open?'Tiền đang giữ để xử lý':'Tiền của đơn'}</span><b>${t.integrityHold?.active?'Đang đối chiếu':money(t.amount || 0)}</b></div>
     
           </div>
 
@@ -5714,7 +5760,7 @@ const App = (() => {
           <div class="row">
             ${open && (!d.adminId || d.adminId === state.user.id) ? `
               <button class="btn btn-sm" data-act="admin-claim-dispute" data-id="${esc(d.id)}">${d.adminId ? 'Xem chi tiết hồ sơ đang xử lý' : 'Nhận xử lý và xem địa chỉ giao hàng'}</button>
-              ${d.adminId===state.user.id?`<button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Xem xét hoàn ${money(t.amount || 0)} cho người mua</button>
+              ${d.adminId===state.user.id&&!t.integrityHold?.active?`<button class="btn btn-sm" data-act="admin-refund" data-id="${esc(d.id)}">${ico('rotate-ccw', 15)} Xem xét hoàn ${money(t.amount || 0)} cho người mua</button>
               <button class="btn btn-primary btn-sm" data-act="admin-release" data-id="${esc(d.id)}">${ico('banknote', 15)} Xem xét chuyển ${money(t.amount || 0)} cho người bán</button>
               <button class="btn btn-sm" data-act="admin-more" data-id="${esc(d.id)}">Yêu cầu bổ sung thông tin</button>`:''}
             ` : open ? '<span class="muted small">Hồ sơ đang do quản trị viên khác phụ trách. Bạn không thể quyết định trả tiền cho hồ sơ này.</span>' : `<span class="muted small">Đã xử lý lúc ${fmtDateTime(d.resolvedAt)}</span>`}
@@ -5989,6 +6035,7 @@ const App = (() => {
     SIMULATED_CARRIER_ARRIVED: 'Đơn hàng đã đến điểm giao (mô phỏng)',
     SIMULATED_SHIPMENT_STOPPED: 'Tạm dừng vận chuyển mô phỏng',
     BUYER_RECEIVED_PACKAGE: 'Người mua đã nhận hàng',
+    ORDER_INTEGRITY_HOLD: 'Tạm dừng đơn để đối chiếu dữ liệu',
     ESCROW_RELEASED: 'Đã chuyển tiền cho người bán',
     DISPUTE_OPENED: 'Mở tranh chấp',
     DISPUTE_CLAIMED: 'Quản trị viên nhận xử lý hồ sơ',
@@ -6075,14 +6122,14 @@ const App = (() => {
     const show=(kind,message)=>{if(!current())return;box.hidden=false;box.className='note mb-4'+(kind==='err'?' note-danger':kind==='ok'?' note-success':kind==='warn'?' note-warning':'');box.setAttribute('role',kind==='err'?'alert':'status');box.textContent=message;};
     show('info','Đang kiểm tra lịch sử đơn hàng…');
     const result = await guard('verify', btn, async()=>{
-      try{return await api(`/transactions/${encodeURIComponent(txId)}/logs/verify`);}
+      try{return await api(`/transactions/${encodeURIComponent(txId)}/logs/verify`,{method:'POST',body:{}});}
       catch(error){if(!error.silent)show('warn','Chưa kiểm tra được lịch sử. '+error.message);return null;}
     });
     if (!result||!current()) return;
     // Loading the rows must not erase the separate, persistent verification result.
     await loadAudit(txId);
-    if(result.valid===true&&Number.isSafeInteger(result.checkedCount)&&result.checkedCount>=0)show('ok',`Lần kiểm tra này: ${result.checkedCount} bản ghi hiện có khớp với chuỗi băm của đơn. Kết quả này không xác nhận chất lượng hàng hay việc giao nhận thực tế.`);
-    else if(result.valid===false)show('err',`Lịch sử có điểm không khớp${result.invalidLogId!=null?' tại bản ghi #'+result.invalidLogId:''}. Cần quản trị viên kiểm tra; đây không phải kết luận về bên mua hay bên bán.`);
+    if(result.valid===true&&!result.integrityHold?.active&&result.moneyBlocked!==true&&Number.isSafeInteger(result.checkedCount)&&result.checkedCount>=0)show('ok',`Lần kiểm tra này: ${result.checkedCount} bản ghi hiện có khớp với chuỗi băm của đơn. Kết quả này không xác nhận chất lượng hàng hay việc giao nhận thực tế.`);
+    else if(result.valid===false||result.integrityHold?.active||result.moneyBlocked===true)show('err',(result.integrityHold?.active?'Dữ liệu đơn chưa khớp với lịch sử. Enclave đã tạm dừng chuyển tiền và hoàn tiền của riêng đơn này để kiểm tra. Đơn không tự mở lại.':'Lịch sử có điểm không khớp. Cần quản trị viên kiểm tra; đây không phải kết luận về bên mua hay bên bán.')+integrityPosition(result));
     else show('warn','Chưa nhận được kết quả kiểm tra đầy đủ. Hãy kiểm tra lại sau.');
   }
 
