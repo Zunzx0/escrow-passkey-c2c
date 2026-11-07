@@ -36,7 +36,7 @@ const ok=(v,m)=>{assert.ok(v,m);console.log('  ✅ '+m);n++;};
  // Exercise actual helper bodies with a controlled stale rejection.
  const source = require('fs').readFileSync(require('path').join(__dirname, '../../public/js/app.js'), 'utf8');
  for (const [fn, field] of [['refreshWallet', 'wallet'], ['refreshSellerRequest', 'sellerRequest']]) {
-   const body = source.match(new RegExp('async function ' + fn + '\\(\\) \\{[\\s\\S]*?\\n  \\}'));
+   const body = source.match(new RegExp('async function ' + fn + '\\([^)]*\\) \\{[\\s\\S]*?\\n  \\}'));
    assert.ok(body, 'Actual helper function found');
    let reject; const promise = new Promise((_, r) => { reject = r; });
    const state = { sessionEpoch: 1, token: 'A', user: {id:'A',role:'BUYER'}, [field]: {owner:'A'} };
