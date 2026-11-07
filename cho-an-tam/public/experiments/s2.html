@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <meta name="robots" content="noindex,nofollow">
+  <title>Enclave — Thực nghiệm bảo vệ giao dịch</title>
+  <link rel="stylesheet" href="/experiments/s2.css">
+  <script src="/js/simplewebauthn-browser.js" defer></script>
+  <script src="/experiments/s2.js" defer></script>
+</head>
+<body>
+  <main>
+    <a class="brand" href="/">enclave</a>
+    <section class="card">
+      <p class="eyebrow">THỰC NGHIỆM 2 · SỐ DƯ MÔ PHỎNG</p>
+      <h1>Kiểm tra phiếu xác nhận giao dịch</h1>
+      <p>Chọn hai đơn của bạn đang chờ chuyển tiền. Xác nhận Passkey cho đơn A, sau đó dùng script để thử tráo phiếu sang B và phát lại yêu cầu.</p>
+      <form id="orders">
+        <label for="order-a">Đường dẫn đơn A</label>
+        <input id="order-a" name="order-a" type="url" required autocomplete="off" placeholder="https://enclave.id.vn/#/tx/…">
+        <label for="order-b">Đường dẫn đơn B</label>
+        <input id="order-b" name="order-b" type="url" required autocomplete="off" placeholder="https://enclave.id.vn/#/tx/…">
+        <button id="check" type="submit">Kiểm tra hai đơn</button>
+      </form>
+      <div id="details" hidden>
+        <p id="account"></p>
+        <div class="order"><strong>Đơn A</strong><p id="summary-a"></p></div>
+        <div class="order"><strong>Đơn B</strong><p id="summary-b"></p></div>
+        <p class="notice">Script sẽ thử yêu cầu sai trước, rồi dùng đúng phiếu để chuyển tiền của <strong>đơn A</strong> cho người bán. Đây là thao tác có hiệu lực trên website.</p>
+        <label class="consent"><input id="consent" type="checkbox">Tôi dùng hai đơn thực nghiệm với số dư mô phỏng và đồng ý thực hiện đối chứng chuyển tiền đơn A.</label>
+        <button id="prepare" type="button" disabled>Xác nhận Passkey cho đơn A</button>
+      </div>
+      <div id="ready" hidden>
+        <p class="notice">Phiếu đã sẵn sàng. Tiền chưa được chuyển ở bước này. Sao chép gói xác nhận, dán vào script rồi chạy trong thời hạn hiển thị.</p>
+        <p id="expiry"></p>
+        <button id="copy" type="button">Sao chép gói xác nhận</button>
+        <p class="small">Gói chứa phiên và phiếu dùng một lần. Chỉ dán vào script thực nghiệm trên máy của bạn; không gửi vào chat hoặc đưa vào ảnh báo cáo.</p>
+      </div>
+      <p id="status" role="status" aria-live="polite">Đăng nhập Enclave bằng trình duyệt này trước khi kiểm tra hai đơn.</p>
+      <a href="/#/orders">Quay lại giao dịch</a>
+    </section>
+  </main>
+</body>
+</html>
