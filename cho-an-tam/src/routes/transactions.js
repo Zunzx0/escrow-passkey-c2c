@@ -5,6 +5,7 @@ const { generateAuthenticationOptions, verifyAuthenticationResponse:verifyAssert
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth, requireWallet, requireRole } = require('../lib/auth');
 const { appendAuditLog, verifyChain } = require('../lib/hash');
+const integrity = require('../lib/orderIntegrity');
 const { AppError, ConflictError } = require('../lib/errors');
 async function verifyAuthenticationResponse(options){
   try{return await verifyAssertion(options);}
@@ -118,6 +119,8 @@ function serializeTxn(t) {
 
 async function viewTxn(t,user) {
   const result=serializeTxn(t);
+  result.integrityHold=await integrity.getHold(db,t.id);
+  if(result.integrityHold){result.canInspect=false;result.canBuyerRelease=false;}
   const allowed=user&&(t.buyer_id===user.id||(t.seller_id===user.id&&!['CREATED','CANCELLED'].includes(t.status)&&t.escrow_status!=='NONE'));
   result.shipping=allowed?serializeShipping(await loadShipping(t.id)):null;
   // Photos the buyer saw at LOCK (frozen snapshot), or the live gallery while still a draft.
@@ -402,6 +405,7 @@ router.post('/:id/secure', requireAuth, requireWallet, async (req, res, next) =>
     await db.transaction(async () => {
       if(await checkIdempotency(buyerLegKey,fingerprint))return;
       const current=await loadTxnOr404(txn.id);
+      await integrity.assertOrderIntegrity(db,current.id);
       await assertLockReady(current,req.user);
       const context=await buildAuthorizationContext(current,ACTIONS.LOCK,req.user.sessionId);
       const expected=contextDigest(context).toString('hex');
@@ -600,6 +604,7 @@ router.post('/:id/wait-confirm',requireAuth,async(req,res,next)=>{
 // tự chèn, nên đổi thứ tự sẽ đổi giá trị băm. Đừng sắp xếp lại.
 async function assertLockReady(txn,user) {
   assertOwnership(txn,user,['BUYER']);
+  await integrity.assertNotHeld(db,txn.id);
   await require('../lib/accountSecurity').assertMoneyAllowed(user.id,ACTIONS.LOCK);
   if(!await loadShipping(txn.id))throw new AppError(400,'SHIPPING_REQUIRED','Hãy bổ sung thông tin nhận hàng trước khi thanh toán.');
   if((txn.draft_expires_at||afterHours(txn.created_at,orderPolicy().draftHours))<=nowIso())throw new AppError(409,'DRAFT_EXPIRED','Đơn nháp đã hết hạn. Hãy tạo đơn mới.');
@@ -796,6 +801,7 @@ router.post('/:id/release',requireAuth,async(req,res,next)=>{
     await db.transaction(async()=>{
       const txn=await loadTxnOr404(req.params.id);
       assertOwnership(txn,req.user,['BUYER']);
+      await integrity.assertOrderIntegrity(db,txn.id);
       const replay=await db.prepare('SELECT request_id FROM wallet_entries WHERE idempotency_key=?').get(`release:${txn.id}:debit`);
       if(txn.status==='COMPLETED'&&replay?.request_id===requestId){
         completed=txn;
@@ -919,6 +925,7 @@ async function cancelOrder(req,{ seller=false } = {}) {
   await db.transaction(async()=>{
     const txn=await loadTxnOr404(req.params.id);
     assertOwnership(txn,req.user,[seller?'SELLER':'BUYER']);
+    await integrity.assertOrderIntegrity(db,txn.id);
     const reason=seller?'seller_reject':'buyer_cancel';
     if(txn.status==='CANCELLED'&&txn.cancel_reason===reason){
       result=txn;
@@ -1024,7 +1031,8 @@ router.get('/:id/logs', requireAuth, async (req, res, next) => {
         action: l.action,
         oldStatus: l.old_status,
         newStatus: l.new_status,
-        eventData: JSON.parse(l.event_data || '{}'),
+        eventData: (()=>{try{return JSON.parse(l.event_data||'{}');}catch{return null;}})(),
+        eventDataMalformed: (()=>{try{JSON.parse(l.event_data||'{}');return false;}catch{return true;}})(),
         previousHash: l.previous_hash,
         currentHash: l.current_hash,
         createdAt: l.created_at,
@@ -1039,10 +1047,25 @@ router.get('/:id/logs/verify', requireAuth, async (req, res, next) => {
   try {
     const txn = await loadTxnOr404(req.params.id);
     assertOwnership(txn, req.user, ['BUYER', 'SELLER', 'ADMIN']);
-    res.json(await verifyChain(db, txn.id));
+    res.json(await db.transaction(()=>integrity.inspectOrder(db,txn.id))());
   } catch (e) {
     next(e);
   }
+});
+
+// Verification can create a persistent incident hold. Keep this authenticated
+// operation POST; the existing GET remains a read-only diagnostic endpoint.
+router.post('/:id/logs/verify',requireAuth,async(req,res,next)=>{
+  try{
+    const txn=await loadTxnOr404(req.params.id);
+    assertOwnership(txn,req.user,['BUYER','SELLER','ADMIN']);
+    res.json(await integrity.verifyAndHold(db,txn.id,req.user.id,req));
+  }catch(error){next(error);}
+});
+
+router.use(async(error,req,res,next)=>{
+  try{await integrity.preserveIntegrityFailure(error,req);next(error);}
+  catch(persistenceError){next(persistenceError);}
 });
 
 module.exports = router;

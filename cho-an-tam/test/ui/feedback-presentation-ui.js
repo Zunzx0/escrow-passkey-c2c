@@ -165,17 +165,17 @@ async function main(){
   let finishVerify;
   p=await wallet({hash:'#/audit/feedback-order',extra:{
     'GET /api/transactions/feedback-order/logs':()=>json(200,{logs:[{id:1,action:'ESCROW_LOCKED',createdAt:now,currentHash:'abc',previousHash:'genesis'}]}),
-    'GET /api/transactions/feedback-order/logs/verify':()=>json(200,{valid:true,checkedCount:1}),
+    'POST /api/transactions/feedback-order/logs/verify':()=>json(200,{valid:true,checkedCount:1}),
   }});
   try{
     await click(p,'audit-verify');const box=p.d.getElementById('auditVerification');
     ok(!box.hidden&&box.classList.contains('note-success')&&/1 bản ghi/.test(box.textContent),'audit verification has a persistent inline result beside the history');
     ok(!p.toasts().length&&!result(p)&&p.d.querySelector('.log-row'),'history/verification do not open automatic popups or disappear with a toast');
-    p.routes['GET /api/transactions/feedback-order/logs/verify']=()=>json(200,{valid:false,invalidLogId:'<script>bad</script>'});await click(p,'audit-verify');
-    ok(box.classList.contains('note-danger')&&box.textContent.includes('<script>bad</script>')&&!box.querySelector('script'),'an invalid history result is persistent and safely rendered as text');
-    p.routes['GET /api/transactions/feedback-order/logs/verify']=()=>json(503,{error:'TEMPORARY_ERROR'});await click(p,'audit-verify');
+    p.routes['POST /api/transactions/feedback-order/logs/verify']=()=>json(200,{valid:false,invalidLogId:'<script>bad</script>',invalidSequenceNo:3,expectedSequenceNo:3});await click(p,'audit-verify');
+    ok(box.classList.contains('note-danger')&&box.textContent.includes('mốc nhật ký 3')&&!box.querySelector('script'),'an invalid history result shows its sequence safely without treating a database ID as a position');
+    p.routes['POST /api/transactions/feedback-order/logs/verify']=()=>json(503,{error:'TEMPORARY_ERROR'});await click(p,'audit-verify');
     ok(box.classList.contains('note-warning')&&/Chưa kiểm tra được/.test(box.textContent)&&!p.toasts().length,'network/server errors do not falsely classify the history as corrupted');
-    p.routes['GET /api/transactions/feedback-order/logs/verify']=()=>new Promise(resolve=>{finishVerify=resolve;});
+    p.routes['POST /api/transactions/feedback-order/logs/verify']=()=>new Promise(resolve=>{finishVerify=resolve;});
     await click(p,'audit-verify',20);const input=p.d.getElementById('auditTxId');input.value='another-order';input.dispatchEvent(new p.w.Event('input',{bubbles:true}));
     finishVerify(json(200,{valid:true,checkedCount:99}));await sleep(70);
     ok(box.hidden&&!/99/.test(box.textContent),'late verification for the previous input cannot be shown under a different order ID');

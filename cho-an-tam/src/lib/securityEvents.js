@@ -70,6 +70,8 @@ const EVENTS = {
   // Chủ ví chủ động bỏ ý định nạp PayPal chưa gửi thu tiền. Ghi ATOMIC cùng việc đóng request
   // (xem paypalPaymentStore.closeUncaptured), không đi qua logSecurityEvent best-effort.
   PAYPAL_REQUEST_ABANDONED: 'PAYPAL_REQUEST_ABANDONED',
+  ORDER_INTEGRITY_HOLD: 'ORDER_INTEGRITY_HOLD',
+  ORDER_INTEGRITY_BLOCKED: 'ORDER_INTEGRITY_BLOCKED',
 };
 
 // Mã lỗi của tầng ứng dụng -> loại sự kiện an toàn. Nhờ bảng này, việc ghi nhận nằm gọn ở
@@ -102,6 +104,8 @@ const ERROR_TO_EVENT = {
   INVALID_SIGNATURE: EVENTS.WEBHOOK_INVALID_SIGNATURE,
   WEBHOOK_CONFLICT: EVENTS.WEBHOOK_CONFLICT,
   PAYPAL_ABANDON_UNSAFE: EVENTS.INVALID_STATE,
+  ORDER_INTEGRITY_FAILURE: EVENTS.ORDER_INTEGRITY_BLOCKED,
+  ORDER_INTEGRITY_BLOCKED: EVENTS.ORDER_INTEGRITY_BLOCKED,
 };
 
 function sanitize(detail) {

@@ -35,11 +35,12 @@ async function main(){
   fs.copyFileSync(path.join(root,'test','helpers','dispute-reference-cases.js'),path.join(snapshot,'test','helpers','dispute-reference-cases.js'));
   fs.copyFileSync(path.join(root,'test','helpers','dispute-assignment-cases.js'),path.join(snapshot,'test','helpers','dispute-assignment-cases.js'));
   fs.copyFileSync(path.join(root,'test','helpers','dispute-review-cases.js'),path.join(snapshot,'test','helpers','dispute-review-cases.js'));
+  fs.copyFileSync(path.join(root,'test','helpers','order-integrity-cases.js'),path.join(snapshot,'test','helpers','order-integrity-cases.js'));
   const port=await availablePort();command('initdb.exe',['-D',data,'-U','enclave_order_test','-A','trust','--no-locale','--encoding=UTF8','--no-sync']);
   started=true;command('pg_ctl.exe',['-D',data,'-l',path.join(dir,'postgres.log'),'-o',`-h 127.0.0.1 -p ${port}`,'-w','start']);
   const admin=new Client({connectionString:`postgresql://enclave_order_test@127.0.0.1:${port}/postgres`});await admin.connect();try{await admin.query('CREATE DATABASE enclave_order_test');}finally{await admin.end();}
   const url=`postgresql://enclave_order_test@127.0.0.1:${port}/enclave_order_test`;await prepareLegacy(url);
-  const result=spawnSync(process.execPath,['test/order-money-spec-e2e.js','--run'],{cwd:snapshot,env:environment(url),windowsHide:true,encoding:'utf8',timeout:240000,maxBuffer:8*1024*1024});process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');assert.equal(result.status,0,'PostgreSQL real HTTP and DB suite');
+  const result=spawnSync(process.execPath,['test/order-money-spec-e2e.js','--run',...process.argv.slice(2)],{cwd:snapshot,env:environment(url),windowsHide:true,encoding:'utf8',timeout:240000,maxBuffer:8*1024*1024});process.stdout.write(result.stdout||'');process.stderr.write(result.stderr||'');assert.equal(result.status,0,'PostgreSQL real HTTP and DB suite');
   await verifyMigration(url);await require('./helpers/dispute-reference-pg-migration')({Client,url,source:path.join(snapshot,'src')});console.log('ORDER MONEY POSTGRES: PASS');
 }
 main().catch(e=>{console.error(e);process.exitCode=1;}).finally(()=>{if(started&&fs.existsSync(path.join(data,'postmaster.pid')))command('pg_ctl.exe',['-D',data,'-m','fast','-w','stop']);console.log('Dedicated PostgreSQL stopped; evidence temp directory '+dir);});

@@ -39,6 +39,9 @@ const OP_BY_AUDIT_ACTION = {
 
 async function appendAuditLog(db, { transactionId, actorId, action, oldStatus, newStatus, eventData }) {
   require('./faultInjection').maybeFail('before-audit-log', OP_BY_AUDIT_ACTION[action] || 'any');
+  const snapshot = await require('./orderIntegrity').captureAuditSnapshot(db, transactionId);
+  const recordedData = { ...(eventData || {}) };
+  if (snapshot) recordedData.integritySnapshot = snapshot;
   const last = await db
     .prepare(
       'SELECT sequence_no, current_hash FROM audit_logs WHERE transaction_id = ? ORDER BY sequence_no DESC LIMIT 1'
@@ -57,7 +60,7 @@ async function appendAuditLog(db, { transactionId, actorId, action, oldStatus, n
     action,
     oldStatus: oldStatus || null,
     newStatus: newStatus || null,
-    eventData: eventData || {},
+    eventData: recordedData,
     createdAt: new Date().toISOString(),
     previousHash,
   };
@@ -76,7 +79,7 @@ async function appendAuditLog(db, { transactionId, actorId, action, oldStatus, n
     action,
     oldStatus || null,
     newStatus || null,
-    JSON.stringify(eventData || {}),
+    JSON.stringify(recordedData),
     previousHash,
     currentHash,
     payload.createdAt
@@ -86,8 +89,9 @@ async function appendAuditLog(db, { transactionId, actorId, action, oldStatus, n
 }
 
 /**
- * Verify toàn bộ chuỗi hash của một transaction theo id ASC.
- * Trả về { valid: true } hoặc { valid: false, invalidLogId } — đúng UC11 (13_diagrams.md).
+ * Verify theo sequence_no tăng dần (UC16). invalidLogId là khóa bản ghi CSDL;
+ * invalidSequenceNo là mốc đang quan sát trong chuỗi, không phải ID của bản ghi
+ * gốc đã bị xóa. expectedSequenceNo giúp diễn giải một khoảng đứt thứ tự.
  */
 async function verifyChain(db, transactionId) {
   const logs = await db
@@ -100,9 +104,18 @@ async function verifyChain(db, transactionId) {
     // Số thứ tự đứt quãng là dấu hiệu có bản ghi bị chèn thêm hoặc bị xoá ở giữa chuỗi,
     // kể cả khi kẻ can thiệp đã tính lại liên kết băm cho phần còn lại.
     if (log.sequence_no !== expectedSequence) {
-      return { valid: false, invalidLogId: log.id, reason: 'SEQUENCE_BROKEN' };
+      return { valid: false, invalidLogId: log.id, invalidSequenceNo: log.sequence_no,
+        expectedSequenceNo: expectedSequence, reason: 'SEQUENCE_BROKEN' };
     }
 
+    let eventData;
+    try {
+      eventData = JSON.parse(log.event_data || '{}');
+      if (!eventData || typeof eventData !== 'object' || Array.isArray(eventData)) throw new Error('Invalid audit event');
+    } catch {
+      return { valid: false, invalidLogId: log.id, invalidSequenceNo: log.sequence_no,
+        expectedSequenceNo: expectedSequence, reason: 'MALFORMED_EVENT_DATA' };
+    }
     const payload = {
       transactionId: log.transaction_id,
       sequenceNo: log.sequence_no,
@@ -110,14 +123,15 @@ async function verifyChain(db, transactionId) {
       action: log.action,
       oldStatus: log.old_status || null,
       newStatus: log.new_status || null,
-      eventData: JSON.parse(log.event_data || '{}'),
+      eventData,
       createdAt: log.created_at,
       previousHash: expectedPrevious,
     };
     const recomputed = sha256Hex(canonicalJson(payload));
 
     if (log.previous_hash !== expectedPrevious || recomputed !== log.current_hash) {
-      return { valid: false, invalidLogId: log.id, reason: 'HASH_MISMATCH' };
+      return { valid: false, invalidLogId: log.id, invalidSequenceNo: log.sequence_no,
+        expectedSequenceNo: expectedSequence, reason: 'HASH_MISMATCH' };
     }
     expectedPrevious = log.current_hash;
     expectedSequence += 1;

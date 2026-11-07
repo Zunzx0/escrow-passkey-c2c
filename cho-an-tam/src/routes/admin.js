@@ -5,6 +5,7 @@ const { generateAuthenticationOptions, verifyAuthenticationResponse:verifyAssert
 const { db, uuid, nowIso } = require('../db');
 const { requireAuth } = require('../lib/auth');
 const { appendAuditLog, verifyChain } = require('../lib/hash');
+const integrity = require('../lib/orderIntegrity');
 const { AppError } = require('../lib/errors');
 async function verifyAuthenticationResponse(options){
   try{return await verifyAssertion(options);}
@@ -98,17 +99,22 @@ function serializeTxn(t) {
     listingImage: t.listing_image || null,
     buyerName: t.buyer_name || null,
     sellerName: t.seller_name || null,
+    integrityHold:t.integrity_detected_at?integrity.publicHold({detected_at:t.integrity_detected_at,
+      reason_code:t.integrity_reason,invalid_log_id:t.integrity_invalid_log_id,details_json:t.integrity_details_json}):null,
   };
 }
 
 // Giao dịch kèm tên hai bên + ảnh sản phẩm, để màn hình xử lý tranh chấp của Admin
 // hiển thị đủ ngữ cảnh mà không phải gọi thêm API.
 const TXN_DETAIL = `
-  SELECT t.*, b.display_name AS buyer_name, s.display_name AS seller_name, l.image AS listing_image
+  SELECT t.*, b.display_name AS buyer_name, s.display_name AS seller_name, l.image AS listing_image,
+    h.detected_at AS integrity_detected_at,h.reason_code AS integrity_reason,h.invalid_log_id AS integrity_invalid_log_id,
+    h.details_json AS integrity_details_json
   FROM transactions t
   JOIN users b ON b.id = t.buyer_id
   JOIN users s ON s.id = t.seller_id
   LEFT JOIN listings l ON l.id = t.listing_id
+  LEFT JOIN order_integrity_holds h ON h.transaction_id=t.id
 `;
 
 async function loadTxnDetail(id) {
@@ -287,6 +293,7 @@ async function loadOpenDisputeForAdjudication(disputeId, actorId) {
   const txn = await db.prepare('SELECT * FROM transactions WHERE id = ?').get(dispute.transaction_id);
   if (!txn) throw new AppError(404, 'TRANSACTION_NOT_FOUND', 'Không tìm thấy giao dịch');
   assertIndependentAdjudicator(txn, actorId);
+  await integrity.assertNotHeld(db,txn.id);
   if (txn.status !== 'DISPUTED' || txn.escrow_status !== 'FROZEN') {
     throw new AppError(409, 'INVALID_STATE', 'Giao dịch phải ở DISPUTED + FROZEN');
   }
@@ -509,6 +516,7 @@ async function adjudicate(req,decision) {
       assertCaseAssignee(d,req.user.id);
       const t=await loadTxnDetail(d.transaction_id);
       assertIndependentAdjudicator(t,req.user.id);
+      await integrity.assertOrderIntegrity(db,t.id);
       return {
         dispute:d,current:t
       };
@@ -672,7 +680,8 @@ router.get('/transactions/:id/logs', async (req, res) => {
       action: l.action,
       oldStatus: l.old_status,
       newStatus: l.new_status,
-      eventData: JSON.parse(l.event_data || '{}'),
+      eventData: (()=>{try{return JSON.parse(l.event_data||'{}');}catch{return null;}})(),
+      eventDataMalformed: (()=>{try{JSON.parse(l.event_data||'{}');return false;}catch{return true;}})(),
       previousHash: l.previous_hash,
       currentHash: l.current_hash,
       createdAt: l.created_at,
@@ -681,8 +690,12 @@ router.get('/transactions/:id/logs', async (req, res) => {
 });
 
 router.get('/transactions/:id/logs/verify', async (req, res) => {
-  const result = await verifyChain(db, req.params.id);
+  const result = await db.transaction(()=>integrity.inspectOrder(db,req.params.id))();
   res.json(result);
+});
+router.post('/transactions/:id/logs/verify',async(req,res,next)=>{
+  try{res.json(await integrity.verifyAndHold(db,req.params.id,req.user.id,req));}
+  catch(error){next(error);}
 });
 
 // ---------- Chín bất biến của hệ thống ----------
@@ -701,6 +714,11 @@ router.get('/security-events', async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit || '100', 10) || 100, 500);
   const type = req.query.type ? String(req.query.type) : null;
   res.json({ events: await listSecurityEvents({ limit, type }) });
+});
+
+router.use(async(error,req,res,next)=>{
+  try{await integrity.preserveIntegrityFailure(error,req);next(error);}
+  catch(persistenceError){next(persistenceError);}
 });
 
 module.exports = router;
