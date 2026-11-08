@@ -2,7 +2,7 @@
 // DOM and synthetic API only; no real clipboard, account or Passkey operation.
 const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
 const { test } = require('node:test'), { JSDOM } = require('jsdom');
-const ROOT = path.join(__dirname, '../../public/experiments');
+const ROOT = path.join(__dirname, '../fixtures/experiment-browser');
 const ID = '11111111-1111-4111-8111-111111111111';
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 async function until(fn) { for (let i = 0; i < 100; i++) { if (fn()) return; await sleep(5); } throw new Error('UI did not settle.'); }
