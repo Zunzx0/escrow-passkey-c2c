@@ -2,7 +2,7 @@
 // Browser logic only: synthetic fetch, clipboard and authenticator; no real Passkey.
 const fs=require('node:fs'),path=require('node:path'),assert=require('node:assert/strict');
 const {test}=require('node:test'),{JSDOM}=require('jsdom');
-const ROOT=path.join(__dirname,'../../public/experiments');
+const ROOT=path.join(__dirname,'../fixtures/experiment-browser');
 const A='11111111-1111-4111-8111-111111111111',B='22222222-2222-4222-8222-222222222222';
 const signature={response:{signature:'synthetic-native-response'}};
 const token='synthetic-browser-session-token',grant='synthetic-browser-grant';

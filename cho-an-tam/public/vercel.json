@@ -18,6 +18,7 @@
     { "source": "/", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
     { "source": "/index.html", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
     { "source": "/js/:path*", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
-    { "source": "/css/:path*", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] }
+    { "source": "/css/:path*", "headers": [{ "key": "Cache-Control", "value": "no-cache" }] },
+    { "source": "/experiments/:path*", "headers": [{ "key": "Cache-Control", "value": "no-store, max-age=0" }] }
   ]
 }

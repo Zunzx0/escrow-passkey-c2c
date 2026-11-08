@@ -5,6 +5,7 @@ const express = require('express');
 
 const { securityHeaders, assertSecretsConfigured, assertEnvironmentSafe } = require('./lib/security');
 const { RP_ID, ORIGIN } = require('./lib/webauthnConfig');
+const { blockPublicExperiments } = require('./lib/experimentSurface');
 
 // Kiểm cấu hình bí mật TRƯỚC khi nạp bất kỳ thứ gì dùng tới nó. Chạy tiếp với khoá ký mặc
 // định nguy hiểm hơn là dừng hẳn, vì khi đó mọi mã phiên đều giả mạo được mà hệ thống vẫn
@@ -79,6 +80,7 @@ if (process.env.TRUST_PROXY === '1') app.set('trust proxy', 1);
 
 app.disable('x-powered-by');
 app.use(securityHeaders({ enableHsts: process.env.ENABLE_HSTS === '1' }));
+app.use(blockPublicExperiments);
 app.use(corsAllowlist());
 app.use(express.json({ limit: '1mb' }));
 app.use('/api/passkeys',require('./lib/authOrigin').authOrigin);

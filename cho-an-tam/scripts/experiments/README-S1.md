@@ -1,4 +1,12 @@
-# Thực nghiệm 1 không dùng F12
+# Thực nghiệm S1 — đã đóng trang thu thập công khai
+
+Trang /experiments/s1.html không còn được phục vụ. Không hướng dẫn người dùng thường sao chép phiên đăng nhập từ website. Mã trang cũ được giữ dưới test/fixtures/experiment-browser, ngoài public/ và ngoài ảnh Docker vận hành. Công cụ thu thập thay thế phải được rà soát riêng về tài khoản thử nghiệm và ranh giới truy cập.
+
+Script Node còn được giữ làm mã thực nghiệm gửi yêu cầu; nó không tự lấy phiên trong trình duyệt và không còn có trang công khai để cấp gói mới. Ảnh và số liệu từ lần thực nghiệm đã thực hiện vẫn dùng được nếu mô tả đúng giả định bản sao phiên có kiểm soát. Không thay kết quả live bằng kiểm cách ly hoặc ghi thêm kết quả chưa quan sát.
+
+Gỡ trang không thu hồi các gói đã xuất. Sau khi kết thúc thực nghiệm, đăng xuất tài khoản thử nghiệm qua ứng dụng để thu hồi phiên tương ứng. Không gửi token, mật khẩu hoặc PIN qua chat.
+
+## Quy trình cũ đã ngừng — giữ để truy vết, không thực hiện trên bản công khai
 
 Trang chuẩn bị: https://enclave.id.vn/experiments/s1.html . Chỉ dùng được sau khi gói S1 được duyệt và phát hành. Người dùng đã đăng nhập Enclave trước; trang không hỏi mật khẩu và không xin phiếu chuyển tiền.
 

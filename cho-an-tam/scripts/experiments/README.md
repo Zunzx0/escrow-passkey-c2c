@@ -1,4 +1,12 @@
-# Thực nghiệm 2 trên website Enclave, không dùng DevTools
+# Công cụ thực nghiệm — đã đóng các trang xuất phiên và phiếu công khai
+
+Hai trang /experiments/s1.html và /experiments/s2.html cùng các tệp JS/CSS của chúng đã được đưa khỏi phần web phục vụ người dùng. Backend từ chối namespace /experiments bằng 404; thư mục public của Vercel không chứa bộ thu thập. Mã cũ còn dưới test/fixtures/experiment-browser chỉ để kiểm hồi quy cách ly và tái lập nghiên cứu, không được triển khai lên tên miền người dùng.
+
+Gói S2 trước đây chứa access token, phiếu RELEASE cho A và phản hồi WebAuthn đã ký. Đây là dữ liệu nhạy cảm; checkbox, thời hạn ngắn hoặc noindex không làm chúng thành dữ liệu công khai. Các script Node vẫn giữ làm mã gửi yêu cầu nhưng không tự lấy bí mật trình duyệt và không còn có trang công khai cấp gói mới. Chỉ tiếp tục luồng cần gói sau khi có công cụ thu thập riêng được rà soát; không tái mở trang cũ hoặc hạ ExecutionPolicy.
+
+Lõi kiểm quyền tiền giữ nguyên: ownership, phiên, Passkey/UV, phiếu một lần, ngữ cảnh, trạng thái, tính nguyên tử và bút toán. Giữ nguyên ảnh và số liệu đã thực nghiệm. Gỡ trang không thu hồi phiên hoặc phiếu đã xuất; sau thực nghiệm đăng xuất tài khoản thử nghiệm qua ứng dụng để thu hồi phiên tương ứng.
+
+## Quy trình cũ đã ngừng — giữ để truy vết, không thực hiện trên bản công khai
 
 Trang chuẩn bị dự kiến: `https://enclave.id.vn/experiments/s2.html`. Chỉ có sau khi bản giao diện này được duyệt và phát hành. Chế độ này sử dụng phiên thật và Passkey thật của người mua. Script gọi duy nhất `https://api.enclave.id.vn`, trên cùng hai đơn được chọn trên website.
 
